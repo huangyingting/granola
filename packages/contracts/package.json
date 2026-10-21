@@ -9,7 +9,8 @@
     "./content": "./dist/content.js",
     "./desktop": "./dist/desktop.js",
     "./recording": "./dist/recording.js",
-    "./uploads": "./dist/uploads.js"
+    "./uploads": "./dist/uploads.js",
+    "./realtime": "./dist/realtime.js"
   },
   "dependencies": {
     "zod": "^4.1.0"

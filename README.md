@@ -90,6 +90,10 @@ Real Windows audio behavior still requires the hardware checks below.
   seconds buffered per source, and preview-only failure on overrun. Raw PCM is
   excluded from normal status/renderer observers. This does **not** enable live
   Azure recognition; authenticated streaming and its consent UI remain open.
+- An internal Azure streaming adapter using the official pinned Speech SDK in
+  isolated workers, with versioned partial/final/discard events and bounded SDK
+  input/replay. A synthetic live Azure probe is available; the server WebSocket,
+  usage-authorized live leases and desktop consent flow are **not implemented yet**.
 - Revision-pinned transcript pages backed by indexed immutable PostgreSQL segments.
   Synchronization atomically caches the first bounded page with the document and
   cursor; the desktop loads additional pages on demand into its encrypted cache.
@@ -544,7 +548,44 @@ Its default command runs the API in OIDC mode; override the command with
 your deployment secret manager/environment. The development Compose file
 deliberately starts only PostgreSQL, not an unauthenticated public API.
 
-### Azure end-to-end probe
+### Internal Azure streaming adapter
+
+`@windows-ai-notes/ai/realtime` accepts validated native 50 ms frames for a
+single recording/preview/track/capture epoch. It rejects duplicate, discontinuous
+or changed sources before forwarding audio. Recognition events carry a provider
+epoch, stable segment ID, increasing version and absolute source sample range.
+Final corrections retain identity; explicit NoMatch discards clear provisional
+text. Source samples are not speaker identities or reconstructed wall-clock times.
+Live results must remain provisional evidence, not overwrite manually edited
+transcripts or replace canonical persisted-recording transcription.
+
+The official `microsoft-cognitiveservices-speech-sdk` is pinned to `1.52.0`.
+Each source runs in a separate Node worker with only its Speech key/region and
+language, empty inherited environment, captured diagnostics and bounded V8 heaps.
+Telemetry and audio logging are disabled. Only validated final/NoMatch progress
+releases the pinned SDK's replay credit, rounded down to its 100 ms chunks.
+Partial hypotheses and transport sends do **not** release credit. There are at
+most five seconds of unfinalized PCM, 32 unacknowledged worker results and 6,000
+final-revision entries per provider session. Result consumers must be synchronous
+and bounded; the adapter does not queue content for a slow network/UI consumer.
+
+**This conservative five-second unfinalized limit can stop preview during long
+phrases or silence if Azure does not finalize promptly, even while partials
+continue arriving.** Idle input or unresolved audio older than five seconds also
+stops the session. Startup and EOF drain each have ten-second deadlines; media
+and wall-clock session durations are capped at ten minutes. Failure, cancellation,
+diagnostics or disconnect (including during EOF drain) terminates the isolated
+worker; the adapter does not automatically reconnect/replay. A normal EOF receipt
+reports submitted media units only, not Azure invoice duration, billing
+acknowledgment or exactly-once processing. Failed/unknown attempts must remain
+conservative usage holds when the authorized live-session ledger is integrated.
+
+This provider module has no server route or renderer access. Native transport,
+server authentication/source leases, account reservation/settlement and explicit
+live-cloud consent still need end-to-end wiring. Local encrypted capture must
+remain independent of a stopped preview.
+
+### Azure end-to-end probes
 
 This opt-in command makes paid calls to the configured services using a generated
 English speech sample and synthetic meeting notes. It uses Azure Speech TTS only
@@ -561,6 +602,24 @@ The probe creates and removes its own isolated database schema, holds the WAV in
 memory, and prints only pass/fail counts and token usage, never credentials or
 provider response bodies. An English synthetic end-to-end run has passed; this
 does not establish Chinese recognition quality or real-meeting accuracy.
+
+The separate live probe makes paid Speech TTS and streaming STT calls, but needs
+neither PostgreSQL nor OpenAI requests:
+
+```sh
+pnpm azure:live-probe --env-file ../ReadWise/.env
+```
+
+It streams only a synthetic “Orion launch approved” sample plus trailing silence,
+at most five seconds in total, paced in 50 ms frames. It bounds the TTS response
+and overall deadline, checks source/sample identities and increasing result
+versions, requires the expected final subject and normal media receipt, and
+waits for worker cleanup. Audio stays in memory; credentials/provider bodies are
+not printed. An English synthetic live run passed with 3,200 ms of media; it is
+not acceptance evidence for uninterrupted meetings, Chinese, acoustic conditions
+or production reliability. Both probes import only the six approved Azure fields
+from the specified file and are disabled in production mode. They are deployment
+diagnostics, not account-authorized application requests or invoice accounting.
 
 ## Requirements and setup
 
@@ -720,8 +779,11 @@ TEST_DATABASE_URL=postgresql://notes:local-development-only@127.0.0.1:55432/note
 ```
 
 Without `TEST_DATABASE_URL`, database integration tests are explicitly skipped.
-Provider unit tests use labeled fixtures and mocked transports. Live Azure calls
-run only through the opt-in probe above, never automatically in public CI.
+Provider tests use labeled fixtures and mocked transports. Streaming tests also
+run the actual pinned SDK against a synthetic loopback-only WebSocket service,
+checking PCM bytes, EOF drain, final/NoMatch replay credit, partial-only limits and
+disconnect cleanup without reconnect. Live Azure calls run only through the
+opt-in probes above, never automatically in public CI.
 
 ## Open P0 release gates
 

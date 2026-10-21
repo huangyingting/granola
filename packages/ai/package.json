@@ -6,10 +6,16 @@
   "exports": {
     ".": "./dist/index.js",
     "./config": "./dist/config.js",
+    "./realtime": "./dist/realtime.js",
     "./wav": "./dist/wav.js"
   },
   "dependencies": {
     "@windows-ai-notes/contracts": "workspace:*",
+    "microsoft-cognitiveservices-speech-sdk": "1.52.0",
     "zod": "^4.1.0"
+  },
+  "devDependencies": {
+    "@types/ws": "8.18.2",
+    "ws": "8.22.0"
   }
 }
