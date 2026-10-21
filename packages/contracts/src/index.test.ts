@@ -8,6 +8,7 @@ import {
   FrameDecoder,
   MAX_CONTROL_BYTES,
   type AudioRequest,
+  uploadChunkSchema,
 } from './index.js';
 
 const request: AudioRequest = {
@@ -121,5 +122,50 @@ describe('capture boundaries', () => {
     expect(
       audioEventSchema.safeParse({ event_type: 'recording.started' }).success,
     ).toBe(false);
+  });
+
+  it('binds bounded media replies to canonical WAV sizes, recording identity and final markers', () => {
+    const recording = randomUUID();
+    const chunk = {
+      format_version: 1,
+      recording_id: recording,
+      track_id: randomUUID(),
+      chunk_id: randomUUID(),
+      capture_epoch: randomUUID(),
+      sequence: 0,
+      sample_start: 0,
+      sample_count: 16,
+      sample_rate: 16_000,
+      channels: 1,
+      bits_per_sample: 16,
+      clock_start_ms: 0,
+      clock_end_ms: 1,
+      pcm_sha256: '0'.repeat(64),
+    };
+    const upload = { chunk, size_bytes: 76, sha256: '1'.repeat(64) };
+    expect(uploadChunkSchema.safeParse(upload).success).toBe(true);
+    expect(
+      uploadChunkSchema.safeParse({ ...upload, size_bytes: 32 }).success,
+    ).toBe(false);
+    const event = {
+      protocol_version: 1,
+      request_id: randomUUID(),
+      recording_id: recording,
+      event_type: 'recording.chunk_range',
+      payload: {
+        upload,
+        offset: 0,
+        data_base64: Buffer.alloc(76).toString('base64'),
+        end_of_chunk: true,
+      },
+    };
+    expect(audioEventSchema.safeParse(event).success).toBe(true);
+    for (const bad of [
+      { ...event, recording_id: randomUUID() },
+      { ...event, payload: { ...event.payload, offset: 1 } },
+      { ...event, payload: { ...event.payload, end_of_chunk: false } },
+      { ...event, payload: { ...event.payload, data_base64: '!invalid!' } },
+    ])
+      expect(audioEventSchema.safeParse(bad).success).toBe(false);
   });
 });

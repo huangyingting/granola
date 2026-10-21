@@ -43,10 +43,32 @@ public sealed class RecordingStore
                 t.SavedSamples, t.ActualDeviceId, t.Spec.Kind, t.Spec.CaptureScope, t.Spec.DeviceSelectionPolicy)).ToArray());
     }
 
+    public RecordingManifest Snapshot()
+    {
+        lock (gate)
+            return new RecordingManifest
+            {
+                FormatVersion = manifest.FormatVersion,
+                RecordingId = manifest.RecordingId,
+                CreatedAt = manifest.CreatedAt,
+                State = manifest.State,
+                Tracks = manifest.Tracks.Select(t => new TrackManifest
+                {
+                    Spec = t.Spec,
+                    ActualDeviceId = t.ActualDeviceId,
+                    SavedSamples = t.SavedSamples,
+                    ChunkIds = [.. t.ChunkIds]
+                }).ToList(),
+                Events = [.. manifest.Events]
+            };
+    }
+
     public void Transition(string state, string eventType, double clockMs, Guid? epoch = null, string? code = null)
     {
         lock (gate)
         {
+            if (manifest.Events.Count >= 10_000)
+                throw new AudioException("storage_limit", "The recording timeline reached its supported event limit.");
             manifest.State = state;
             manifest.Events.Add(new TimelineEvent(eventType, clockMs, epoch, code));
             SaveManifest();
@@ -59,6 +81,9 @@ public sealed class RecordingStore
         {
             if (manifest.State != "recording")
                 throw new AudioException("invalid_state", "Audio cannot be appended to an inactive recording.");
+            if (manifest.Tracks.Sum(t => t.ChunkIds.Count) >= 10_000)
+                throw new AudioException("storage_limit", "The recording reached its supported chunk count.");
+            RecordingArchive.ValidateChunk(metadata, pcm, RecordingId, metadata.ChunkId);
             var track = manifest.Tracks.Single(t => t.Spec.TrackId == metadata.TrackId);
             if (metadata.Sequence != track.ChunkIds.Count || metadata.SampleStart != track.SavedSamples)
                 throw new InvalidDataException("Chunk sequence or sample range is inconsistent.");
@@ -90,8 +115,7 @@ public sealed class RecordingStore
             var (_, plaintext) = EncryptedFile.Read(Path.Combine(directory, "manifest.enc"), recordingId, "manifest", protector);
             manifest = JsonSerializer.Deserialize<RecordingManifest>(plaintext, AudioJson.Options)
                 ?? throw new InvalidDataException("Missing recording manifest.");
-            if (manifest.FormatVersion != 1 || manifest.RecordingId != recordingId)
-                throw new InvalidDataException("Invalid recording manifest.");
+            RecordingArchive.ValidateManifest(manifest, recordingId);
         }
         catch (AudioException error) when (error.Code == "key_unavailable")
         {
@@ -115,14 +139,8 @@ public sealed class RecordingStore
             {
                 var (header, pcm) = EncryptedFile.Read(path, recordingId, "audio_chunk", protector);
                 var chunk = header.Chunk ?? throw new InvalidDataException("Missing chunk descriptor.");
-                if (chunk.FormatVersion != 1 || chunk.RecordingId != recordingId
-                    || Path.GetFileName(path) != chunk.ChunkId.ToString("D") + ".chunk"
-                    || chunk.SampleRate != 16_000 || chunk.Channels != 1 || chunk.BitsPerSample != 16
-                    || chunk.SampleCount is <= 0 or > PcmChunkWriter.MaxSamples
-                    || pcm.Length != chunk.SampleCount * 2
-                    || !double.IsFinite(chunk.ClockStartMs) || !double.IsFinite(chunk.ClockEndMs)
-                    || chunk.ClockStartMs < 0 || chunk.ClockEndMs < chunk.ClockStartMs
-                    || Convert.ToHexStringLower(SHA256.HashData(pcm)) != chunk.PcmSha256
+                RecordingArchive.ValidateChunk(chunk, pcm, recordingId, chunk.ChunkId);
+                if (Path.GetFileName(path) != chunk.ChunkId.ToString("D") + ".chunk"
                     || !manifest.Tracks.Any(t => t.Spec.TrackId == chunk.TrackId))
                     throw new InvalidDataException("Invalid chunk metadata or checksum.");
                 verified.Add(chunk);
@@ -170,6 +188,6 @@ public sealed class RecordingStore
         }
     }
 
-    private static bool IsDamagedFile(Exception error) =>
-        error is IOException or InvalidDataException or CryptographicException or JsonException or FormatException or ArgumentException;
+    internal static bool IsDamagedFile(Exception error) =>
+        error is IOException or InvalidDataException or CryptographicException or JsonException or FormatException or ArgumentException or UnauthorizedAccessException;
 }

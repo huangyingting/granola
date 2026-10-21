@@ -24,6 +24,12 @@ public sealed record RecoveryIssue(string Code, string Message);
 public sealed record RecoveryReport(string State, int VerifiedChunks, int RecoveredChunks, long TotalSamples, IReadOnlyList<RecoveryIssue> Issues);
 public sealed record SavedTrack(Guid TrackId, long SavedSamples, string DeviceId, string Kind, string CaptureScope, string DeviceSelectionPolicy);
 public sealed record RecordingStatus(string State, IReadOnlyList<SavedTrack> Tracks);
+public sealed record ArchiveTrack(TrackSpec Spec, string ActualDeviceId, long SavedSamples, int ChunkCount);
+public sealed record ManifestPage(int FormatVersion, Guid RecordingId, DateTimeOffset CreatedAt, string State,
+    IReadOnlyList<ArchiveTrack> Tracks, int EventOffset, int EventCount, IReadOnlyList<TimelineEvent> Events, bool HasMore);
+public sealed record UploadChunk(ChunkMetadata Chunk, int SizeBytes, string Sha256);
+public sealed record ChunkPage(Guid TrackId, int SequenceStart, IReadOnlyList<UploadChunk> Chunks, bool HasMore);
+public sealed record ChunkRange(UploadChunk Upload, int Offset, string DataBase64, bool EndOfChunk);
 
 public sealed class TrackManifest
 {

@@ -18,6 +18,7 @@ if (args.Length != 2 || args[0] != "--data-dir" || !Path.IsPathFullyQualified(ar
 var root = Path.GetFullPath(args[1]);
 FileStream? hostLock = null;
 var protector = new DpapiKeyProtector();
+var archive = new RecordingArchive(root, protector);
 CaptureSession? session = null;
 await using var input = Console.OpenStandardInput();
 await using var output = Console.OpenStandardOutput();
@@ -64,6 +65,18 @@ try
             {
                 case "list_devices":
                     await Emit("devices", new { Devices = DeviceCatalog.List() }, request.RequestId);
+                    break;
+                case "get_recording":
+                    await Emit("recording.manifest", archive.Describe(request.RecordingId!.Value, request.Offset!.Value,
+                        Snapshot(request.RecordingId.Value)), request.RequestId, request.RecordingId);
+                    break;
+                case "list_recording_chunks":
+                    await Emit("recording.chunks", archive.List(request.RecordingId!.Value, request.TrackId!.Value,
+                        request.SequenceStart!.Value, Snapshot(request.RecordingId.Value)), request.RequestId, request.RecordingId);
+                    break;
+                case "read_chunk":
+                    await Emit("recording.chunk_range", archive.Read(request.RecordingId!.Value, request.ChunkId!.Value,
+                        request.Offset!.Value, request.Length!.Value, Snapshot(request.RecordingId.Value)), request.RequestId, request.RecordingId);
                     break;
                 case "inspect_recording":
                     if (session is not null && session.Store.RecordingId == request.RecordingId && session.Store.Status().State is "recording" or "paused")
@@ -159,3 +172,5 @@ return exitCode;
 
 Task Emit(string eventType, object value, Guid? requestId = null, Guid? recordingId = null) =>
     FrameCodec.WriteAsync(output, new AudioEvent(1, requestId, recordingId, eventType, value));
+
+RecordingManifest? Snapshot(Guid id) => session?.Store.RecordingId == id ? session.Store.Snapshot() : null;

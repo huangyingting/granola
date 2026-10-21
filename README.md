@@ -30,8 +30,11 @@ Real Windows audio behavior still requires the hardware checks below.
   recovery inspection. Missing/truncated/tampered chunks, gaps in sample ranges,
   unfinished files, unavailable keys, and unsealed tails are reported separately.
   Authenticated chunks committed before a manifest update are rediscovered.
-- Deterministic in-memory PCM-to-WAV reconstruction for subsequent upload work.
-  No plaintext audio temporary files are created.
+- Authenticated manifest/timeline and per-track chunk pagination, deterministic
+  canonical WAV descriptors and checksums, and bounded 32 KiB WAV range export
+  through the helper's framed protocol. The reusable main-process client streams
+  and verifies ranges without forwarding media to UI/status observers. No
+  plaintext audio temporary files are created. Cloud upload is not yet connected.
 - A small CLI using inherited, length-prefixed stdio, and Linux/Windows CI.
 - Structured basic rich-text notes, tags, Markdown/plain-text export, stable
   offline document IDs, idempotent saves, and owner-scoped snapshot/incremental
@@ -115,7 +118,7 @@ The sidebar pages fifty encrypted-note summaries at a time; only the selected
 editor receives a full draft. Search covers titles, tags and the complete note
 body, including text beyond its preview, without writing a plaintext search
 index. Paging and filtering preserve the current editor. Cold full-body search
-still decrypts matching candidates in the main process; large-library latency
+still scans and decrypts candidates in the main process; large-library latency
 and full transcript/job payloads remain performance release gates.
 
 ```sh

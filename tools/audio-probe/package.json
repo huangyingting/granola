@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "dependencies": {
+    "@windows-ai-notes/client": "workspace:*",
     "@windows-ai-notes/contracts": "workspace:*"
   }
 }

@@ -4,6 +4,70 @@
     "request": {
       "protocol_version": 1,
       "request_id": "9c73575e-426d-4f72-98ed-7b4479f890ab",
+      "command": "get_recording",
+      "recording_id": "75048e79-2b45-440f-8609-b80a37635b4a",
+      "offset": 0
+    }
+  },
+  {
+    "valid": true,
+    "request": {
+      "protocol_version": 1,
+      "request_id": "9c73575e-426d-4f72-98ed-7b4479f890ab",
+      "command": "list_recording_chunks",
+      "recording_id": "75048e79-2b45-440f-8609-b80a37635b4a",
+      "track_id": "ece5191a-347b-40a2-8d09-82565aa396a1",
+      "sequence_start": 10000
+    }
+  },
+  {
+    "valid": true,
+    "request": {
+      "protocol_version": 1,
+      "request_id": "9c73575e-426d-4f72-98ed-7b4479f890ab",
+      "command": "read_chunk",
+      "recording_id": "75048e79-2b45-440f-8609-b80a37635b4a",
+      "chunk_id": "ece5191a-347b-40a2-8d09-82565aa396a1",
+      "offset": 960043,
+      "length": 32768
+    }
+  },
+  {
+    "valid": false,
+    "request": {
+      "protocol_version": 1,
+      "request_id": "9c73575e-426d-4f72-98ed-7b4479f890ab",
+      "command": "read_chunk",
+      "recording_id": "75048e79-2b45-440f-8609-b80a37635b4a",
+      "chunk_id": "ece5191a-347b-40a2-8d09-82565aa396a1",
+      "offset": 0,
+      "length": 32769
+    }
+  },
+  {
+    "valid": false,
+    "request": {
+      "protocol_version": 1,
+      "request_id": "9c73575e-426d-4f72-98ed-7b4479f890ab",
+      "command": "get_recording",
+      "recording_id": "75048e79-2b45-440f-8609-b80a37635b4a",
+      "offset": -1
+    }
+  },
+  {
+    "valid": false,
+    "request": {
+      "protocol_version": 1,
+      "request_id": "9c73575e-426d-4f72-98ed-7b4479f890ab",
+      "command": "list_devices",
+      "chunk_id": "ece5191a-347b-40a2-8d09-82565aa396a1"
+    }
+  },
+  {
+    "valid": true,
+    "request": {
+      "protocol_version": 1,
+      "request_id": "9c73575e-426d-4f72-98ed-7b4479f890ab",
       "command": "list_devices"
     }
   },

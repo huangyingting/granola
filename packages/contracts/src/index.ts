@@ -2,6 +2,8 @@ import { z } from 'zod';
 
 export const PROTOCOL_VERSION = 1;
 export const MAX_CONTROL_BYTES = 64 * 1024;
+export const MAX_AUDIO_RANGE_BYTES = 32 * 1024;
+export const AUDIO_ARCHIVE_PAGE_SIZE = 50;
 
 const uuid = z
   .uuid()
@@ -32,6 +34,27 @@ export const trackSchema = z
 
 export const audioRequestSchema = z.discriminatedUnion('command', [
   z.object({ ...baseRequest, command: z.literal('list_devices') }).strict(),
+  z.strictObject({
+    ...baseRequest,
+    command: z.literal('get_recording'),
+    recording_id: uuid,
+    offset: z.number().int().min(0).max(10_000),
+  }),
+  z.strictObject({
+    ...baseRequest,
+    command: z.literal('list_recording_chunks'),
+    recording_id: uuid,
+    track_id: uuid,
+    sequence_start: z.number().int().min(0).max(10_000),
+  }),
+  z.strictObject({
+    ...baseRequest,
+    command: z.literal('read_chunk'),
+    recording_id: uuid,
+    chunk_id: uuid,
+    offset: z.number().int().min(0).max(960_043),
+    length: z.number().int().min(1).max(MAX_AUDIO_RANGE_BYTES),
+  }),
   z
     .object({
       ...baseRequest,
@@ -80,7 +103,7 @@ export const chunkSchema = z
     track_id: uuid,
     chunk_id: uuid,
     capture_epoch: uuid,
-    sequence: z.number().int().nonnegative(),
+    sequence: z.number().int().min(0).max(9_999),
     sample_start: z.number().int().nonnegative(),
     sample_count: z.number().int().positive().max(480_000),
     sample_rate: z.literal(16_000),
@@ -90,7 +113,25 @@ export const chunkSchema = z
     clock_end_ms: z.number().finite().nonnegative(),
     pcm_sha256: z.string().regex(/^[a-f0-9]{64}$/),
   })
-  .strict();
+  .strict()
+  .refine(
+    (chunk) =>
+      chunk.clock_end_ms >= chunk.clock_start_ms &&
+      Number.isSafeInteger(chunk.sample_start + chunk.sample_count),
+    'Chunk clocks and sample bounds must be consistent.',
+  );
+
+export const uploadChunkSchema = z
+  .strictObject({
+    chunk: chunkSchema,
+    size_bytes: z.number().int().min(46).max(960_044),
+    sha256: z.string().regex(/^[a-f0-9]{64}$/),
+  })
+  .refine(
+    (upload) => upload.size_bytes === upload.chunk.sample_count * 2 + 44,
+    'The upload checksum and size describe canonical WAV bytes, not local ciphertext.',
+  );
+export type UploadChunk = z.infer<typeof uploadChunkSchema>;
 
 export const recoverySchema = z
   .object({
@@ -127,6 +168,126 @@ const statePayload = z
   .strict();
 
 export const audioEventSchema = z.discriminatedUnion('event_type', [
+  z
+    .strictObject({
+      ...eventBase,
+      event_type: z.literal('recording.manifest'),
+      payload: z
+        .strictObject({
+          format_version: z.literal(1),
+          recording_id: uuid,
+          created_at: z.iso.datetime({ offset: true }),
+          state: z.enum(['recording', 'paused', 'sealed', 'failed']),
+          tracks: z
+            .array(
+              z.strictObject({
+                spec: trackSchema,
+                actual_device_id: z.string().min(1).max(1024),
+                saved_samples: z.number().int().nonnegative(),
+                chunk_count: z.number().int().min(0).max(10_000),
+              }),
+            )
+            .min(1)
+            .max(2),
+          event_offset: z.number().int().min(0).max(10_000),
+          event_count: z.number().int().min(0).max(10_000),
+          events: z
+            .array(
+              z.strictObject({
+                event_type: z.string().min(1).max(80),
+                clock_ms: z.number().finite().nonnegative(),
+                capture_epoch: uuid.nullable(),
+                code: z.string().max(80).nullable(),
+              }),
+            )
+            .max(AUDIO_ARCHIVE_PAGE_SIZE),
+          has_more: z.boolean(),
+        })
+        .refine(
+          (page) =>
+            page.event_offset + page.events.length <= page.event_count &&
+            page.has_more ===
+              page.event_offset + page.events.length < page.event_count &&
+            new Set(page.tracks.map((track) => track.spec.track_id)).size ===
+              page.tracks.length &&
+            new Set(page.tracks.map((track) => track.spec.kind)).size ===
+              page.tracks.length &&
+            page.tracks.reduce((sum, track) => sum + track.chunk_count, 0) <=
+              10_000 &&
+            page.tracks.every(
+              (track) =>
+                track.saved_samples >= track.chunk_count &&
+                track.saved_samples <= track.chunk_count * 480_000,
+            ),
+          'Manifest pages must preserve track and timeline bounds.',
+        ),
+    })
+    .refine((event) => event.recording_id === event.payload.recording_id),
+  z
+    .strictObject({
+      ...eventBase,
+      event_type: z.literal('recording.chunks'),
+      payload: z
+        .strictObject({
+          track_id: uuid,
+          sequence_start: z.number().int().min(0).max(10_000),
+          chunks: z.array(uploadChunkSchema).max(AUDIO_ARCHIVE_PAGE_SIZE),
+          has_more: z.boolean(),
+        })
+        .refine(
+          (page) =>
+            page.chunks.every(
+              (upload, index) =>
+                upload.chunk.track_id === page.track_id &&
+                upload.chunk.sequence === page.sequence_start + index,
+            ),
+          'Chunk pages must preserve track sequence.',
+        ),
+    })
+    .refine(
+      (event) =>
+        event.recording_id !== null &&
+        event.payload.chunks.every(
+          (upload) => upload.chunk.recording_id === event.recording_id,
+        ),
+    ),
+  z
+    .strictObject({
+      ...eventBase,
+      event_type: z.literal('recording.chunk_range'),
+      payload: z
+        .strictObject({
+          upload: uploadChunkSchema,
+          offset: z.number().int().min(0).max(960_043),
+          data_base64: z
+            .string()
+            .min(4)
+            .max(Math.ceil(MAX_AUDIO_RANGE_BYTES / 3) * 4)
+            .regex(
+              /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/,
+            ),
+          end_of_chunk: z.boolean(),
+        })
+        .refine((range) => {
+          const size =
+            (range.data_base64.length / 4) * 3 -
+            (range.data_base64.endsWith('==')
+              ? 2
+              : range.data_base64.endsWith('=')
+                ? 1
+                : 0);
+          return (
+            size >= 1 &&
+            size <= MAX_AUDIO_RANGE_BYTES &&
+            range.offset + size <= range.upload.size_bytes &&
+            range.end_of_chunk ===
+              (range.offset + size === range.upload.size_bytes)
+          );
+        }, 'Range bytes and the final marker must agree with the canonical WAV size.'),
+    })
+    .refine(
+      (event) => event.recording_id === event.payload.upload.chunk.recording_id,
+    ),
   z
     .object({
       ...eventBase,

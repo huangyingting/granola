@@ -277,6 +277,9 @@ importers:
 
   tools/audio-probe:
     dependencies:
+      '@windows-ai-notes/client':
+        specifier: workspace:*
+        version: link:../../packages/client
       '@windows-ai-notes/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts

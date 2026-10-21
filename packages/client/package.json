@@ -4,6 +4,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./audio": {
+      "types": "./dist/audio.d.ts",
+      "import": "./dist/audio.js"
+    },
     "./workspace": {
       "types": "./dist/workspace.d.ts",
       "import": "./dist/workspace.js"

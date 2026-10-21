@@ -3,7 +3,8 @@ using System.Text.Json;
 
 namespace WindowsAiNotes.Audio;
 
-public sealed record AudioRequest(int ProtocolVersion, Guid RequestId, string Command, Guid? RecordingId = null, TrackSpec[]? Tracks = null)
+public sealed record AudioRequest(int ProtocolVersion, Guid RequestId, string Command, Guid? RecordingId = null, TrackSpec[]? Tracks = null,
+    Guid? TrackId = null, Guid? ChunkId = null, int? SequenceStart = null, int? Offset = null, int? Length = null)
 {
     public void Validate()
     {
@@ -11,13 +12,39 @@ public sealed record AudioRequest(int ProtocolVersion, Guid RequestId, string Co
             throw new AudioException("invalid_request", "Unsupported protocol version or invalid request ID.");
         if (Command == "list_devices")
         {
-            if (RecordingId is not null || Tracks is not null)
+            if (RecordingId is not null || Tracks is not null || TrackId is not null || ChunkId is not null
+                || SequenceStart is not null || Offset is not null || Length is not null)
                 throw new AudioException("invalid_request", "Device enumeration does not accept recording fields.");
             return;
         }
-        if (Command is not ("start_recording" or "pause_recording" or "resume_recording" or "stop_recording" or "inspect_recording")
+        if (Command is not ("start_recording" or "pause_recording" or "resume_recording" or "stop_recording" or "inspect_recording"
+            or "get_recording" or "list_recording_chunks" or "read_chunk")
             || RecordingId is null || RecordingId == Guid.Empty)
             throw new AudioException("invalid_request", "A supported command and recording ID are required.");
+        if (Command == "get_recording")
+        {
+            if (Tracks is not null || TrackId is not null || ChunkId is not null || SequenceStart is not null || Length is not null
+                || Offset is not (>= 0 and <= 10_000))
+                throw new AudioException("invalid_request", "Manifest reads require only a recording ID and bounded event offset.");
+            return;
+        }
+        if (Command == "list_recording_chunks")
+        {
+            if (Tracks is not null || TrackId is null || TrackId == Guid.Empty || ChunkId is not null || Offset is not null || Length is not null
+                || SequenceStart is not (>= 0 and <= 10_000))
+                throw new AudioException("invalid_request", "Chunk listing requires a track ID and bounded sequence start.");
+            return;
+        }
+        if (Command == "read_chunk")
+        {
+            if (Tracks is not null || TrackId is not null || ChunkId is null || ChunkId == Guid.Empty || SequenceStart is not null
+                || Offset is not (>= 0 and <= PcmChunkWriter.MaxSamples * 2 + 43)
+                || Length is not (>= 1 and <= RecordingArchive.MaxRangeBytes))
+                throw new AudioException("invalid_request", "Chunk reads require a chunk ID and bounded WAV byte range.");
+            return;
+        }
+        if (TrackId is not null || ChunkId is not null || SequenceStart is not null || Offset is not null || Length is not null)
+            throw new AudioException("invalid_request", "Only archive commands accept chunk and range fields.");
         if (Command != "start_recording")
         {
             if (Tracks is not null)
