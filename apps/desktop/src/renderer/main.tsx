@@ -71,11 +71,7 @@ function App() {
         setError(response.error.message);
         return null;
       }
-      if ('closing' in response) return null;
-      if ('audio_devices' in response) return null;
-      if ('audio_state' in response) return null;
-      if ('transcript_page' in response) return null;
-      if ('transcript_timeline' in response) return null;
+      if (!('state' in response)) return null;
       if (
         !discardEditor &&
         ['bootstrap', 'search'].includes(command.operation) &&

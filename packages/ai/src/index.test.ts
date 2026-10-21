@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { createAzureProviders, readAzureResponse } from './index.js';
 import { loadAzureConfig, type AzureConfig } from './config.js';
 import { makeSilentWav, validateWav } from './wav.js';
@@ -188,6 +188,35 @@ describe('Azure summary adapter', () => {
       ),
     ).rejects.toMatchObject({ code: 'context_too_large' });
   });
+  it.each(['length', 'invalid-json', 'bad-citation'])(
+    'reports known usage before rejecting %s output',
+    async (kind) => {
+      const output = summary();
+      if (kind === 'bad-citation') output.overview.citations[0]!.revision++;
+      const providers = createAzureProviders(config, async () =>
+        response({
+          choices: [
+            {
+              finish_reason: kind === 'length' ? 'length' : 'stop',
+              message: {
+                content: kind === 'invalid-json' ? '{' : JSON.stringify(output),
+              },
+            },
+          ],
+          usage: { prompt_tokens: 11, completion_tokens: 22 },
+        }),
+      );
+      const report = vi.fn(async () => {});
+      await expect(
+        providers.summarize(snapshot, new AbortController().signal, report),
+      ).rejects.toBeInstanceOf(Error);
+      expect(report).toHaveBeenCalledExactlyOnceWith({
+        input_tokens: 11,
+        output_tokens: 22,
+        audio_ms: 0,
+      });
+    },
+  );
 });
 
 describe('Azure Speech fast transcription', () => {
@@ -267,6 +296,39 @@ describe('Azure Speech fast transcription', () => {
     const stereo = makeSilentWav();
     stereo.writeUInt16LE(2, 22);
     expect(() => validateWav(stereo)).toThrow('PCM16');
+  });
+  it('records accepted media duration even for invalid speech output, but never treats failed requests as settled', async () => {
+    const report = vi.fn(async () => {});
+    const invalid = createAzureProviders(config, async () =>
+      response({ phrases: 'invalid' }),
+    );
+    await expect(
+      invalid.transcribe(
+        makeSilentWav(),
+        'en-US',
+        new AbortController().signal,
+        report,
+      ),
+    ).rejects.toMatchObject({ code: 'invalid_transcript' });
+    expect(report).toHaveBeenCalledExactlyOnceWith({
+      input_tokens: 0,
+      output_tokens: 0,
+      audio_ms: 1000,
+    });
+    report.mockClear();
+    const failed = createAzureProviders(
+      config,
+      async () => new Response('not-a-usage-receipt', { status: 503 }),
+    );
+    await expect(
+      failed.transcribe(
+        makeSilentWav(),
+        'en-US',
+        new AbortController().signal,
+        report,
+      ),
+    ).rejects.toMatchObject({ code: 'provider_unavailable' });
+    expect(report).not.toHaveBeenCalled();
   });
 });
 

@@ -312,6 +312,13 @@ async function start() {
             : { ok: true, state: state() };
         }
         const db = database();
+        if (command.operation === 'getAccountUsage') {
+          const account = await workspace().accountUsage(command.scope);
+          return desktopResponseSchema.parse({
+            ok: true,
+            account_usage: { scope: command.scope, account },
+          });
+        }
         if (command.operation === 'getTranscriptPage') {
           const page = await workspace().transcriptPage(
             command.scope,

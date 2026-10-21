@@ -390,6 +390,33 @@ export const usageSchema = z.strictObject({
   output_tokens: z.number().int().nonnegative(),
   audio_ms: z.number().nonnegative(),
 });
+export const aiLimitsSchema = z.strictObject({
+  input_tokens: z.number().int().min(0).max(1_000_000_000_000),
+  output_tokens: z.number().int().min(0).max(1_000_000_000_000),
+  audio_ms: z.number().int().min(0).max(1_000_000_000_000),
+});
+export const DEFAULT_AI_LIMITS = {
+  input_tokens: 2_000_000,
+  output_tokens: 500_000,
+  audio_ms: 28_800_000,
+} as const;
+const usageCount = z.string().regex(/^(0|[1-9][0-9]{0,29})$/);
+export const usageTotalsSchema = z.strictObject({
+  input_tokens: usageCount,
+  output_tokens: usageCount,
+  audio_ms: usageCount,
+});
+export const accountUsageSchema = z.strictObject({
+  period_start: z.iso.date(),
+  period_end: z.iso.date(),
+  limits: usageTotalsSchema,
+  settled: usageTotalsSchema,
+  uncertain: usageTotalsSchema,
+  settled_requests: usageCount,
+  uncertain_requests: usageCount,
+  over_limit: z.boolean(),
+});
+export type AccountUsage = z.infer<typeof accountUsageSchema>;
 export const failureSchema = z.strictObject({
   code: z.string(),
   message: z.string(),

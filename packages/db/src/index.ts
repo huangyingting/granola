@@ -27,6 +27,8 @@ import { recordChange, SyncStore } from './sync.js';
 import { RecordingStore } from './recordings.js';
 import { TranscriptStore } from './transcripts.js';
 import { RecordingTranscriptions } from './recording-transcriptions.js';
+import { UsageStore } from './usage.js';
+export type { UsageReservation } from './usage.js';
 export { recordChange } from './sync.js';
 
 const migrationFiles = [
@@ -35,6 +37,7 @@ const migrationFiles = [
   '003_recordings.sql',
   '004_transcript_pages.sql',
   '005_recording_transcription.sql',
+  '006_ai_usage.sql',
 ];
 
 export type Transaction = pg.PoolClient;
@@ -135,6 +138,7 @@ export class Database {
   readonly recordings: RecordingStore;
   readonly transcripts: TranscriptStore;
   readonly recordingTranscriptions: RecordingTranscriptions;
+  readonly usage: UsageStore;
   constructor(url: string) {
     this.pool = new pg.Pool({
       connectionString: url,
@@ -146,6 +150,7 @@ export class Database {
     this.recordings = new RecordingStore(this);
     this.transcripts = new TranscriptStore(this);
     this.recordingTranscriptions = new RecordingTranscriptions(this);
+    this.usage = new UsageStore(this);
     this.pool.on('error', () =>
       console.error(
         'database_connection_failed: idle PostgreSQL connection closed.',

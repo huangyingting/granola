@@ -9,6 +9,7 @@ import {
 } from '@windows-ai-notes/contracts/server';
 import { registerChunkSchema } from '@windows-ai-notes/contracts/uploads';
 import type { Database, Transaction, ClaimedJob } from './index.js';
+import type { UsageReservation } from './usage.js';
 
 interface Run {
   provider: 'azure' | 'fixture';
@@ -169,17 +170,26 @@ export class RecordingTranscriptions {
       };
     });
   }
-  async sending(job: ClaimedJob, chunk: string, ordinal: number) {
-    await this.database.transaction(async (tx) => {
+  async sending(
+    job: ClaimedJob,
+    chunk: string,
+    ordinal: number,
+    reservation?: UsageReservation,
+  ) {
+    return this.database.transaction(async (tx) => {
       await this.guard(tx, job);
       const run = await this.run(tx, job.id);
       if (run.completed_chunks !== ordinal) throw lost();
+      const call = reservation
+        ? await this.database.usage.start(job, reservation, tx)
+        : undefined;
       await tx.query(
         `UPDATE recording_transcription_runs SET uncertain_requests=uncertain_requests+CASE WHEN pending_chunk IS NULL THEN 0 ELSE 1 END,
          pending_chunk=$2,updated_at=now() WHERE job_id=$1`,
         [job.id, chunk],
       );
       await this.progress(tx, job, await this.run(tx, job.id));
+      return call;
     });
   }
   async save(

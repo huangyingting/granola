@@ -13,6 +13,7 @@ import {
   transcriptTimelinePageSchema,
   finalizeTranscriptSchema,
   idempotencyKey,
+  accountUsageSchema,
 } from '@windows-ai-notes/contracts/server';
 import type {
   DesktopChange,
@@ -155,6 +156,39 @@ export class WorkspaceController {
   }
   audioChanged() {
     if (!this.disposed) this.emit('audio');
+  }
+  async accountUsage(scope: number) {
+    this.assertScope(scope);
+    const context = this.recordingUploadContext();
+    if (!context)
+      throw new ClientError(
+        'account_usage_unavailable',
+        'Reconnect an authorized cloud workspace to read current AI usage.',
+      );
+    if (this.transcriptReads.size >= 4)
+      throw new ClientError(
+        'request_busy',
+        'Wait for the current account or transcript requests to finish.',
+      );
+    const read = new AbortController();
+    this.transcriptReads.add(read);
+    try {
+      const usage = await context.api.request('/v1/usage', accountUsageSchema, {
+        signal: read.signal,
+      });
+      context.authorize();
+      if (read.signal.aborted)
+        throw new ClientError(
+          'request_cancelled',
+          'The account usage request was cancelled.',
+        );
+      return usage;
+    } catch (error) {
+      this.artifactRevocation(error, context.profile, context.api);
+      throw error;
+    } finally {
+      this.transcriptReads.delete(read);
+    }
   }
   recordingUploadContext() {
     if (

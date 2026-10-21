@@ -13,17 +13,41 @@ import type { AzureConfig } from './config.js';
 import { validateWav } from './wav.js';
 
 export const PROMPT_VERSION = 'meeting-summary-v1';
+export const SUMMARY_USAGE_RESERVATION = {
+  input_tokens: 64_000,
+  output_tokens: 4096,
+  audio_ms: 0,
+} as const;
+export type UsageReporter = (usage: Usage) => Promise<void>;
+export function summaryEvidence(snapshot: SummarySnapshot) {
+  if (!snapshot.notes.trim() && snapshot.segments.length === 0)
+    throw new ServiceError(
+      'empty_context',
+      'Add notes or a transcript before generating a summary.',
+      400,
+    );
+  const evidence = JSON.stringify(snapshot);
+  if (Buffer.byteLength(evidence) > 48_000)
+    throw new ServiceError(
+      'context_too_large',
+      'This first server milestone accepts at most 48,000 bytes of summary context.',
+      413,
+    );
+  return evidence;
+}
 export interface AiProviders {
   readonly provider: 'azure' | 'fixture';
   readonly configurationVersion: string;
   summarize(
     snapshot: SummarySnapshot,
     signal: AbortSignal,
+    reportUsage?: UsageReporter,
   ): Promise<{ summary: Summary; usage: Usage }>;
   transcribe(
     wav: Buffer,
     locale: 'en-US' | 'zh-CN',
     signal: AbortSignal,
+    reportUsage?: UsageReporter,
   ): Promise<{ segments: Segment[]; usage: Usage }>;
 }
 
@@ -63,6 +87,7 @@ const chatResponse = z.object({
     completion_tokens: z.number().int().nonnegative(),
   }),
 });
+const tokenReceipt = z.object({ usage: chatResponse.shape.usage });
 const speechResponse = z.object({
   durationMilliseconds: z.number().nonnegative(),
   combinedPhrases: z.array(z.object({ text: z.string() })).max(100),
@@ -188,22 +213,8 @@ export function createAzureProviders(
   return {
     provider: 'azure',
     configurationVersion,
-    async summarize(snapshot, signal) {
-      if (!snapshot.notes.trim() && snapshot.segments.length === 0) {
-        throw new ServiceError(
-          'empty_context',
-          'Add notes or a transcript before generating a summary.',
-          400,
-        );
-      }
-      const evidence = JSON.stringify(snapshot);
-      if (Buffer.byteLength(evidence) > 48_000) {
-        throw new ServiceError(
-          'context_too_large',
-          'This first server milestone accepts at most 48,000 bytes of summary context.',
-          413,
-        );
-      }
+    async summarize(snapshot, signal, reportUsage) {
+      const evidence = summaryEvidence(snapshot);
       const url = new URL(
         `/openai/deployments/${encodeURIComponent(config.AZURE_OPENAI_DEPLOYMENT)}/chat/completions`,
         config.AZURE_OPENAI_ENDPOINT,
@@ -225,7 +236,7 @@ export function createAzureProviders(
               },
               { role: 'user', content: evidence },
             ],
-            max_completion_tokens: 4096,
+            max_completion_tokens: SUMMARY_USAGE_RESERVATION.output_tokens,
             response_format: {
               type: 'json_schema',
               json_schema: {
@@ -238,6 +249,13 @@ export function createAzureProviders(
         },
         signal,
       );
+      const receipt = tokenReceipt.safeParse(value);
+      if (receipt.success)
+        await reportUsage?.({
+          input_tokens: receipt.data.usage.prompt_tokens,
+          output_tokens: receipt.data.usage.completion_tokens,
+          audio_ms: 0,
+        });
       const parsed = chatResponse.safeParse(value);
       const choice = parsed.success ? parsed.data.choices[0] : undefined;
       if (
@@ -272,7 +290,7 @@ export function createAzureProviders(
         },
       };
     },
-    async transcribe(wav, selectedLocale, signal) {
+    async transcribe(wav, selectedLocale, signal, reportUsage) {
       const duration = validateWav(wav);
       const url = new URL(
         `https://${config.AZURE_SPEECH_REGION}.api.cognitive.microsoft.com/speechtotext/transcriptions:transcribe`,
@@ -294,6 +312,11 @@ export function createAzureProviders(
         },
         signal,
       );
+      await reportUsage?.({
+        input_tokens: 0,
+        output_tokens: 0,
+        audio_ms: duration,
+      });
       const parsed = speechResponse.safeParse(value);
       if (
         !parsed.success ||

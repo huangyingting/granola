@@ -743,6 +743,24 @@ h1 {
   font-weight: 600;
   margin: 0 0 16px;
 }
+.usage-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 16px;
+}
+.usage-grid > div {
+  padding: 14px;
+  border: 1px solid #e9edf5;
+  border-radius: 12px;
+}
+.usage-grid dt {
+  color: #8c97a9;
+  font-size: 11px;
+}
+.usage-grid dd {
+  margin: 8px 0 0;
+  font-variant-numeric: tabular-nums;
+}
 .field-label {
   display: block;
   color: #8c97a9;

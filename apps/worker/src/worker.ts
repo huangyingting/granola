@@ -1,5 +1,11 @@
 import { setTimeout as delay } from 'node:timers/promises';
-import { PROMPT_VERSION, type AiProviders } from '@windows-ai-notes/ai';
+import {
+  PROMPT_VERSION,
+  SUMMARY_USAGE_RESERVATION,
+  summaryEvidence,
+  type AiProviders,
+} from '@windows-ai-notes/ai';
+import { validateWav } from '@windows-ai-notes/ai/wav';
 import {
   ServiceError,
   resultSchema,
@@ -11,6 +17,7 @@ import {
 import type { Database } from '@windows-ai-notes/db';
 import type { RecordingBlobs } from '@windows-ai-notes/storage';
 import { transcribeRecording } from './recording.js';
+import { withUsage } from './usage.js';
 
 export async function runOnce(
   db: Database,
@@ -55,7 +62,18 @@ export async function runOnce(
       let result: JobResult;
       let transcript: Segment[] | undefined;
       if (job.input.kind === 'summary') {
-        const generated = await providers.summarize(job.input.snapshot, signal);
+        summaryEvidence(job.input.snapshot);
+        signal.throwIfAborted();
+        const call = await db.usage.start(job, {
+          operation: 'summary',
+          provider: providers.provider,
+          configurationVersion: providers.configurationVersion,
+          budget: SUMMARY_USAGE_RESERVATION,
+        });
+        const snapshot = job.input.snapshot;
+        const generated = await withUsage(db, call, (report) =>
+          providers.summarize(snapshot, signal, report),
+        );
         result = {
           kind: 'summary',
           summary: validateSummary(generated.summary, job.input.snapshot),
@@ -71,11 +89,29 @@ export async function runOnce(
             'The queued audio clip is missing.',
             409,
           );
-        const generated = await providers.transcribe(
-          job.audio,
-          job.input.locale,
-          signal,
-        );
+        const duration = validateWav(job.audio);
+        signal.throwIfAborted();
+        const call = await db.usage.start(job, {
+          operation: 'clip',
+          provider: providers.provider,
+          configurationVersion: providers.configurationVersion,
+          budget: {
+            input_tokens: 0,
+            output_tokens: 0,
+            audio_ms: Math.ceil(duration),
+          },
+        });
+        const audio = job.audio;
+        const locale = job.input.locale;
+        const generated = await withUsage(db, call, async (report) => {
+          const output = await providers.transcribe(
+            audio,
+            locale,
+            signal,
+            (usage) => report({ ...usage, audio_ms: duration }),
+          );
+          return { ...output, usage: { ...output.usage, audio_ms: duration } };
+        });
         transcript = segmentsSchema.parse(generated.segments);
         result = {
           kind: 'transcription',

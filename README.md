@@ -80,6 +80,11 @@ Real Windows audio behavior still requires the hardware checks below.
   refuse changed speech configurations. Track/epoch/chunk provenance, measured
   clock mapping and known capture gaps remain available. Concurrent manual
   transcript edits win; generated candidates require explicit review/application.
+- Durable account-wide monthly AI allowances. Every worker provider call reserves
+  audio/token units before sending; known receipts settle idempotently, while lost
+  replies, cancellation and retries retain uncertain holds instead of assuming zero
+  usage. The account screen separates known usage and holds; deployment-only CLI
+  changes limits without resetting counters.
 - Revision-pinned transcript pages backed by indexed immutable PostgreSQL segments.
   Synchronization atomically caches the first bounded page with the document and
   cursor; the desktop loads additional pages on demand into its encrypted cache.
@@ -193,7 +198,9 @@ notices; full capture timelines remain available through the UI/API, not embedde
 in text exports. Desktop note exports still export written notes only.
 
 Stop older API/worker instances before running `pnpm db:migrate`, then start the
-updated binaries together. Migration 005 adds recording jobs, temporary per-chunk
+updated binaries together. Migration 006 adds account-wide AI allowances,
+reservations and settled receipts; the encrypted desktop schema remains v6.
+Migration 005 adds recording jobs, temporary per-chunk
 processing, candidate versions and paged capture timelines. PostgreSQL migration 004
 preserves existing segment IDs, order and revisions while normalizing legacy JSON
 arrays into indexed segment rows. Stored revisions are bounded to 100,000 segments
@@ -391,6 +398,42 @@ WAVs one at a time, never concatenates WAV headers or truncates to the short-cli
 limit, and zeroes each media buffer after processing. Provider calls do not hold
 database transactions. Local recordings are never removed by the transfer core.
 
+### AI allowances
+
+Each provisioned account defaults to **8 hours of audio, 2,000,000 input tokens
+and 500,000 output tokens per UTC calendar month**, shared across its workspaces.
+`GET /v1/usage` and **Account & sync → AI allowance** show the current month only.
+Totals are exact decimal strings in the API, not floating-point aggregate counters.
+
+Workers reserve before sending: verified media duration rounded up to milliseconds
+for speech, or a conservative 64,000 input / 4,096 output tokens for a summary.
+A known receipt replaces its reservation with observed units, including receipts
+for rejected model output or results arriving after cancellation. Failed, lost or
+unreadable replies retain uncertain holds; each new attempt needs another
+reservation. Cancellation, document/job deletion and worker replacement do not
+refund known or uncertain requests. Recording quota failures leave completed
+chunks intact; after an administrator raises the allowance, explicitly resume
+the failed run to process its remaining chunks.
+
+Only the deployment operator can change allowances, using database credentials:
+
+```sh
+pnpm build
+pnpm usage:limits --user-id USER_UUID --audio-ms 28800000 --input-tokens 2000000 --output-tokens 500000
+```
+
+All four flags are required. Limits are nonnegative integers; zero disallows that
+unit. Changing limits does not reset counters or resolve unknown requests. Late
+receipts settle in their original reservation month, even after UTC rollover.
+Non-content request accounting survives job/document deletion; deleting the
+account removes its accounting. There is no HTTP endpoint for changing limits.
+
+These are application media/token allowances, **not an Azure invoice or a
+guaranteed currency cap**. Measured audio duration is not Azure's billed duration;
+the input reservation is conservative rather than a proven tokenizer bound.
+Observed overages are retained and block further over-limit requests, not
+discarded. Retries can incur duplicate provider charges.
+
 ### Server API
 
 Contracts are in `packages/contracts/src/server.ts`. Errors include `code`,
@@ -403,6 +446,7 @@ letters, digits, dots, colons, underscores or hyphens.
 | GET                  | `/health`                                                            | Database readiness; no authentication or meeting content                                                                           |
 | GET                  | `/v1/client-config`                                                  | Public native OIDC registration; no secrets, bootstrap accounts or access grants                                                   |
 | GET                  | `/v1/me`, `/v1/workspaces`                                           | Current provisioned user and active memberships                                                                                    |
+| GET                  | `/v1/usage`                                                          | Current account's UTC-month allowances, known usage and uncertain holds                                                            |
 | POST / GET           | `/v1/documents`                                                      | Create `{workspace_id,title,notes}`, optional offline `id`, `content`, `tags`; list with `workspace_id`, optional `limit`/`offset` |
 | GET / PATCH / DELETE | `/v1/documents/{id}`                                                 | Read; change `{base_revision,title?,tags?}`; tombstone and purge online content                                                    |
 | PUT / GET            | `/v1/documents/{id}/notes`                                           | Save `{base_revision,notes? ,content?}`; read an immutable `?revision=N`                                                           |
@@ -484,9 +528,9 @@ hours each (the desktop capture preview stops at one hour), with at most two tra
 
 This first slice uses PostgreSQL polling/leases as the durable scheduler rather
 than introducing unused Redis/BullMQ infrastructure. Realtime STT, chat,
-interactive desktop AI, budget reservation/settlement and token streaming remain later
-implementation work. Successful jobs expose provider usage, but this is not a
-billing ledger; retries can incur duplicate provider charges.
+interactive desktop AI and token streaming remain later implementation work.
+Durable usage reservations and receipts are implemented as described above;
+they do not provide exactly-once billing or reconcile Azure invoices.
 
 An unprivileged server image is available through `docker build -t notes-server .`.
 Its default command runs the API in OIDC mode; override the command with

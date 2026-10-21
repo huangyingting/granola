@@ -7,6 +7,7 @@ import {
   transcriptPageSchema,
   transcriptTimelinePageSchema,
   MAX_TRANSCRIPT_SEGMENTS,
+  accountUsageSchema,
 } from './server.js';
 import { deviceSchema, trackSchema } from './index.js';
 import { audioStateSchema } from './recording.js';
@@ -36,6 +37,7 @@ export type DraftSummary = z.infer<typeof draftSummarySchema>;
 const scoped = { scope: z.number().int().positive() };
 export const desktopCommandSchema = z.discriminatedUnion('operation', [
   z.strictObject({ operation: z.literal('bootstrap') }),
+  z.strictObject({ operation: z.literal('getAccountUsage'), ...scoped }),
   z.strictObject({
     operation: z.literal('getTranscriptPage'),
     ...scoped,
@@ -246,6 +248,10 @@ export const desktopChangeSchema = z.strictObject({
   kind: z.enum(['data', 'scope', 'revoked', 'status', 'audio']),
 });
 export const desktopResponseSchema = z.union([
+  z.strictObject({
+    ok: z.literal(true),
+    account_usage: z.strictObject({ ...scoped, account: accountUsageSchema }),
+  }),
   z.strictObject({
     ok: z.literal(true),
     state: desktopStateSchema,

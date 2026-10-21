@@ -136,6 +136,9 @@ export async function createServer(
     }
   });
   app.get('/v1/me', async (request) => ({ id: principal(request).userId }));
+  app.get('/v1/usage', async (request) =>
+    db.usage.snapshot(principal(request).userId),
+  );
   app.get('/v1/client-config', async () => {
     if (config.mode !== 'oidc' || !config.desktop)
       throw new ServiceError(

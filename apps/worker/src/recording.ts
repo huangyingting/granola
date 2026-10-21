@@ -8,6 +8,7 @@ import type { AiProviders } from '@windows-ai-notes/ai';
 import { validateWav } from '@windows-ai-notes/ai/wav';
 import type { Database, ClaimedJob } from '@windows-ai-notes/db';
 import type { RecordingBlobs } from '@windows-ai-notes/storage';
+import { withUsage } from './usage.js';
 
 export async function transcribeRecording(
   db: Database,
@@ -55,8 +56,34 @@ export async function transcribeRecording(
           409,
         );
       signal.throwIfAborted();
-      await db.recordingTranscriptions.sending(job, next.id, next.ordinal);
-      const generated = await providers.transcribe(bytes, locale, signal);
+      const call = await db.recordingTranscriptions.sending(
+        job,
+        next.id,
+        next.ordinal,
+        {
+          operation: next.id,
+          provider: providers.provider,
+          configurationVersion: providers.configurationVersion,
+          budget: {
+            input_tokens: 0,
+            output_tokens: 0,
+            audio_ms: Math.ceil(duration),
+          },
+        },
+      );
+      if (!call)
+        throw new Error(
+          'Recording transcription requires a usage reservation.',
+        );
+      const generated = await withUsage(db, call, async (report) => {
+        const output = await providers.transcribe(
+          bytes,
+          locale,
+          signal,
+          (usage) => report({ ...usage, audio_ms: duration }),
+        );
+        return { ...output, usage: { ...output.usage, audio_ms: duration } };
+      });
       signal.throwIfAborted();
       const relative = segmentsSchema.parse(generated.segments);
       const chunk = upload.chunk;

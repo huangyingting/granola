@@ -660,6 +660,15 @@ test('connects through real OIDC, requires offline-copy consent, syncs edits and
     ).toHaveText('Synthetic remote meeting text.');
     expect([...fixture.state.documents.values()]).toHaveLength(1);
     await page.getByRole('button', { name: /Account & sync/ }).click();
+    const allowance = page.getByRole('article', { name: 'AI allowance' });
+    await expect(allowance).toContainText('across all workspaces');
+    fixture.state.usage.uncertain.input_tokens = '64000';
+    fixture.state.usage.uncertain_requests = '1';
+    await allowance
+      .getByRole('button', { name: 'Refresh AI usage', exact: true })
+      .click();
+    await expect(allowance).toContainText('64,000 held');
+    await expect(allowance).toContainText('not an Azure invoice');
     await page
       .getByRole('checkbox', { name: /Copy my device-only drafts/ })
       .check();

@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { AccountUsagePanel } from './AccountUsage.js';
 import type {
   DesktopCommand,
   DesktopState,
@@ -188,6 +189,10 @@ export function Account({
           )}
         </article>
       )}
+      {connection.active_workspace &&
+        ['ready', 'syncing', 'attention'].includes(connection.status) && (
+          <AccountUsagePanel key={state.scope} scope={state.scope} />
+        )}
       {connection.user_id && (
         <article className="account-card">
           <h2>Disconnect or switch accounts</h2>

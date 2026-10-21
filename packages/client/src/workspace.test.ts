@@ -168,6 +168,63 @@ describe.skipIf(!databaseUrl)(
         await admin.close();
       }
     });
+    it('loads current authenticated AI allowance without caching it and fences late results after a scope change', async () => {
+      await expect(
+        controller.accountUsage(controller.scope),
+      ).rejects.toMatchObject({ code: 'account_usage_unavailable' });
+      await connect();
+      await activate();
+      const usage = await controller.accountUsage(controller.scope);
+      expect(usage.limits.audio_ms).toBe('28800000');
+      expect(usage.uncertain_requests).toBe('0');
+      await db.usage.setLimits(actor.user_id, {
+        input_tokens: 10,
+        output_tokens: 5,
+        audio_ms: 1000,
+      });
+      expect(
+        (await controller.accountUsage(controller.scope)).limits.audio_ms,
+      ).toBe('1000');
+      let reached!: () => void;
+      let release!: () => void;
+      const seen = new Promise<void>((resolve) => {
+        reached = resolve;
+      });
+      const waiting = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const original = globalThis.fetch;
+      vi.stubGlobal(
+        'fetch',
+        async (...arguments_: Parameters<typeof fetch>) => {
+          const response = await original(...arguments_);
+          if (String(arguments_[0]).endsWith('/v1/usage')) {
+            const body = await response.text();
+            reached();
+            await waiting;
+            return new Response(body, {
+              status: response.status,
+              headers: response.headers,
+            });
+          }
+          return response;
+        },
+      );
+      try {
+        const scope = controller.scope;
+        const late = controller.accountUsage(scope);
+        await seen;
+        await controller.execute({ operation: 'workOffline', scope });
+        release();
+        await expect(late).rejects.toMatchObject({ code: 'workspace_changed' });
+        await expect(controller.accountUsage(scope)).rejects.toMatchObject({
+          code: 'workspace_changed',
+        });
+      } finally {
+        release();
+        vi.unstubAllGlobals();
+      }
+    });
     it('requires explicit offline-copy consent, uses new IDs, keeps originals and deduplicates repeated imports', async () => {
       await create('Device-only private text.');
       const original = controller.snapshot().selected!;

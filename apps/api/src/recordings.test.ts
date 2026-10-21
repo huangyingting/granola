@@ -587,6 +587,61 @@ describe.skipIf(!databaseUrl || !endpoint)(
         expect(
           (await db.transcripts.page(c.user_id, c.doc.id, 1)).segments[0],
         ).toEqual(first[0]);
+        expect(await db.usage.snapshot(c.user_id)).toMatchObject({
+          settled: { audio_ms: '3000' },
+          uncertain: { audio_ms: '1000' },
+          settled_requests: '3',
+          uncertain_requests: '1',
+        });
+      });
+      it('stops before sending an unreserved chunk and resumes only remaining chunks after an administrator raises the allowance', async () => {
+        const c = await context();
+        await ready(c, 3);
+        const job = await enqueue(c);
+        await db.usage.setLimits(c.user_id, {
+          input_tokens: 0,
+          output_tokens: 0,
+          audio_ms: 1000,
+        });
+        const transcribe = vi.fn<AiProviders['transcribe']>(async () => ({
+          segments: [
+            {
+              id: randomUUID(),
+              start_ms: 0,
+              end_ms: 500,
+              text: 'Budgeted speech.',
+            },
+          ],
+          usage: { input_tokens: 0, output_tokens: 0, audio_ms: 1000 },
+        }));
+        await runOnce(db, provider(transcribe), undefined, blobs);
+        expect(transcribe).toHaveBeenCalledTimes(1);
+        expect(await db.job(c.user_id, job.id)).toMatchObject({
+          state: 'failed',
+          error: { code: 'quota_exceeded' },
+          progress: { completed_chunks: 1, uncertain_requests: 0 },
+        });
+        expect(await db.usage.snapshot(c.user_id)).toMatchObject({
+          settled: { audio_ms: '1000' },
+          uncertain_requests: '0',
+        });
+        await db.usage.setLimits(c.user_id, {
+          input_tokens: 0,
+          output_tokens: 0,
+          audio_ms: 3000,
+        });
+        await db.retryRecordingTranscription(c.user_id, job.id);
+        await runOnce(db, provider(transcribe), undefined, blobs);
+        expect(transcribe).toHaveBeenCalledTimes(3);
+        expect(await db.job(c.user_id, job.id)).toMatchObject({
+          state: 'succeeded',
+          result: { processed_chunks: 3, uncertain_requests: 0 },
+        });
+        expect(await db.usage.snapshot(c.user_id)).toMatchObject({
+          settled: { audio_ms: '3000' },
+          uncertain_requests: '0',
+          settled_requests: '3',
+        });
       });
       it('preserves microphone/system source epochs and known pause gaps in separately paged capture evidence', async () => {
         const c = await context(true);

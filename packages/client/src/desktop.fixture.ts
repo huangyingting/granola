@@ -16,6 +16,8 @@ import {
   jobSchema,
   finalizeTranscriptSchema,
   applyTranscriptSchema,
+  accountUsageSchema,
+  DEFAULT_AI_LIMITS,
 } from '@windows-ai-notes/contracts/server';
 import { canonicalJson } from '@windows-ai-notes/contracts/content';
 import { oidcFixture } from './oidc.fixture.js';
@@ -62,6 +64,29 @@ export async function desktopFixture() {
   >();
   const replays = new Map<string, { hash: string; value: unknown }>();
   const tombstones = new Set<string>();
+  const today = new Date();
+  const usage = accountUsageSchema.parse({
+    period_start: new Date(
+      Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 1),
+    )
+      .toISOString()
+      .slice(0, 10),
+    period_end: new Date(
+      Date.UTC(today.getUTCFullYear(), today.getUTCMonth() + 1, 1),
+    )
+      .toISOString()
+      .slice(0, 10),
+    limits: {
+      input_tokens: String(DEFAULT_AI_LIMITS.input_tokens),
+      output_tokens: String(DEFAULT_AI_LIMITS.output_tokens),
+      audio_ms: String(DEFAULT_AI_LIMITS.audio_ms),
+    },
+    settled: { input_tokens: '0', output_tokens: '0', audio_ms: '0' },
+    uncertain: { input_tokens: '0', output_tokens: '0', audio_ms: '0' },
+    settled_requests: '0',
+    uncertain_requests: '0',
+    over_limit: false,
+  });
   const state = {
     active: true,
     transcript_online: true,
@@ -72,6 +97,7 @@ export async function desktopFixture() {
     lose_finalization_response: false,
     workspaces: [{ id: workspace, name: 'Synthetic cloud workspace' }],
     failures: [] as unknown[],
+    usage,
   };
   const keys = createRemoteJWKSet(new URL('keys', issuer.state.issuer));
   function record(
@@ -306,6 +332,7 @@ export async function desktopFixture() {
       if (!state.active)
         return error(response, 'identity_not_provisioned', 403);
       if (path === '/v1/me') return send(response, { id: user });
+      if (path === '/v1/usage') return send(response, state.usage);
       if (path === '/v1/workspaces')
         return send(response, { workspaces: state.workspaces });
       if (path === '/v1/sync/snapshot') {
