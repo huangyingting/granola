@@ -18,6 +18,7 @@ import {
 } from '@windows-ai-notes/contracts/server';
 import {
   richTextFromPlainText,
+  richTextToPlainText,
   canonicalJson,
 } from '@windows-ai-notes/contracts/content';
 import {
@@ -25,6 +26,7 @@ import {
   draftSchema,
   type Draft,
   type EditableDraft,
+  type DraftSummary,
 } from '@windows-ai-notes/contracts/desktop';
 
 export class LocalError extends Error {
@@ -57,6 +59,7 @@ const rowSchema = z.strictObject({
   payload: z.instanceof(Uint8Array),
 });
 type Row = z.infer<typeof rowSchema>;
+const headerSchema = rowSchema.omit({ payload: true });
 const bootstrapSchema = z.strictObject({
   cursor: syncSnapshotSchema.shape.cursor.nullable(),
   after: resourceId.nullable(),
@@ -139,6 +142,15 @@ export class LocalStore {
   private readonly database: DatabaseSync;
   private readonly key: Buffer;
   private transactionDepth = 0;
+  private readonly summaries = new Map<
+    string,
+    { profile: string; fingerprint: string; value: DraftSummary }
+  >();
+  private search: {
+    profile: string;
+    query: string;
+    matches: Map<string, { fingerprint: string; value: boolean }>;
+  } | null = null;
   constructor(path: string, key: Buffer) {
     if (key.length !== 32)
       throw new LocalError(
@@ -229,6 +241,7 @@ export class LocalStore {
           FOREIGN KEY(profile,document_id) REFERENCES drafts(profile,id) ON DELETE CASCADE
         );
         CREATE INDEX IF NOT EXISTS drafts_pending ON drafts(profile,dirty,conflict);
+        CREATE INDEX IF NOT EXISTS drafts_list ON drafts(profile,deleted,updated_at DESC,id);
         CREATE TABLE IF NOT EXISTS snapshot_candidates (
           profile TEXT NOT NULL,id TEXT NOT NULL,PRIMARY KEY(profile,id),
           FOREIGN KEY(profile,id) REFERENCES drafts(profile,id) ON DELETE CASCADE
@@ -287,8 +300,13 @@ export class LocalStore {
     `);
   }
   close() {
-    this.database.close();
-    this.key.fill(0);
+    try {
+      this.database.close();
+    } finally {
+      this.key.fill(0);
+      this.summaries.clear();
+      this.search = null;
+    }
   }
   atomic(run: () => undefined): void {
     this.transaction(run);
@@ -348,6 +366,8 @@ export class LocalStore {
       this.database.exec(nested ? `RELEASE ${savepoint}` : 'COMMIT');
       return result;
     } catch (error) {
+      this.summaries.clear();
+      this.search = null;
       this.database.exec(
         nested ? `ROLLBACK TO ${savepoint}; RELEASE ${savepoint}` : 'ROLLBACK',
       );
@@ -452,6 +472,7 @@ export class LocalStore {
     return this.open(payloadSchema, row.payload, context(row));
   }
   private write(row: Omit<Row, 'payload'>, value: Payload): void {
+    this.invalidate(row.profile, row.id);
     this.database
       .prepare(
         `INSERT INTO drafts VALUES (?,?,?,?,?,?,?,?,?)
@@ -496,6 +517,103 @@ export class LocalStore {
       )
       .all(profile)
       .map((row) => this.public(rowSchema.parse(row)));
+  }
+  private invalidate(profile: string, id?: string) {
+    if (id) {
+      this.summaries.delete(canonicalJson([profile, id]));
+      if (this.search?.profile === profile) this.search.matches.delete(id);
+    } else {
+      for (const [key, value] of this.summaries)
+        if (value.profile === profile) this.summaries.delete(key);
+      if (this.search?.profile === profile) this.search = null;
+    }
+  }
+  private forget(profile: string, id: string) {
+    this.invalidate(profile, id);
+    this.database
+      .prepare('DELETE FROM drafts WHERE profile=? AND id=?')
+      .run(profile, id);
+  }
+  page(
+    profile: string,
+    query = '',
+    offset = 0,
+  ): { documents: DraftSummary[]; has_more: boolean } {
+    if (
+      query.length > 200 ||
+      !Number.isSafeInteger(offset) ||
+      offset < 0 ||
+      offset > 1_000_000
+    )
+      throw new LocalError(
+        'invalid_local_search',
+        'Use a supported search query and page offset.',
+      );
+    const normalized = query.trim().toLowerCase();
+    if (
+      !this.search ||
+      this.search.profile !== profile ||
+      this.search.query !== normalized
+    )
+      this.search = { profile, query: normalized, matches: new Map() };
+    const sql =
+      'SELECT profile,id,revision,remote_revision,dirty,conflict,deleted,updated_at FROM drafts WHERE profile=? AND deleted=0 ORDER BY updated_at DESC,id';
+    const statement = this.database.prepare(
+      normalized ? sql : `${sql} LIMIT 51 OFFSET ?`,
+    );
+    const rows = normalized
+      ? statement.iterate(profile)
+      : statement.iterate(profile, offset);
+    let skip = normalized ? offset : 0;
+    const documents: DraftSummary[] = [];
+    for (const input of rows) {
+      const row = headerSchema.parse(input);
+      const fingerprint = canonicalJson(row);
+      let loaded: Draft | undefined;
+      const read = () => (loaded ??= this.get(profile, row.id));
+      if (normalized) {
+        const previous = this.search.matches.get(row.id);
+        let matches =
+          previous?.fingerprint === fingerprint ? previous.value : undefined;
+        if (matches === undefined) {
+          const draft = read();
+          matches =
+            `${draft.title} ${draft.tags.join(' ')} ${richTextToPlainText(draft.content)}`
+              .toLowerCase()
+              .includes(normalized);
+          this.search.matches.set(row.id, { fingerprint, value: matches });
+          if (this.search.matches.size > 10_000) {
+            const first = this.search.matches.keys().next();
+            if (!first.done) this.search.matches.delete(first.value);
+          }
+        }
+        if (!matches) continue;
+      }
+      if (skip > 0) {
+        skip--;
+        continue;
+      }
+      if (documents.length === 50) return { documents, has_more: true };
+      const key = canonicalJson([profile, row.id]);
+      const cached = this.summaries.get(key);
+      let summary: DraftSummary;
+      if (cached?.fingerprint === fingerprint) summary = cached.value;
+      else {
+        const { content, ...metadata } = read();
+        summary = {
+          ...metadata,
+          preview: richTextToPlainText(content).slice(0, 160),
+        };
+      }
+      this.summaries.delete(key);
+      this.summaries.set(key, { profile, fingerprint, value: summary });
+      if (this.summaries.size > 500) {
+        const first = this.summaries.keys().next();
+        if (!first.done) this.summaries.delete(first.value);
+      }
+      documents.push(summary);
+    }
+    return { documents, has_more: false };
   }
   get(profile: string, id: string): Draft {
     const row = this.row(profile, id);
@@ -638,10 +756,7 @@ export class LocalStore {
       const queued = this.database
         .prepare('SELECT 1 FROM outbox WHERE profile=? AND document_id=?')
         .get(profile, id);
-      if (!row.remote_revision && !queued)
-        this.database
-          .prepare('DELETE FROM drafts WHERE profile=? AND id=?')
-          .run(profile, id);
+      if (!row.remote_revision && !queued) this.forget(profile, id);
       else
         this.write(
           { ...row, revision: row.revision + 1, deleted: 1, dirty: 1 },
@@ -665,6 +780,7 @@ export class LocalStore {
         const value = this.payload(row);
         this.write({ ...row, profile }, value);
       }
+      this.invalidate('offline');
       this.database.prepare("DELETE FROM drafts WHERE profile='offline'").run();
     });
   }
@@ -777,9 +893,7 @@ export class LocalStore {
       const row = this.row(profile, mutation.document_id)!;
       const value = this.payload(row);
       if (mutation.kind === 'delete') {
-        this.database
-          .prepare('DELETE FROM drafts WHERE profile=? AND id=?')
-          .run(profile, row.id);
+        this.forget(profile, row.id);
         return;
       }
       if (!remote || remote.id !== row.id)
@@ -906,10 +1020,7 @@ export class LocalStore {
       this.database
         .prepare('DELETE FROM outbox WHERE profile=? AND document_id=?')
         .run(profile, id);
-      if (!row.dirty || row.deleted)
-        this.database
-          .prepare('DELETE FROM drafts WHERE profile=? AND id=?')
-          .run(profile, id);
+      if (!row.dirty || row.deleted) this.forget(profile, id);
       else
         this.write(
           { ...row, remote_revision: 0, conflict: 1 },
@@ -1079,9 +1190,7 @@ export class LocalStore {
           );
         const copy =
           choice === 'copy' ? this.create(profile, pickEditable(value)) : null;
-        this.database
-          .prepare('DELETE FROM drafts WHERE profile=? AND id=?')
-          .run(profile, id);
+        this.forget(profile, id);
         return copy;
       }
       if (!value.conflict)
@@ -1133,6 +1242,7 @@ export class LocalStore {
     });
   }
   purgeProfile(profile: string): void {
+    this.invalidate(profile);
     this.transaction(() => {
       this.database.prepare('DELETE FROM drafts WHERE profile=?').run(profile);
       this.database.prepare('DELETE FROM vault WHERE profile=?').run(profile);

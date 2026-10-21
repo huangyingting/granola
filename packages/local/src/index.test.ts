@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { documentSchema } from '@windows-ai-notes/contracts/server';
 import {
@@ -59,10 +59,98 @@ describe('encrypted local drafts and durable outbox', () => {
     key = randomBytes(32);
   });
   afterEach(() => {
+    vi.restoreAllMocks();
     for (const store of stores) store.close();
     stores.clear();
     key.fill(0);
     rmSync(directory, { recursive: true, force: true });
+  });
+  it('pages encrypted summaries without returning full note bodies and reuses unchanged search results', () => {
+    const store = open();
+    const drafts = Array.from({ length: 57 }, (_, index) =>
+      store.create(
+        profile,
+        fields(`Private body-index-${index}-unique.`, `Meeting ${index}`),
+      ),
+    );
+    const get = vi.spyOn(store, 'get');
+    const first = store.page(profile);
+    const second = store.page(profile, '', 50);
+    expect(first.documents).toHaveLength(50);
+    expect(first.has_more).toBe(true);
+    expect(second.documents).toHaveLength(7);
+    expect(second.has_more).toBe(false);
+    expect(
+      new Set(
+        [...first.documents, ...second.documents].map((draft) => draft.id),
+      ).size,
+    ).toBe(57);
+    expect(first.documents.every((draft) => !('content' in draft))).toBe(true);
+    get.mockClear();
+    expect(store.page(profile)).toEqual(first);
+    expect(get).not.toHaveBeenCalled();
+    expect(
+      store
+        .page(profile, 'BODY-INDEX-56-UNIQUE')
+        .documents.map((draft) => draft.id),
+    ).toEqual([drafts[56]!.id]);
+    get.mockClear();
+    expect(store.page(profile, 'BODY-INDEX-56-UNIQUE').documents).toHaveLength(
+      1,
+    );
+    expect(get).not.toHaveBeenCalled();
+    store.save(
+      profile,
+      drafts[0]!.id,
+      1,
+      fields('body-index-56-unique now matches this edit too.'),
+    );
+    get.mockClear();
+    expect(store.page(profile, 'BODY-INDEX-56-UNIQUE').documents).toHaveLength(
+      2,
+    );
+    expect(get).toHaveBeenCalledTimes(1);
+    store.save(
+      profile,
+      drafts[56]!.id,
+      1,
+      fields('a'.repeat(300) + ' hidden-search-needle'),
+    );
+    const hidden = store.page(profile, 'hidden-search-needle');
+    expect(hidden.documents.map((draft) => draft.id)).toEqual([drafts[56]!.id]);
+    expect(hidden.documents[0]?.preview).toBe('a'.repeat(160));
+    expect(() => store.page(profile, '', -1)).toThrow('supported search');
+  });
+  it('invalidates summary/search caches on rollback, deletion and profile purge without crossing account scopes', () => {
+    const store = open();
+    const draft = store.create(profile, fields('Original private body.'));
+    const before = store.page(profile, 'original');
+    expect(() =>
+      store.atomic(() => {
+        store.save(profile, draft.id, 1, fields('Uncommitted replacement.'));
+        expect(store.page(profile, 'uncommitted').documents).toHaveLength(1);
+        throw new Error('Synthetic rollback.');
+      }),
+    ).toThrow('Synthetic rollback');
+    expect(store.page(profile, 'original')).toEqual(before);
+    store.applyRemote(
+      'other-profile',
+      remote(draft, 1, {
+        notes: 'Another profile private text.',
+        content: richTextFromPlainText('Another profile private text.'),
+      }),
+    );
+    expect(store.page('other-profile').documents[0]?.preview).toBe(
+      'Another profile private text.',
+    );
+    expect(store.page(profile).documents[0]?.preview).toBe(
+      'Original private body.',
+    );
+    store.remove(profile, draft.id);
+    expect(store.page(profile).documents).toHaveLength(0);
+    expect(store.page('other-profile').documents).toHaveLength(1);
+    store.purgeProfile('other-profile');
+    expect(store.page('other-profile', 'private').documents).toHaveLength(0);
   });
   it('preserves drafts, formatting and credentials across restart without plaintext in SQLite or WAL', () => {
     const title = 'synthetic-private-title-a7b451';

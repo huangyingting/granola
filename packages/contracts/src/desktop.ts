@@ -20,6 +20,10 @@ export const draftSchema = editableSchema.extend({
 });
 export type EditableDraft = z.infer<typeof editableSchema>;
 export type Draft = z.infer<typeof draftSchema>;
+export const draftSummarySchema = draftSchema.omit({ content: true }).extend({
+  preview: z.string().max(160),
+});
+export type DraftSummary = z.infer<typeof draftSummarySchema>;
 const scoped = { scope: z.number().int().positive() };
 export const desktopCommandSchema = z.discriminatedUnion('operation', [
   z.strictObject({ operation: z.literal('bootstrap') }),
@@ -29,6 +33,12 @@ export const desktopCommandSchema = z.discriminatedUnion('operation', [
     value: editableSchema.optional(),
   }),
   z.strictObject({ operation: z.literal('select'), ...scoped, id: resourceId }),
+  z.strictObject({
+    operation: z.literal('search'),
+    ...scoped,
+    query: z.string().max(200),
+    offset: z.number().int().min(0).max(1_000_000),
+  }),
   z.strictObject({
     operation: z.literal('save'),
     ...scoped,
@@ -112,7 +122,11 @@ export const desktopConflictSchema = z.strictObject({
 export const desktopStateSchema = z.strictObject({
   version: z.number().int().positive(),
   scope: z.number().int().positive(),
-  documents: z.array(draftSchema),
+  documents: z.array(draftSummarySchema).max(50),
+  selected: draftSchema.nullable(),
+  query: z.string().max(200),
+  offset: z.number().int().min(0).max(1_000_000),
+  has_more: z.boolean(),
   selected_id: resourceId.nullable(),
   storage: z.literal('encrypted'),
   connection: desktopConnectionSchema,

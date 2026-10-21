@@ -155,7 +155,7 @@ describe.skipIf(!databaseUrl)(
     });
     it('requires explicit offline-copy consent, uses new IDs, keeps originals and deduplicates repeated imports', async () => {
       await create('Device-only private text.');
-      const original = controller.snapshot().documents[0]!;
+      const original = controller.snapshot().selected!;
       await connect();
       expect(controller.profile).toBe('offline');
       await activate();
@@ -240,9 +240,9 @@ describe.skipIf(!databaseUrl)(
           ).content,
         ),
       ).toBe('Original device-only text.');
-      expect(
-        richTextToPlainText(controller.snapshot().documents[0]!.content),
-      ).toBe('Original device-only text.');
+      expect(richTextToPlainText(controller.snapshot().selected!.content)).toBe(
+        'Original device-only text.',
+      );
     });
     it('exposes both versions and resolves conflicts or remote deletion only through explicit new-copy decisions', async () => {
       const remote = await seed();
@@ -581,9 +581,59 @@ describe.skipIf(!databaseUrl)(
       });
       expect(controller.scope).toBe(scope);
       expect(events.at(-1)?.kind).toBe('status');
-      expect(
-        richTextToPlainText(controller.snapshot().documents[0]!.content),
-      ).toBe('Independent device-only text.');
+      expect(richTextToPlainText(controller.snapshot().selected!.content)).toBe(
+        'Independent device-only text.',
+      );
+    });
+    it('bounds every renderer state to one full draft and fifty summaries while preserving editor selection during searches', async () => {
+      const text = 'Synthetic bounded performance note. '.repeat(1000);
+      const drafts = Array.from({ length: 100 }, (_, index) =>
+        local.create('offline', {
+          ...fields(text),
+          title: `Meeting-index-${index}-unique`,
+        }),
+      );
+      await controller.execute({
+        operation: 'select',
+        scope: controller.scope,
+        id: drafts[0]!.id,
+      });
+      const first = controller.snapshot();
+      expect(first.documents).toHaveLength(50);
+      expect(first.has_more).toBe(true);
+      expect(first.selected?.id).toBe(drafts[0]!.id);
+      expect(Buffer.byteLength(JSON.stringify(first))).toBeLessThan(90_000);
+      expect(desktopStateSchema.parse(first)).toEqual(first);
+      const second = await controller.execute({
+        operation: 'search',
+        scope: controller.scope,
+        query: '',
+        offset: 50,
+      });
+      expect(second.documents).toHaveLength(50);
+      expect(second.has_more).toBe(false);
+      expect(second.selected?.id).toBe(drafts[0]!.id);
+      const searched = await controller.execute({
+        operation: 'search',
+        scope: controller.scope,
+        query: 'index-99-unique',
+        offset: 0,
+      });
+      expect(searched.documents.map((draft) => draft.id)).toEqual([
+        drafts[99]!.id,
+      ]);
+      expect(searched.selected?.id).toBe(drafts[0]!.id);
+      const saved = await controller.execute({
+        operation: 'save',
+        scope: controller.scope,
+        id: drafts[0]!.id,
+        local_revision: 1,
+        value: fields('Saved while excluded from the search results.'),
+      });
+      expect(saved.selected?.local_revision).toBe(2);
+      expect(saved.documents.map((draft) => draft.id)).toEqual([
+        drafts[99]!.id,
+      ]);
     });
   },
 );

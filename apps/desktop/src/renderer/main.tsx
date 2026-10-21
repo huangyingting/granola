@@ -43,7 +43,7 @@ function App() {
   const minimumVersion = useRef(0);
   const scope = useRef(1);
   const authAttempt = useRef(0);
-  async function invoke(command: DesktopCommand) {
+  async function invoke(command: DesktopCommand, discardEditor = false) {
     const attempt =
       command.operation === 'connect' || command.operation === 'cancelConnect'
         ? ++authAttempt.current
@@ -69,6 +69,14 @@ function App() {
       }
       if ('closing' in response) return null;
       if (
+        !discardEditor &&
+        ['bootstrap', 'search'].includes(command.operation) &&
+        latest.current?.scope === response.state.scope &&
+        latest.current.selected_id !== response.state.selected_id &&
+        !(await flush.current())
+      )
+        return null;
+      if (
         response.state.version >= minimumVersion.current &&
         response.state.version >= (latest.current?.version ?? 0)
       ) {
@@ -77,7 +85,8 @@ function App() {
         setState(response.state);
       }
       if (response.state.scope !== scope.current) return null;
-      if (command.operation !== 'save') setError('');
+      if (!['save', 'search', 'bootstrap'].includes(command.operation))
+        setError('');
       if (response.notice === 'exported')
         setNotice('Unencrypted export saved.');
       return response.state;
@@ -148,15 +157,28 @@ function App() {
       offChanged();
     };
   }, []);
-  const selected =
-    state?.documents.find((document) => document.id === state.selected_id) ??
-    null;
-  const documents =
-    state?.documents.filter((document) =>
-      `${document.title} ${document.tags.join(' ')} ${richTextToPlainText(document.content)}`
-        .toLowerCase()
-        .includes(query.toLowerCase()),
-    ) ?? [];
+  useEffect(() => {
+    if (state) setQuery(state.query);
+  }, [state?.scope]);
+  useEffect(() => {
+    if (!state || query === state.query) return;
+    const requestedScope = state.scope;
+    const timer = setTimeout(() => {
+      void flush.current().then((saved) =>
+        saved
+          ? invoke({
+              operation: 'search',
+              scope: requestedScope,
+              query,
+              offset: 0,
+            })
+          : null,
+      );
+    }, 150);
+    return () => clearTimeout(timer);
+  }, [query, state?.query, state?.scope, state?.version]);
+  const selected = state?.selected ?? null;
+  const documents = state?.documents ?? [];
   async function create() {
     if (!(await flush.current())) return;
     setPage('notes');
@@ -198,12 +220,17 @@ function App() {
           <input
             aria-label="Search meetings"
             placeholder="Find a thought..."
+            maxLength={200}
             value={query}
             onChange={(event) => setQuery(event.target.value)}
           />
         </label>
         <div className="list-label">
-          YOUR MEETINGS <span>{documents.length}</span>
+          YOUR MEETINGS{' '}
+          <span>
+            {documents.length}
+            {state?.has_more ? '+' : ''}
+          </span>
         </div>
         <nav className="meeting-list" aria-label="Meetings">
           {documents.map((document) => (
@@ -227,7 +254,7 @@ function App() {
                 {document.title || 'Untitled meeting'}
               </span>
               <span className="meeting-preview">
-                {richTextToPlainText(document.content).slice(0, 64) ||
+                {document.preview.slice(0, 64) ||
                   'A clean page for your next conversation'}
               </span>
               <span className="meeting-meta">
@@ -243,6 +270,46 @@ function App() {
             </button>
           ))}
         </nav>
+        {state && (state.offset > 0 || state.has_more) && (
+          <div className="list-pagination">
+            <button
+              className="quiet-button"
+              disabled={blocked || query !== state.query || state.offset === 0}
+              onClick={() => {
+                void flush.current().then((saved) =>
+                  saved
+                    ? invoke({
+                        operation: 'search',
+                        scope: state.scope,
+                        query,
+                        offset: Math.max(0, state.offset - 50),
+                      })
+                    : null,
+                );
+              }}
+            >
+              Previous meetings
+            </button>
+            <button
+              className="quiet-button"
+              disabled={blocked || query !== state.query || !state.has_more}
+              onClick={() => {
+                void flush.current().then((saved) =>
+                  saved
+                    ? invoke({
+                        operation: 'search',
+                        scope: state.scope,
+                        query,
+                        offset: state.offset + 50,
+                      })
+                    : null,
+                );
+              }}
+            >
+              More meetings
+            </button>
+          </div>
+        )}
         <button
           className="connection-button"
           disabled={!state || blocked}
@@ -426,7 +493,10 @@ function App() {
   );
 }
 
-type Invoke = (command: DesktopCommand) => Promise<DesktopState | null>;
+type Invoke = (
+  command: DesktopCommand,
+  discardEditor?: boolean,
+) => Promise<DesktopState | null>;
 function Note({
   draft,
   state,
@@ -505,9 +575,8 @@ function Note({
             pending.current = true;
             return false;
           }
-          const updated = result.documents.find(
-            (document) => document.id === draft.id,
-          );
+          const updated =
+            result.selected?.id === draft.id ? result.selected : null;
           if (!updated) {
             pending.current = true;
             setError(
@@ -560,6 +629,7 @@ function Note({
     editor?.commands.setContent(updated.content, { emitUpdate: false });
     setUnsaved(false);
     setConfirmDiscard(false);
+    setError('');
   }
   function changeTitle(text: string) {
     setTitle(text);
@@ -721,12 +791,15 @@ function Note({
               <button
                 className="danger-button"
                 onClick={() => {
-                  void invoke({ operation: 'bootstrap' }).then((result) => {
-                    const updated = result?.documents.find(
-                      (document) => document.id === draft.id,
-                    );
-                    if (updated) loadDraft(updated);
-                  });
+                  void invoke({ operation: 'bootstrap' }, true).then(
+                    (result) => {
+                      const updated =
+                        result?.selected?.id === draft.id
+                          ? result.selected
+                          : null;
+                      if (updated) loadDraft(updated);
+                    },
+                  );
                 }}
               >
                 Discard editor changes

@@ -111,6 +111,13 @@ Only unpackaged builds with `NODE_ENV=test` or `development` and
 `WINDOWS_NOTES_ALLOW_LOOPBACK=1` permit HTTP loopback service/issuer fixtures.
 Packaged builds always require HTTPS.
 
+The sidebar pages fifty encrypted-note summaries at a time; only the selected
+editor receives a full draft. Search covers titles, tags and the complete note
+body, including text beyond its preview, without writing a plaintext search
+index. Paging and filtering preserve the current editor. Cold full-body search
+still decrypts matching candidates in the main process; large-library latency
+and full transcript/job payloads remain performance release gates.
+
 ```sh
 pnpm desktop:build
 pnpm desktop:test

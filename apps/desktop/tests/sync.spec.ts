@@ -122,9 +122,9 @@ test('connects through real OIDC, requires offline-copy consent, syncs edits and
       .first()
       .click();
     await expect(
-      page.getByText('Synthetic immutable transcript evidence.', {
-        exact: true,
-      }),
+      page
+        .getByRole('paragraph')
+        .filter({ hasText: 'Synthetic immutable transcript evidence.' }),
     ).toBeVisible();
     await close(application);
     application = null;

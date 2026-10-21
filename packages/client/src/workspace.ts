@@ -52,6 +52,9 @@ export class WorkspaceController {
   private scopeRevision = 1;
   private service: string | null;
   private pendingPurge = new Set<string>();
+  private query = '';
+  private offset = 0;
+  private readonly selection = new Map<string, string | null>();
   constructor(
     private readonly local: LocalStore,
     private readonly openBrowser: (url: string) => Promise<void>,
@@ -125,6 +128,10 @@ export class WorkspaceController {
       );
   }
   private emit(kind: DesktopChange['kind']) {
+    if (kind === 'scope' || kind === 'revoked') {
+      this.query = '';
+      this.offset = 0;
+    }
     this.revision++;
     this.changed({ version: this.revision, scope: this.scopeRevision, kind });
   }
@@ -136,20 +143,36 @@ export class WorkspaceController {
     if (this.disposed)
       throw new ClientError('workspace_closed', 'This workspace has closed.');
     const profile = this.profile;
-    const documents = this.local.list(profile);
-    const requested = this.local.getValue(
-      profile,
-      'selected-document',
-      resourceId,
-    );
-    const selected =
-      documents.find((draft) => draft.id === requested) ?? documents[0] ?? null;
+    const page = this.local.page(profile, this.query, this.offset);
+    const requested = this.selection.has(profile)
+      ? this.selection.get(profile)
+      : this.local.getValue(profile, 'selected-document', resourceId);
+    let selected: DesktopState['selected'] = null;
+    if (requested) {
+      try {
+        selected = this.local.get(profile, requested);
+      } catch (error) {
+        if (
+          !(error instanceof LocalError) ||
+          error.code !== 'local_document_missing'
+        )
+          throw error;
+      }
+    }
+    if (!selected) {
+      const first = page.documents[0] ?? this.local.page(profile).documents[0];
+      if (first) selected = this.local.get(profile, first.id);
+    }
+    this.selection.set(profile, selected?.id ?? null);
     const details = selected ? this.local.details(profile, selected.id) : null;
     const account = this.account;
     return {
       version: this.revision,
       scope: this.scopeRevision,
-      documents,
+      ...page,
+      selected,
+      query: this.query,
+      offset: this.offset,
       selected_id: selected?.id ?? null,
       storage: 'encrypted',
       connection: {
@@ -200,6 +223,7 @@ export class WorkspaceController {
     this.generation++;
     this.auth?.abort();
     this.session?.cancel();
+    this.selection.clear();
     this.stopEngine();
   }
   private stopEngine() {
@@ -753,14 +777,19 @@ export class WorkspaceController {
       await this.synchronize();
     } else {
       const profile = this.profile;
-      if (command.operation === 'create') {
+      if (command.operation === 'search') {
+        this.query = command.query;
+        this.offset = command.offset;
+      } else if (command.operation === 'create') {
         this.local.atomic(() => {
           const draft = this.local.create(profile, command.value);
           this.local.putValue(profile, 'selected-document', draft.id);
         });
+        this.selection.delete(profile);
       } else if (command.operation === 'select') {
         this.local.get(profile, command.id);
         this.local.putValue(profile, 'selected-document', command.id);
+        this.selection.delete(profile);
       } else if (command.operation === 'save') {
         this.local.save(
           profile,
@@ -777,13 +806,15 @@ export class WorkspaceController {
           if (draft)
             this.local.putValue(profile, 'selected-document', draft.id);
         });
+        this.selection.delete(profile);
       } else
         throw new ClientError(
           'unsupported_command',
           'This command requires the native desktop host.',
         );
       this.revision++;
-      if (command.operation !== 'select') this.schedule(1000);
+      if (command.operation !== 'select' && command.operation !== 'search')
+        this.schedule(1000);
     }
     return this.snapshot();
   }

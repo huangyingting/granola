@@ -39,6 +39,81 @@ async function close(application: ElectronApplication) {
   await closed;
 }
 
+test('pages meeting summaries and saves the selected editor even when a search excludes it', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'windows-notes-paging-ui-'));
+  let application: ElectronApplication | null = null;
+  try {
+    application = await launch(directory);
+    let page = await application.firstWindow();
+    await page.evaluate(async () => {
+      const initial = await window.notes.invoke({ operation: 'bootstrap' });
+      if (!initial.ok || !('state' in initial))
+        throw new Error('No desktop state.');
+      for (let index = 0; index < 55; index++) {
+        const created = await window.notes.invoke({
+          operation: 'create',
+          scope: initial.state.scope,
+          value: {
+            title: `Synthetic paged meeting ${index}`,
+            content: {
+              type: 'doc',
+              content: [
+                {
+                  type: 'paragraph',
+                  content: [
+                    { type: 'text', text: `Synthetic paged body ${index}.` },
+                  ],
+                },
+              ],
+            },
+            tags: [],
+          },
+        });
+        if (!created.ok || !('state' in created))
+          throw new Error('Synthetic creation failed.');
+      }
+    });
+    await page.reload();
+    const editor = page.getByRole('textbox', {
+      name: 'Meeting notes',
+      exact: true,
+    });
+    await expect(editor).toHaveText('Synthetic paged body 54.');
+    await expect(
+      page.getByRole('navigation', { name: 'Meetings' }).getByRole('button'),
+    ).toHaveCount(50);
+    await page
+      .getByRole('button', { name: 'More meetings', exact: true })
+      .click();
+    await expect(
+      page.getByRole('navigation', { name: 'Meetings' }).getByRole('button'),
+    ).toHaveCount(5);
+    await expect(editor).toHaveText('Synthetic paged body 54.');
+    await page
+      .getByRole('textbox', { name: 'Search meetings' })
+      .fill('Phrase absent from every meeting.');
+    await expect(
+      page.getByRole('navigation', { name: 'Meetings' }).getByRole('button'),
+    ).toHaveCount(0);
+    await expect(editor).toHaveText('Synthetic paged body 54.');
+    await editor.fill('Synthetic edit saved outside the current search.');
+    await expect(
+      page.getByText('SAVED LOCALLY', { exact: true }),
+    ).toBeVisible();
+    await close(application);
+    application = null;
+    application = await launch(directory);
+    page = await application.firstWindow();
+    await expect(
+      page.getByRole('textbox', { name: 'Meeting notes', exact: true }),
+    ).toHaveText('Synthetic edit saved outside the current search.');
+    await close(application);
+    application = null;
+  } finally {
+    if (application) await application.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 test('persists rich text across restart, isolates the renderer and keeps local files encrypted', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'windows-notes-ui-'));
   let application: ElectronApplication | null = null;
