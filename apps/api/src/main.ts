@@ -1,6 +1,7 @@
 import { Database, requireDatabaseUrl } from '@windows-ai-notes/db';
 import { loadAuthConfig } from './auth.js';
 import { createServer } from './server.js';
+import { loadStorageConfig, RecordingBlobs } from '@windows-ai-notes/storage';
 
 async function main() {
   const config = loadAuthConfig();
@@ -8,7 +9,12 @@ async function main() {
   if (!Number.isInteger(port) || port < 1 || port > 65535)
     throw new Error('PORT must be between 1 and 65535.');
   const db = new Database(requireDatabaseUrl());
-  const server = await createServer(db, config);
+  const storage = loadStorageConfig();
+  const server = await createServer(
+    db,
+    config,
+    storage ? new RecordingBlobs(storage) : null,
+  );
   server.addHook('onClose', async () => db.close());
   const stop = () => {
     void server.close().catch(() => {
@@ -31,7 +37,7 @@ async function main() {
 }
 main().catch(() => {
   console.error(
-    'api_start_failed: check database migration, bind address and authentication configuration. Secrets were not logged.',
+    'api_start_failed: check database migration, bind address, authentication and optional private recording storage. Secrets were not logged.',
   );
   process.exitCode = 1;
 });

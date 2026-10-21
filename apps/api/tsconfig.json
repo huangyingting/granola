@@ -5,6 +5,7 @@
     { "path": "../../packages/contracts" },
     { "path": "../../packages/ai" },
     { "path": "../../packages/db" },
+    { "path": "../../packages/storage" },
     { "path": "../worker" }
   ],
   "include": ["src/**/*.ts"]

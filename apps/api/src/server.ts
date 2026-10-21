@@ -22,17 +22,10 @@ import { exportMeeting } from '@windows-ai-notes/contracts/content';
 import type { Database } from '@windows-ai-notes/db';
 import { validateWav } from '@windows-ai-notes/ai/wav';
 import { createAuthenticator, principal, type AuthConfig } from './auth.js';
+import type { RecordingBlobs } from '@windows-ai-notes/storage';
+import { registerRecordingRoutes } from './recordings.js';
+import { parse } from './parse.js';
 
-function parse<T extends z.ZodType>(schema: T, input: unknown): z.infer<T> {
-  const result = schema.safeParse(input);
-  if (!result.success)
-    throw new ServiceError(
-      'invalid_request',
-      'The request does not match the documented contract.',
-      400,
-    );
-  return result.data;
-}
 const idParams = z.strictObject({ id: resourceId });
 const revisionQuery = z.strictObject({
   revision: z.coerce.number().int().positive().optional(),
@@ -43,7 +36,11 @@ const listQuery = z.strictObject({
   offset: z.coerce.number().int().min(0).max(10_000).default(0),
 });
 
-export async function createServer(db: Database, config: AuthConfig) {
+export async function createServer(
+  db: Database,
+  config: AuthConfig,
+  storage: RecordingBlobs | null = null,
+) {
   const app = Fastify({
     logger: false,
     bodyLimit: MAX_AUDIO_BYTES,
@@ -119,6 +116,7 @@ export async function createServer(db: Database, config: AuthConfig) {
       404,
     );
   });
+  registerRecordingRoutes(app, db, storage);
   app.get('/health', async () => {
     try {
       await db.pool.query('SELECT 1');

@@ -22,9 +22,14 @@ import {
   type RichTextDocument,
 } from '@windows-ai-notes/contracts/content';
 import { recordChange, SyncStore } from './sync.js';
+import { RecordingStore } from './recordings.js';
 export { recordChange } from './sync.js';
 
-const migrationFiles = ['001_initial.sql', '002_editing_sync.sql'];
+const migrationFiles = [
+  '001_initial.sql',
+  '002_editing_sync.sql',
+  '003_recordings.sql',
+];
 
 export type Transaction = pg.PoolClient;
 export interface Document {
@@ -119,6 +124,7 @@ export const digest = (value: unknown, canonical = false): string =>
 export class Database {
   readonly pool: pg.Pool;
   readonly sync: SyncStore;
+  readonly recordings: RecordingStore;
   constructor(url: string) {
     this.pool = new pg.Pool({
       connectionString: url,
@@ -127,6 +133,7 @@ export class Database {
       statement_timeout: 10_000,
     });
     this.sync = new SyncStore(this);
+    this.recordings = new RecordingStore(this);
     this.pool.on('error', () =>
       console.error(
         'database_connection_failed: idle PostgreSQL connection closed.',
@@ -805,6 +812,7 @@ export class Database {
   async deleteDocument(userId: string, id: string) {
     await this.transaction(async (tx) => {
       await this.document(userId, id, tx);
+      await this.recordings.removeDocument(tx, id);
       await tx.query(
         "UPDATE documents SET deleted_at=now(),title='[deleted]',updated_at=now() WHERE id=$1",
         [id],

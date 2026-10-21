@@ -10,12 +10,14 @@
     "@windows-ai-notes/contracts": "workspace:*",
     "@windows-ai-notes/ai": "workspace:*",
     "@windows-ai-notes/db": "workspace:*",
+    "@windows-ai-notes/storage": "workspace:*",
     "@fastify/rate-limit": "^10.3.0",
     "fastify": "^5.6.0",
     "jose": "^6.1.0",
     "zod": "^4.1.0"
   },
   "devDependencies": {
+    "@aws-sdk/client-s3": "^3.900.0",
     "@windows-ai-notes/worker": "workspace:*"
   }
 }

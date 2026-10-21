@@ -34,7 +34,20 @@ jobs:
       - run: corepack enable
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
-      - run: pnpm test
+      - name: Build the pinned upstream synthetic S3 store
+        run: docker build --tag windows-ai-notes-minio:ci --file infra/compose/Minio.Dockerfile .
+      - name: Start the private synthetic S3 store
+        run: |
+          docker run --detach --name windows-ai-notes-minio-ci \
+            --publish 127.0.0.1:59000:9000 --tmpfs /data:rw,size=512m,mode=1777 \
+            --env MINIO_ROOT_USER=storage-test-only \
+            --env MINIO_ROOT_PASSWORD=storage-test-only-secret windows-ai-notes-minio:ci
+          curl --fail --silent --show-error --max-time 3 --retry 30 --retry-all-errors --retry-delay 1 --retry-max-time 45 \
+            http://127.0.0.1:59000/minio/health/live
+      - name: PostgreSQL, S3 integrity, private AI and client regressions
+        env:
+          TEST_S3_ENDPOINT: http://127.0.0.1:59000
+        run: pnpm test
       - run: pnpm format:check
       - name: Build the unprivileged server image without credentials
         run: docker build --tag windows-ai-notes-server:ci .

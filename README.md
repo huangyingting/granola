@@ -59,6 +59,10 @@ Real Windows audio behavior still requires the hardware checks below.
   identities, workspace membership, private owner-only documents, optimistic
   revisions, immutable note/transcript history, idempotent AI jobs, leases/fences,
   cancellation, bounded retries, and replayable SSE lifecycle events.
+- Private S3-compatible recording storage: immutable metadata, repairable frozen
+  seals, bounded signed staging PUTs, full WAV/PCM integrity verification and
+  server-only immutable promotion. Durable deletion tracks objects across
+  document deletion, revocation, expired grants and late upload replay.
 - Azure Speech Fast Transcription and Azure OpenAI structured summaries. Inputs
   freeze their revisions; generated summaries never overwrite notes. Citations
   must resolve to the supplied immutable evidence. Provider errors are explicit.
@@ -248,6 +252,56 @@ Administrative account provisioning remains CLI-only. Logout always removes the
 local credential record; the client reports provider revocation as confirmed,
 unsupported or unconfirmed rather than claiming an unavailable remote logout.
 
+### Optional private recording storage
+
+Set the `S3_*` variables shown in `.env.example` and provision a **private,
+unversioned** bucket. The API checks bucket access policy, ACL and versioning
+before accepting traffic. Production requires an HTTPS object endpoint and
+explicit `AES256` or `aws:kms` server-side encryption; KMS also requires
+`S3_KMS_KEY_ID`. Omit both static credential variables to use the server workload
+identity. Credentials stay on the server; desktop clients receive only bounded,
+short-lived, checksum/header-bound staging PUT authorization.
+The server role needs bucket readiness reads (`ListBucket`, `GetBucketAcl`,
+`GetBucketPolicy`, `GetBucketVersioning`) and object `GetObject`, `PutObject`,
+`DeleteObject` under `recordings/v1/`. Staging PUTs use the signed
+`bucket-owner-full-control` ACL, so account for `PutObjectAcl` where required.
+KMS deployments also need the corresponding key permissions. The API does not
+need permission to create buckets, change their policy or enable public access.
+
+For synthetic local development, the optional composition builds the pinned
+official MinIO source and binds only loopback:
+
+```sh
+docker compose --env-file .env -f infra/compose/storage.yml up -d --build
+```
+
+Supply explicit nonproduction credentials and create your private bucket using
+your S3 administration tooling. This source-built fixture is **not a production
+object-store deployment**. The normal PostgreSQL composition remains unchanged.
+
+The recording API accepts canonical native chunks up to 960,044 bytes / 30
+seconds. These use single PUT, not multipart or arbitrary file upload.
+Register immutable chunk metadata, request authorization, PUT the exact WAV with
+all returned headers, then complete verification. A successful PUT is not proof
+of durable completion: retain local audio until the API reports it verified.
+The server reads and verifies the actual bytes, then writes those exact bytes
+to a private opaque key; it never trusts an ETag or copies a mutable staging key.
+
+Sealing freezes the complete chunk order, tracks and sample ends independently
+of upload completion. `sealed_pending` remains repairable; `ready` means every
+declared chunk is verified. Interrupted captures require explicit
+`accept_incomplete` and remain marked partial. Initial per-user limits are
+100 retained recordings, 10,000 retained chunks and 5 GiB of declared audio;
+temporary objects and per-chunk attempts are also bounded.
+
+Audio-only deletion preserves written notes. Deletion returns `202` and remains
+observable through its status endpoint; cleanup protects outstanding
+authorizations/in-flight checks, retries failures and resweeps tombstones for
+late PUTs. `cleanup_confirmed` describes the last successful sweep, not an
+instantaneous erasure guarantee. Independent backup deletion-ledger replay,
+retention policies and production storage drills remain release work.
+The desktop uploader and complete-meeting transcription are not connected yet.
+
 ### Server API
 
 Contracts are in `packages/contracts/src/server.ts`. Errors include `code`,
@@ -273,6 +327,15 @@ letters, digits, dots, colons, underscores or hyphens.
 | POST                 | `/v1/jobs/{id}/cancel`                                               | Explicit cancellation, with terminal-state arbitration                                                                             |
 | GET                  | `/v1/jobs/{id}/events`                                               | SSE; numeric `Last-Event-ID` for replay                                                                                            |
 | GET                  | `/v1/models`, `/v1/templates`                                        | Fixed deployment capability catalog, never keys or arbitrary provider URLs                                                         |
+| GET                  | `/v1/recording-capabilities`                                         | Authenticated storage availability, allowed upload origin and bounded chunk limits                                                 |
+| POST / GET           | `/v1/documents/{id}/recordings`                                      | Create immutable `{id,created_at,tracks}`; list with `offset`                                                                      |
+| GET                  | `/v1/recordings/{id}`                                                | Upload progress, immutable seal digest and readiness                                                                               |
+| POST / GET           | `/v1/recordings/{id}/chunks`                                         | Register immutable native WAV descriptor; page with `offset`                                                                       |
+| POST                 | `/v1/recordings/{id}/seal`                                           | Freeze exact track/chunk order, ends, timeline/gaps and incomplete acceptance                                                      |
+| GET                  | `/v1/audio-chunks/{id}`                                              | Private immutable descriptor and verification state                                                                                |
+| POST                 | `/v1/audio-chunks/{id}/upload`                                       | Empty object; issue/replay bounded staging authorization                                                                           |
+| POST                 | `/v1/audio-chunks/{id}/complete`                                     | `{upload_id}`; verify actual bytes and publish immutable private object                                                            |
+| DELETE / GET         | `/v1/recordings/{id}`, `/v1/recordings/{id}/deletion`                | Request audio-only deletion; observe durable cleanup                                                                               |
 
 Notes include canonical plain text and optional structured `content`, validated
 by `packages/contracts/src/content.ts`. Supported blocks include paragraphs,
@@ -321,8 +384,8 @@ model-token previews. To retry a terminal failure, create a new run with a new
 idempotency key.
 
 This first slice uses PostgreSQL polling/leases as the durable scheduler rather
-than introducing unused Redis/BullMQ infrastructure. Full S3/resumable uploads,
-recording manifests/sealing, complete-meeting finalization, realtime STT, chat,
+than introducing unused Redis/BullMQ infrastructure. Desktop resumable uploads,
+complete-meeting finalization, realtime STT, chat,
 interactive desktop AI, budget reservation/settlement and token streaming remain later
 implementation work. Successful jobs expose provider usage, but this is not a
 billing ledger; retries can incur duplicate provider charges.

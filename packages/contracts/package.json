@@ -8,7 +8,8 @@
     "./server": "./dist/server.js",
     "./content": "./dist/content.js",
     "./desktop": "./dist/desktop.js",
-    "./recording": "./dist/recording.js"
+    "./recording": "./dist/recording.js",
+    "./uploads": "./dist/uploads.js"
   },
   "dependencies": {
     "zod": "^4.1.0"

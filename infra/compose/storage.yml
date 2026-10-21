@@ -1,0 +1,15 @@
+name: windows-ai-notes-storage
+services:
+  minio:
+    build:
+      context: ../..
+      dockerfile: infra/compose/Minio.Dockerfile
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY_ID:?Set S3_ACCESS_KEY_ID for the development store}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_ACCESS_KEY:?Set S3_SECRET_ACCESS_KEY for the development store}
+    ports:
+      - '127.0.0.1:${S3_PORT:-59000}:9000'
+    volumes:
+      - recording-objects:/data
+volumes:
+  recording-objects:

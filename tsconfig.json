@@ -5,6 +5,7 @@
     { "path": "./tools/audio-probe" },
     { "path": "./packages/ai" },
     { "path": "./packages/db" },
+    { "path": "./packages/storage" },
     { "path": "./packages/local" },
     { "path": "./packages/client" },
     { "path": "./apps/api" },
