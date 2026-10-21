@@ -238,6 +238,28 @@ describe('bounded isolated streaming speech sessions', () => {
     expect(events).toEqual([]);
     expect(worker.threadId).toBe(-1);
   });
+  it.each(['stdout', 'stderr'] as const)(
+    'rejects %s diagnostics delivered after the stopped receipt but before worker cleanup',
+    async (stream) => {
+      const { session, selected, worker } = await open();
+      worker.on('message', (event: { kind: string }) => {
+        if (event.kind === 'stopped')
+          worker[stream]!.emit(
+            'data',
+            Buffer.from('sensitive-synthetic-provider-body'),
+          );
+      });
+      session.write(frame(selected));
+      const completion = session.finish();
+      await expect(completion).rejects.toMatchObject({
+        code: 'live_provider_diagnostics',
+      });
+      await expect(completion).rejects.not.toThrow(
+        'sensitive-synthetic-provider-body',
+      );
+      expect(worker.threadId).toBe(-1);
+    },
+  );
   it.each(['stalled', 'idle'])(
     'bounds %s input even when no additional frame arrives',
     async (mode) => {

@@ -1,5 +1,6 @@
 import { randomUUID, createHash } from 'node:crypto';
 import { Worker } from 'node:worker_threads';
+import { finished } from 'node:stream/promises';
 import {
   livePcmFrameSchema,
   type LivePcmFrame,
@@ -227,7 +228,12 @@ class SpeechSession implements RealtimeSession {
       this.pending.length = 0;
       this.finals.clear();
       this.partial = undefined;
-      this.closing = this.worker.terminate().then(() => undefined);
+      const drained = [this.worker.stdout, this.worker.stderr]
+        .filter((stream) => stream !== null)
+        .map((stream) => finished(stream, { cleanup: true }));
+      this.closing = Promise.all([this.worker.terminate(), ...drained]).then(
+        () => undefined,
+      );
     }
     return this.closing;
   }
@@ -362,7 +368,12 @@ class SpeechSession implements RealtimeSession {
       }
       this.terminal = true;
       void this.close().then(
-        () =>
+        () => {
+          // Worker messages and diagnostic streams can arrive in either order.
+          if (this.error) {
+            this.reject(this.error);
+            return;
+          }
           this.resolve({
             provider_epoch: this.providerEpoch,
             samples: this.samples,
@@ -371,7 +382,8 @@ class SpeechSession implements RealtimeSession {
               output_tokens: 0,
               audio_ms: this.samples / 16,
             },
-          }),
+          });
+        },
         () =>
           this.reject(
             new ServiceError(
