@@ -13,6 +13,27 @@ const open = (mode: string, events: string[] = []) =>
   new AudioHostClient(process.execPath, [fixture, mode], (event) =>
     events.push(event.event_type),
   );
+const captureTrack = {
+  track_id: track,
+  kind: 'microphone',
+  capture_scope: 'endpoint',
+  device_selection_policy: 'default',
+  device_id: 'default',
+} as const;
+async function live(client: AudioHostClient) {
+  await client.request({
+    command: 'start_recording',
+    recording_id: recording,
+    tracks: [captureTrack],
+  });
+  const event = await client.request({
+    command: 'start_live_preview',
+    recording_id: recording,
+  });
+  if (event.event_type !== 'recording.live_started')
+    throw new Error('No synthetic live preview.');
+  return event.payload.preview_id;
+}
 async function descriptor(client: AudioHostClient) {
   const event = await client.request({
     command: 'list_recording_chunks',
@@ -46,6 +67,147 @@ describe('bounded main-process native audio transport', () => {
       DOTNET_ROOT: 'synthetic-runtime',
     });
   });
+  it('delivers request-bound live PCM only to its awaiting reader, preserving source clocks without forwarding audio to observers', async () => {
+    const events: string[] = [];
+    const client = open('capture-live', events);
+    try {
+      const preview = await live(client);
+      for (let sequence = 0; sequence < 2; sequence++) {
+        const event = await client.request({
+          command: 'read_live_audio',
+          recording_id: recording,
+          preview_id: preview,
+        });
+        if (event.event_type !== 'recording.live_audio')
+          throw new Error('No synthetic PCM.');
+        expect(event.payload.frames).toHaveLength(1);
+        const frame = event.payload.frames[0]!;
+        expect(frame).toMatchObject({
+          recording_id: recording,
+          preview_id: preview,
+          track_id: track,
+          sample_start: 16_000 + sequence * 800,
+          sequence,
+          sample_count: 800,
+          clock_start_ms: sequence * 50,
+          clock_end_ms: (sequence + 1) * 50,
+        });
+        expect(Buffer.from(frame.data_base64, 'base64')).toEqual(
+          Buffer.alloc(1600, 0x3b),
+        );
+      }
+      const stopped = await client.request({
+        command: 'stop_live_preview',
+        recording_id: recording,
+        preview_id: preview,
+      });
+      expect(stopped).toMatchObject({
+        event_type: 'recording.live_stopped',
+        payload: { state: 'stopped', frames: [] },
+      });
+      expect(events).toEqual([
+        'recording.started',
+        'recording.live_started',
+        'recording.live_stopped',
+      ]);
+      await expect(
+        client.request({
+          command: 'stop_recording',
+          recording_id: recording,
+        }),
+      ).resolves.toMatchObject({ payload: { state: 'sealed' } });
+    } finally {
+      await client.close();
+    }
+  });
+  it('reports bounded preview failure without failing healthy capture control or emitting raw PCM to observers', async () => {
+    const events: string[] = [];
+    const client = open('capture-live-overrun', events);
+    try {
+      const preview = await live(client);
+      await expect(
+        client.request({
+          command: 'read_live_audio',
+          recording_id: recording,
+          preview_id: preview,
+        }),
+      ).resolves.toMatchObject({
+        payload: { state: 'failed', code: 'live_overrun', frames: [] },
+      });
+      await expect(
+        client.request({
+          command: 'pause_recording',
+          recording_id: recording,
+        }),
+      ).resolves.toMatchObject({ payload: { state: 'paused' } });
+      await expect(
+        client.request({
+          command: 'resume_recording',
+          recording_id: recording,
+        }),
+      ).resolves.toMatchObject({ payload: { state: 'recording' } });
+      await expect(
+        client.request({
+          command: 'stop_recording',
+          recording_id: recording,
+        }),
+      ).resolves.toMatchObject({ payload: { state: 'sealed' } });
+      expect(events).not.toContain('recording.live_audio');
+    } finally {
+      await client.close();
+    }
+  });
+  it('stops a preview on capture pause and rejects stale preview IDs without poisoning valid capture commands', async () => {
+    const client = open('capture-live');
+    try {
+      const preview = await live(client);
+      await client.request({
+        command: 'pause_recording',
+        recording_id: recording,
+      });
+      await expect(
+        client.request({
+          command: 'read_live_audio',
+          recording_id: recording,
+          preview_id: preview,
+        }),
+      ).resolves.toMatchObject({
+        payload: { state: 'stopped', code: 'capture_paused', frames: [] },
+      });
+      await expect(
+        client.request({
+          command: 'read_live_audio',
+          recording_id: recording,
+          preview_id: track,
+        }),
+      ).rejects.toMatchObject({ code: 'live_preview_not_found' });
+      await expect(
+        client.request({
+          command: 'stop_recording',
+          recording_id: recording,
+        }),
+      ).resolves.toMatchObject({ payload: { state: 'sealed' } });
+    } finally {
+      await client.close();
+    }
+  });
+  it.each(['wrong-preview', 'wrong-track'])(
+    'rejects live %s before forwarding it to any status observer',
+    async (change) => {
+      const events: string[] = [];
+      const client = open(`capture-live-${change}`, events);
+      const preview = await live(client);
+      await expect(
+        client.request({
+          command: 'read_live_audio',
+          recording_id: recording,
+          preview_id: preview,
+        }),
+      ).rejects.toThrow();
+      expect(events).toEqual(['recording.started', 'recording.live_started']);
+      await expect(client.close()).rejects.toThrow();
+    },
+  );
   it('streams deterministic WAV ranges and verifies the upload checksum without forwarding media to event observers', async () => {
     const events: string[] = [];
     const client = open('range', events);

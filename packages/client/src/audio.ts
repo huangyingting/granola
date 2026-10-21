@@ -28,6 +28,9 @@ const expectedEvents: Record<
   get_recording: 'recording.manifest',
   list_recording_chunks: 'recording.chunks',
   read_chunk: 'recording.chunk_range',
+  start_live_preview: 'recording.live_started',
+  read_live_audio: 'recording.live_audio',
+  stop_live_preview: 'recording.live_stopped',
 };
 
 export function audioHostEnvironment(
@@ -174,8 +177,20 @@ export class AudioHostClient {
             throw new Error(
               'AudioHost replied with a different recording or response type.',
             );
+          if (
+            handler &&
+            'preview_id' in handler.request &&
+            event.event_type !== 'error' &&
+            (!('preview_id' in event.payload) ||
+              event.payload.preview_id !== handler.request.preview_id)
+          )
+            throw new Error('AudioHost replied with a different live preview.');
           // Media belongs only to the awaiting reader, never status/UI observers.
-          if (event.event_type !== 'recording.chunk_range') onEvent(event);
+          if (
+            event.event_type !== 'recording.chunk_range' &&
+            event.event_type !== 'recording.live_audio'
+          )
+            onEvent(event);
           if (handler && event.request_id !== null) {
             this.pending.delete(event.request_id);
             if (event.event_type === 'error') {

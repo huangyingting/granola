@@ -24,6 +24,7 @@ await using var input = Console.OpenStandardInput();
 await using var output = Console.OpenStandardOutput();
 var exitCode = 0;
 double lastStatusSeconds = 0;
+double lastLevelsSeconds = 0;
 try
 {
     Directory.CreateDirectory(root);
@@ -43,20 +44,24 @@ try
                 await Emit("error", new ErrorPayload(failure.Code, failure.Message, failure.Retryable), recordingId: session.Store.RecordingId);
                 continue;
             }
+            if (session.ElapsedSeconds >= 3600)
+            {
+                await session.StopAsync();
+                await Emit("recording.stopped", session.Store.Status(), recordingId: session.Store.RecordingId);
+                continue;
+            }
+            if (session.ElapsedSeconds - lastStatusSeconds >= 1)
+            {
+                await Emit("recording.status", session.Store.Status(), recordingId: session.Store.RecordingId);
+                lastStatusSeconds = session.ElapsedSeconds;
+            }
+            if (session.Store.Status().State == "recording" && session.ElapsedSeconds - lastLevelsSeconds >= 0.25)
+            {
+                await Emit("recording.levels", session.ReadLevels(), recordingId: session.Store.RecordingId);
+                lastLevelsSeconds = session.ElapsedSeconds;
+            }
             if (completed != pending)
             {
-                if (session.ElapsedSeconds >= 3600)
-                {
-                    await session.StopAsync();
-                    await Emit("recording.stopped", session.Store.Status(), recordingId: session.Store.RecordingId);
-                }
-                else if (session.ElapsedSeconds - lastStatusSeconds >= 1)
-                {
-                    await Emit("recording.status", session.Store.Status(), recordingId: session.Store.RecordingId);
-                    lastStatusSeconds = session.ElapsedSeconds;
-                }
-                if (session.Store.Status().State == "recording")
-                    await Emit("recording.levels", session.ReadLevels(), recordingId: session.Store.RecordingId);
                 continue;
             }
         }
@@ -116,7 +121,17 @@ try
                     if (session is null || session.Store.RecordingId != request.RecordingId)
                         throw new AudioException("recording_not_found", "This process is not capturing the requested recording.");
                     var state = session.Store.Status().State;
-                    if (request.Command == "pause_recording" && state == "recording")
+                    if (request.Command == "start_live_preview")
+                    {
+                        await Emit("recording.live_started", session.StartLive(), request.RequestId, request.RecordingId);
+                    }
+                    else if (request.Command is "read_live_audio" or "stop_live_preview")
+                    {
+                        await Emit(request.Command == "read_live_audio" ? "recording.live_audio" : "recording.live_stopped",
+                            session.ReadLive(request.PreviewId!.Value, request.Command == "stop_live_preview"),
+                            request.RequestId, request.RecordingId);
+                    }
+                    else if (request.Command == "pause_recording" && state == "recording")
                     {
                         await session.PauseAsync();
                         await Emit("recording.paused", session.Store.Status(), request.RequestId, request.RecordingId);

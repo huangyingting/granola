@@ -40,6 +40,7 @@ const upload = {
       : createHash('sha256').update(wav).digest('hex'),
 };
 let capture = null;
+let livePreview = null;
 let savedSamples = 16_000;
 let captureEpoch = randomUUID();
 let levelClock = 100;
@@ -251,6 +252,87 @@ process.stdin.on('data', (bytes) => {
             retryable: true,
           },
         );
+    } else if (request.command === 'start_live_preview' && capture) {
+      livePreview = {
+        preview_id: randomUUID(),
+        capture_epoch: captureEpoch,
+        state: 'active',
+        code: null,
+        tracks: capture.tracks.map((spec) => ({
+          track_id: spec.track_id,
+          sample_end: null,
+          buffered_samples: 0,
+        })),
+        frames: [],
+      };
+      send(request, 'recording.live_started', livePreview);
+    } else if (
+      ['read_live_audio', 'stop_live_preview'].includes(request.command) &&
+      livePreview
+    ) {
+      if (request.preview_id !== livePreview.preview_id) {
+        send(request, 'error', {
+          code: 'live_preview_not_found',
+          message: 'Unknown synthetic preview.',
+          retryable: false,
+        });
+        continue;
+      }
+      if (
+        request.command === 'stop_live_preview' &&
+        livePreview.state === 'active'
+      )
+        livePreview = {
+          ...livePreview,
+          state: 'stopped',
+          code: 'preview_stopped',
+          frames: [],
+        };
+      if (mode === 'capture-live-overrun')
+        livePreview = {
+          ...livePreview,
+          state: 'failed',
+          code: 'live_overrun',
+          frames: [],
+        };
+      const preview =
+        mode === 'capture-live-wrong-preview'
+          ? randomUUID()
+          : livePreview.preview_id;
+      const frames = [];
+      if (livePreview.state === 'active') {
+        for (const cursor of livePreview.tracks) {
+          const start = cursor.sample_end ?? 16_000;
+          const sequence = (start - 16_000) / 800;
+          frames.push({
+            format_version: 1,
+            recording_id: request.recording_id,
+            preview_id: preview,
+            track_id:
+              mode === 'capture-live-wrong-track'
+                ? randomUUID()
+                : cursor.track_id,
+            capture_epoch: livePreview.capture_epoch,
+            sequence,
+            sample_start: start,
+            sample_count: 800,
+            sample_rate: 16_000,
+            channels: 1,
+            bits_per_sample: 16,
+            clock_start_ms: sequence * 50,
+            clock_end_ms: (sequence + 1) * 50,
+            data_base64: Buffer.alloc(1600, 0x3b).toString('base64'),
+          });
+          cursor.sample_end = start + 800;
+        }
+      }
+      send(
+        request,
+        request.command === 'read_live_audio'
+          ? 'recording.live_audio'
+          : 'recording.live_stopped',
+        { ...livePreview, preview_id: preview, frames },
+      );
     } else if (
       capture &&
       ['pause_recording', 'resume_recording', 'stop_recording'].includes(
@@ -264,6 +346,13 @@ process.stdin.on('data', (bytes) => {
           : request.command === 'resume_recording'
             ? 'recording'
             : 'sealed';
+      if (livePreview && livePreview.state === 'active')
+        livePreview = {
+          ...livePreview,
+          state: 'stopped',
+          code: state === 'paused' ? 'capture_paused' : 'capture_stopped',
+          frames: [],
+        };
       send(
         request,
         `recording.${state === 'paused' ? 'paused' : state === 'recording' ? 'resumed' : 'stopped'}`,

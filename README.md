@@ -85,6 +85,11 @@ Real Windows audio behavior still requires the hardware checks below.
   replies, cancellation and retries retain uncertain holds instead of assuming zero
   usage. The account screen separates known usage and holds; deployment-only CLI
   changes limits without resetting counters.
+- Internal native live-audio transport groundwork: explicitly activated,
+  request-only 50 ms PCM frames with track/epoch/sample identity, at most five
+  seconds buffered per source, and preview-only failure on overrun. Raw PCM is
+  excluded from normal status/renderer observers. This does **not** enable live
+  Azure recognition; authenticated streaming and its consent UI remain open.
 - Revision-pinned transcript pages backed by indexed immutable PostgreSQL segments.
   Synchronization atomically caches the first bounded page with the document and
   cursor; the desktop loads additional pages on demand into its encrypted cache.
@@ -634,6 +639,22 @@ when a chunk commit finds less than 64 MiB of free disk space. Recording data is
 deleted. Manually remove a test recording only after reviewing its inspection.
 
 ## Protocol and storage
+
+Native-only `start_live_preview`, `read_live_audio` and `stop_live_preview` commands
+use a recording-bound preview ID. They are not exposed as renderer IPC or enabled
+automatically by recording/upload consent. Pulls return at most ten 800-sample
+PCM16 mono 16 kHz frames; sequences are preview-local and sample offsets are the
+same unsealed-plus-sealed source offsets used by the encrypted writer, not claims
+of saved media. Control replies remain framed and serialized by the host loop,
+so preview consumers never write stdout from a capture callback.
+
+Each source retains at most five seconds of PCM, including partial frames.
+Backlog overrun, frames older than five seconds, discontinuity or invalid preview
+input stops and clears only that preview, with an explicit reason. Pause/stop
+clears it too; a replacement requires a fresh preview ID. Encrypted recording
+continues independently of a slow or stopped preview reader. Request-specific
+PCM replies never reach normal `AudioHostClient` status observers; startup/stop
+metadata contain no PCM. There is no network sender or live recognition UI yet.
 
 `packages/contracts/src/index.ts` defines requests/events. Each stdio frame is a
 four-byte little-endian length followed by UTF-8 JSON, limited to 64 KiB. All

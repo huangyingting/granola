@@ -29,7 +29,7 @@ internal sealed class CaptureTrack : IDisposable
     public Guid TrackId { get; }
 
     public CaptureTrack(MMDevice endpoint, Guid trackId, string kind, PcmChunkWriter writer, Stopwatch clock,
-        TaskCompletionSource<AudioException> failure)
+        TaskCompletionSource<AudioException> failure, LivePcmConsumer live)
     {
         this.endpoint = endpoint;
         TrackId = trackId;
@@ -63,8 +63,11 @@ internal sealed class CaptureTrack : IDisposable
                 {
                     using var normalized = new MemoryStream();
                     converter.Convert(packet.Bytes, (bytes, count) => normalized.Write(bytes, 0, count));
-                    writer.Append(normalized.GetBuffer().AsSpan(0, (int)normalized.Length), packet.StartMs, packet.EndMs);
-                    levels.Append(normalized.GetBuffer().AsSpan(0, (int)normalized.Length), packet.EndMs);
+                    var pcm = normalized.GetBuffer().AsSpan(0, (int)normalized.Length);
+                    var sampleStart = writer.TotalSamples;
+                    writer.Append(pcm, packet.StartMs, packet.EndMs);
+                    levels.Append(pcm, packet.EndMs);
+                    live(sampleStart, pcm, packet.StartMs, packet.EndMs);
                     Interlocked.Add(ref queuedBytes, -packet.Bytes.Length);
                 }
                 writer.Flush();
@@ -79,6 +82,7 @@ internal sealed class CaptureTrack : IDisposable
         });
     }
 
+    public delegate void LivePcmConsumer(long sampleStart, ReadOnlySpan<byte> bytes, double startMs, double endMs);
     public TrackLevel ReadLevel() => new(TrackId, levels.Read());
 
     private void OnData(object? sender, WaveInEventArgs args)

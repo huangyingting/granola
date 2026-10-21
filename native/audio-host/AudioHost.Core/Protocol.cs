@@ -5,7 +5,7 @@ namespace WindowsAiNotes.Audio;
 
 public sealed record AudioRequest(int ProtocolVersion, Guid RequestId, string Command, Guid? RecordingId = null, TrackSpec[]? Tracks = null,
     Guid? TrackId = null, Guid? ChunkId = null, int? SequenceStart = null, int? Offset = null, int? Length = null,
-    bool? AcceptIncomplete = null)
+    bool? AcceptIncomplete = null, Guid? PreviewId = null)
 {
     public void Validate()
     {
@@ -13,6 +13,8 @@ public sealed record AudioRequest(int ProtocolVersion, Guid RequestId, string Co
             throw new AudioException("invalid_request", "Unsupported protocol version or invalid request ID.");
         if (Command == "recover_recording" ? AcceptIncomplete != true : AcceptIncomplete is not null)
             throw new AudioException("invalid_request", "Only recovery accepts, and requires, explicit acceptance of a possibly missing audio tail.");
+        if (Command is "read_live_audio" or "stop_live_preview" ? PreviewId is null || PreviewId == Guid.Empty : PreviewId is not null)
+            throw new AudioException("invalid_request", "Only live reads and stops accept, and require, a preview ID.");
         if (Command == "list_devices")
         {
             if (RecordingId is not null || Tracks is not null || TrackId is not null || ChunkId is not null
@@ -21,7 +23,8 @@ public sealed record AudioRequest(int ProtocolVersion, Guid RequestId, string Co
             return;
         }
         if (Command is not ("start_recording" or "pause_recording" or "resume_recording" or "stop_recording" or "inspect_recording"
-            or "recover_recording" or "get_recording" or "list_recording_chunks" or "read_chunk")
+            or "recover_recording" or "get_recording" or "list_recording_chunks" or "read_chunk"
+            or "start_live_preview" or "read_live_audio" or "stop_live_preview")
             || RecordingId is null || RecordingId == Guid.Empty)
             throw new AudioException("invalid_request", "A supported command and recording ID are required.");
         if (Command == "get_recording")

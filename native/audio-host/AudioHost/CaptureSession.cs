@@ -12,6 +12,7 @@ internal sealed class CaptureSession
     private readonly Stopwatch clock = Stopwatch.StartNew();
     private readonly TaskCompletionSource<AudioException> failure = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private Guid captureEpoch;
+    private PcmLiveBuffer? live;
     public RecordingStore Store { get; }
     public Task<AudioException> Failure => failure.Task;
     public double ElapsedSeconds => clock.Elapsed.TotalSeconds;
@@ -40,7 +41,9 @@ internal sealed class CaptureSession
             var endpoint = DeviceCatalog.Resolve(spec, endpoints[spec.TrackId]);
             try
             {
-                captures.Add(new CaptureTrack(endpoint, spec.TrackId, spec.Kind, writers[spec.TrackId], clock, failure));
+                captures.Add(new CaptureTrack(endpoint, spec.TrackId, spec.Kind, writers[spec.TrackId], clock, failure,
+                    (sampleStart, bytes, startMs, endMs) =>
+                        Volatile.Read(ref live)?.Append(spec.TrackId, epoch, sampleStart, bytes, startMs, endMs)));
             }
             catch
             {
@@ -57,9 +60,29 @@ internal sealed class CaptureSession
         return new CaptureLevels(captureEpoch, clock.Elapsed.TotalMilliseconds, tracks);
     }
 
+    public LiveAudioBatch StartLive()
+    {
+        if (Store.Status().State != "recording")
+            throw new AudioException("invalid_state", "Live preview requires an active recording.");
+        if (live?.IsActive == true)
+            throw new AudioException("live_preview_active", "Stop the existing live preview before starting another.");
+        var preview = new PcmLiveBuffer(Store.RecordingId, captureEpoch, specs.Select(spec => spec.TrackId).ToArray());
+        Interlocked.Exchange(ref live, preview)?.Dispose();
+        return preview.Snapshot();
+    }
+
+    public LiveAudioBatch ReadLive(Guid previewId, bool stop = false)
+    {
+        var preview = Volatile.Read(ref live);
+        if (preview is null || preview.PreviewId != previewId)
+            throw new AudioException("live_preview_not_found", "This process does not have the requested live preview.");
+        if (stop) preview.Stop();
+        return preview.Read(clock.Elapsed.TotalMilliseconds);
+    }
+
     public async Task PauseAsync()
     {
-        await StopEpochAsync();
+        await StopEpochAsync("capture_paused");
         if (failure.Task.IsCompleted)
             throw await failure.Task;
         Store.Transition("paused", "capture.paused", clock.Elapsed.TotalMilliseconds);
@@ -88,8 +111,9 @@ internal sealed class CaptureSession
             throw await failure.Task;
     }
 
-    private async Task StopEpochAsync()
+    private async Task StopEpochAsync(string liveReason = "capture_stopped")
     {
+        Volatile.Read(ref live)?.Stop(liveReason);
         try
         {
             await Task.WhenAll(captures.Select(capture => capture.StopAsync()));

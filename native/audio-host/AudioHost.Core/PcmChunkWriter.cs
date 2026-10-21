@@ -12,6 +12,7 @@ public sealed class PcmChunkWriter(RecordingStore store, Guid trackId)
     private Guid epoch;
     private double clockStart;
     private double clockEnd;
+    public long TotalSamples => savedSamples + pending.Length / 2;
 
     public void BeginEpoch(Guid captureEpoch)
     {

@@ -4,6 +4,73 @@
     "request": {
       "protocol_version": 1,
       "request_id": "9c73575e-426d-4f72-98ed-7b4479f890ab",
+      "command": "start_live_preview",
+      "recording_id": "75048e79-2b45-440f-8609-b80a37635b4a"
+    }
+  },
+  {
+    "valid": true,
+    "request": {
+      "protocol_version": 1,
+      "request_id": "9c73575e-426d-4f72-98ed-7b4479f890ab",
+      "command": "read_live_audio",
+      "recording_id": "75048e79-2b45-440f-8609-b80a37635b4a",
+      "preview_id": "ece5191a-347b-40a2-8d09-82565aa396a1"
+    }
+  },
+  {
+    "valid": true,
+    "request": {
+      "protocol_version": 1,
+      "request_id": "9c73575e-426d-4f72-98ed-7b4479f890ab",
+      "command": "stop_live_preview",
+      "recording_id": "75048e79-2b45-440f-8609-b80a37635b4a",
+      "preview_id": "ece5191a-347b-40a2-8d09-82565aa396a1"
+    }
+  },
+  {
+    "valid": false,
+    "request": {
+      "protocol_version": 1,
+      "request_id": "9c73575e-426d-4f72-98ed-7b4479f890ab",
+      "command": "read_live_audio",
+      "recording_id": "75048e79-2b45-440f-8609-b80a37635b4a"
+    }
+  },
+  {
+    "valid": false,
+    "request": {
+      "protocol_version": 1,
+      "request_id": "9c73575e-426d-4f72-98ed-7b4479f890ab",
+      "command": "stop_live_preview",
+      "recording_id": "75048e79-2b45-440f-8609-b80a37635b4a",
+      "preview_id": "00000000-0000-0000-0000-000000000000"
+    }
+  },
+  {
+    "valid": false,
+    "request": {
+      "protocol_version": 1,
+      "request_id": "9c73575e-426d-4f72-98ed-7b4479f890ab",
+      "command": "start_live_preview",
+      "recording_id": "75048e79-2b45-440f-8609-b80a37635b4a",
+      "preview_id": "ece5191a-347b-40a2-8d09-82565aa396a1"
+    }
+  },
+  {
+    "valid": false,
+    "request": {
+      "protocol_version": 1,
+      "request_id": "9c73575e-426d-4f72-98ed-7b4479f890ab",
+      "command": "list_devices",
+      "preview_id": "ece5191a-347b-40a2-8d09-82565aa396a1"
+    }
+  },
+  {
+    "valid": true,
+    "request": {
+      "protocol_version": 1,
+      "request_id": "9c73575e-426d-4f72-98ed-7b4479f890ab",
       "command": "recover_recording",
       "recording_id": "75048e79-2b45-440f-8609-b80a37635b4a",
       "accept_incomplete": true

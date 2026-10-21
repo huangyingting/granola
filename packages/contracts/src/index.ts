@@ -4,6 +4,9 @@ export const PROTOCOL_VERSION = 1;
 export const MAX_CONTROL_BYTES = 64 * 1024;
 export const MAX_AUDIO_RANGE_BYTES = 32 * 1024;
 export const AUDIO_ARCHIVE_PAGE_SIZE = 50;
+export const LIVE_FRAME_SAMPLES = 800;
+export const MAX_LIVE_BUFFER_SAMPLES = 80_000;
+export const MAX_LIVE_FRAMES_PER_READ = 10;
 
 const uuid = z
   .uuid()
@@ -61,6 +64,19 @@ export const audioRequestSchema = z.discriminatedUnion('command', [
     offset: z.number().int().min(0).max(960_043),
     length: z.number().int().min(1).max(MAX_AUDIO_RANGE_BYTES),
   }),
+  z.strictObject({
+    ...baseRequest,
+    command: z.literal('start_live_preview'),
+    recording_id: uuid,
+  }),
+  ...(['read_live_audio', 'stop_live_preview'] as const).map((command) =>
+    z.strictObject({
+      ...baseRequest,
+      command: z.literal(command),
+      recording_id: uuid,
+      preview_id: uuid,
+    }),
+  ),
   z
     .object({
       ...baseRequest,
@@ -220,6 +236,94 @@ export const captureLevelsSchema = z
   );
 export type CaptureLevels = z.infer<typeof captureLevelsSchema>;
 
+export const livePcmFrameSchema = z
+  .strictObject({
+    format_version: z.literal(1),
+    recording_id: uuid,
+    preview_id: uuid,
+    track_id: uuid,
+    capture_epoch: uuid,
+    sequence: z.number().int().min(0).max(288_000),
+    sample_start: z
+      .number()
+      .int()
+      .min(0)
+      .max(230_400_000 - LIVE_FRAME_SAMPLES),
+    sample_count: z.literal(LIVE_FRAME_SAMPLES),
+    sample_rate: z.literal(16_000),
+    channels: z.literal(1),
+    bits_per_sample: z.literal(16),
+    clock_start_ms: z.number().finite().min(0).max(14_400_000),
+    clock_end_ms: z.number().finite().min(0).max(14_400_000),
+    data_base64: z
+      .string()
+      .length(2136)
+      .regex(/^[A-Za-z0-9+/]{2133}[AQgw]==$/),
+  })
+  .refine((frame) => frame.clock_end_ms >= frame.clock_start_ms);
+export type LivePcmFrame = z.infer<typeof livePcmFrameSchema>;
+export const liveAudioBatchSchema = z
+  .strictObject({
+    preview_id: uuid,
+    capture_epoch: uuid,
+    state: z.enum(['active', 'stopped', 'failed']),
+    code: z
+      .enum([
+        'live_overrun',
+        'live_discontinuity',
+        'invalid_live_pcm',
+        'preview_stopped',
+        'capture_paused',
+        'capture_stopped',
+      ])
+      .nullable(),
+    tracks: z
+      .array(
+        z.strictObject({
+          track_id: uuid,
+          sample_end: z.number().int().min(0).max(230_400_000).nullable(),
+          buffered_samples: z
+            .number()
+            .int()
+            .min(0)
+            .max(MAX_LIVE_BUFFER_SAMPLES),
+        }),
+      )
+      .min(1)
+      .max(2),
+    frames: z.array(livePcmFrameSchema).max(MAX_LIVE_FRAMES_PER_READ),
+  })
+  .refine((batch) => {
+    if (
+      new Set(batch.tracks.map((track) => track.track_id)).size !==
+        batch.tracks.length ||
+      (batch.state === 'active') !== (batch.code === null) ||
+      (batch.state !== 'active' &&
+        (batch.frames.length !== 0 ||
+          batch.tracks.some((track) => track.buffered_samples !== 0)))
+    )
+      return false;
+    const previous = new Map<string, LivePcmFrame>();
+    return batch.frames.every((frame) => {
+      const track = batch.tracks.find(
+        (track) => track.track_id === frame.track_id,
+      );
+      const before = previous.get(frame.track_id);
+      previous.set(frame.track_id, frame);
+      return (
+        frame.preview_id === batch.preview_id &&
+        frame.capture_epoch === batch.capture_epoch &&
+        track?.sample_end !== null &&
+        track?.sample_end !== undefined &&
+        frame.sample_start + frame.sample_count <= track.sample_end &&
+        (!before ||
+          (frame.sequence === before.sequence + 1 &&
+            frame.sample_start === before.sample_start + before.sample_count))
+      );
+    });
+  }, 'Live batches must preserve bounded capture identity, source cursors and ordered sample ranges.');
+export type LiveAudioBatch = z.infer<typeof liveAudioBatchSchema>;
+
 export const audioEventSchema = z.discriminatedUnion('event_type', [
   z.strictObject({
     ...eventBase,
@@ -228,6 +332,34 @@ export const audioEventSchema = z.discriminatedUnion('event_type', [
     event_type: z.literal('recording.levels'),
     payload: captureLevelsSchema,
   }),
+  ...(
+    [
+      'recording.live_started',
+      'recording.live_audio',
+      'recording.live_stopped',
+    ] as const
+  ).map((event_type) =>
+    z
+      .strictObject({
+        protocol_version: z.literal(PROTOCOL_VERSION),
+        request_id: uuid,
+        recording_id: uuid,
+        event_type: z.literal(event_type),
+        payload: liveAudioBatchSchema,
+      })
+      .refine(
+        (event) =>
+          event.payload.frames.every(
+            (frame) => frame.recording_id === event.recording_id,
+          ) &&
+          (event.event_type === 'recording.live_audio' ||
+            event.payload.frames.length === 0) &&
+          (event.event_type !== 'recording.live_started' ||
+            event.payload.state === 'active') &&
+          (event.event_type !== 'recording.live_stopped' ||
+            event.payload.state !== 'active'),
+      ),
+  ),
   z
     .strictObject({
       ...eventBase,
