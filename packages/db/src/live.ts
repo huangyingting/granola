@@ -110,6 +110,7 @@ export class LiveSourceStore {
     value: LiveStart,
     key: string,
     accessExpiresAt: number,
+    transaction?: Transaction,
   ): Promise<LiveClaim> {
     parse(resourceId, owner);
     parse(resourceId, document);
@@ -122,7 +123,7 @@ export class LiveSourceStore {
     const hash = createHash('sha256')
       .update(canonicalJson({ document, ...input }))
       .digest('hex');
-    return this.database.transaction(async (tx) => {
+    const open = async (tx: Transaction) => {
       const doc = await this.database.lockDocument(owner, document, tx);
       const epochs = (
         await tx.query<{ membership: number; user: number; allowed: boolean }>(
@@ -295,7 +296,8 @@ export class LiveSourceStore {
           401,
         );
       return claim(row);
-    });
+    };
+    return transaction ? open(transaction) : this.database.transaction(open);
   }
 
   async authorize(
@@ -336,9 +338,13 @@ export class LiveSourceStore {
     return transaction ? check(transaction) : this.database.transaction(check);
   }
 
-  async accept(value: LiveClaim, cursor: LiveCursor) {
+  async accept(
+    value: LiveClaim,
+    cursor: LiveCursor,
+    transaction?: Transaction,
+  ) {
     const input = parse(cursorSchema, cursor);
-    return this.database.transaction(async (tx) => {
+    const accept = async (tx: Transaction) => {
       const lease = await this.authorize(value, tx);
       if (!lease.dispatched)
         throw new ServiceError(
@@ -392,7 +398,10 @@ export class LiveSourceStore {
             ? { sample_start: previous, sample_end: input.sample_start }
             : null,
       };
-    });
+    };
+    return transaction
+      ? accept(transaction)
+      : this.database.transaction(accept);
   }
 
   async close(

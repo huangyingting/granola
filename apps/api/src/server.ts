@@ -30,6 +30,8 @@ import { createAuthenticator, principal, type AuthConfig } from './auth.js';
 import type { RecordingBlobs } from '@windows-ai-notes/storage';
 import { registerRecordingRoutes } from './recordings.js';
 import { parse } from './parse.js';
+import type { RealtimeProvider } from '@windows-ai-notes/ai/realtime';
+import { prepareRealtimeRoutes } from './realtime.js';
 
 const idParams = z.strictObject({ id: resourceId });
 const revisionQuery = z.strictObject({
@@ -45,6 +47,7 @@ export async function createServer(
   db: Database,
   config: AuthConfig,
   storage: RecordingBlobs | null = null,
+  realtime: RealtimeProvider | null = null,
 ) {
   const app = Fastify({
     logger: false,
@@ -56,6 +59,8 @@ export async function createServer(
   const streams = new Map<string, number>();
   const shutdown = new AbortController();
   app.addHook('preClose', async () => shutdown.abort());
+  // Track upgrades before authentication so rejected requests close their raw sockets.
+  const registerRealtime = await prepareRealtimeRoutes(app, db, realtime);
   app.decorateRequest('principal', null);
   app.addHook('onRequest', async (request, reply) => {
     reply
@@ -121,6 +126,7 @@ export async function createServer(
       404,
     );
   });
+  registerRealtime();
   registerRecordingRoutes(app, db, storage);
   app.get('/health', async () => {
     try {
@@ -156,6 +162,13 @@ export async function createServer(
     summary_model: 'deployment-default',
     speech_model: 'azure-fast-transcription',
     max_audio_seconds: 60,
+    live_transcription: {
+      configured: realtime !== null,
+      max_media_seconds: 60,
+      max_unfinalized_seconds: 5,
+      canonical: false,
+      automatic_reconnect: false,
+    },
     recording_transcription: {
       storage_configured: storage !== null,
       max_chunk_audio_seconds: 30,

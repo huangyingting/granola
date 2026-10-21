@@ -12,11 +12,14 @@
     "@windows-ai-notes/db": "workspace:*",
     "@windows-ai-notes/storage": "workspace:*",
     "@fastify/rate-limit": "^10.3.0",
+    "@fastify/websocket": "11.3.4",
     "fastify": "^5.6.0",
     "jose": "^6.1.0",
     "zod": "^4.1.0"
   },
   "devDependencies": {
+    "@types/ws": "8.18.2",
+    "ws": "8.22.0",
     "@aws-sdk/client-s3": "^3.900.0",
     "@windows-ai-notes/worker": "workspace:*"
   }

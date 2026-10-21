@@ -2,6 +2,7 @@ import { Database, requireDatabaseUrl } from '@windows-ai-notes/db';
 import { loadAuthConfig } from './auth.js';
 import { createServer } from './server.js';
 import { loadStorageConfig, RecordingBlobs } from '@windows-ai-notes/storage';
+import { loadLiveProvider } from './live-config.js';
 
 async function main() {
   const config = loadAuthConfig();
@@ -14,6 +15,7 @@ async function main() {
     db,
     config,
     storage ? new RecordingBlobs(storage) : null,
+    loadLiveProvider(),
   );
   server.addHook('onClose', async () => db.close());
   const stop = () => {
@@ -37,7 +39,7 @@ async function main() {
 }
 main().catch(() => {
   console.error(
-    'api_start_failed: check database migration, bind address, authentication and optional private recording storage. Secrets were not logged.',
+    'api_start_failed: check database migration, bind address, authentication, optional private recording storage and live Speech configuration. Secrets were not logged.',
   );
   process.exitCode = 1;
 });

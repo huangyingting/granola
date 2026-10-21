@@ -10,6 +10,11 @@ const azureNames = [
   'AZURE_SPEECH_KEY',
   'AZURE_SPEECH_REGION',
 ] as const;
+const speechNames = ['AZURE_SPEECH_KEY', 'AZURE_SPEECH_REGION'] as const;
+const speechConfigSchema = z.object({
+  AZURE_SPEECH_KEY: z.string().min(16),
+  AZURE_SPEECH_REGION: z.string().regex(/^[a-z0-9]{2,32}$/),
+});
 const configSchema = z.object({
   AZURE_OPENAI_ENDPOINT: z.url(),
   AZURE_OPENAI_API_KEY: z.string().min(16),
@@ -19,14 +24,15 @@ const configSchema = z.object({
     .min(1)
     .max(200)
     .regex(/^[A-Za-z0-9_.-]+$/),
-  AZURE_SPEECH_KEY: z.string().min(16),
-  AZURE_SPEECH_REGION: z.string().regex(/^[a-z0-9]{2,32}$/),
+  ...speechConfigSchema.shape,
 });
 export type AzureConfig = z.infer<typeof configSchema>;
+export type AzureSpeechConfig = z.infer<typeof speechConfigSchema>;
 
-export function loadAzureConfig(
-  environment: NodeJS.ProcessEnv = process.env,
-): AzureConfig {
+function selectConfig(
+  environment: NodeJS.ProcessEnv,
+  names: readonly string[],
+) {
   const selected: Record<string, string | undefined> = {};
   if (environment.AZURE_ENV_FILE) {
     let imported: Record<string, string | undefined>;
@@ -37,12 +43,31 @@ export function loadAzureConfig(
         'AZURE_ENV_FILE could not be read. Its contents were not logged.',
       );
     }
-    for (const key of azureNames) selected[key] = imported[key];
+    for (const key of names) selected[key] = imported[key];
   }
-  for (const key of azureNames) {
+  for (const key of names) {
     if (environment[key] !== undefined) selected[key] = environment[key];
   }
-  const parsed = configSchema.safeParse(selected);
+  return selected;
+}
+
+export function loadAzureSpeechConfig(
+  environment: NodeJS.ProcessEnv = process.env,
+): AzureSpeechConfig {
+  const parsed = speechConfigSchema.safeParse(
+    selectConfig(environment, speechNames),
+  );
+  if (!parsed.success)
+    throw new Error(
+      `Invalid Azure Speech configuration fields: ${parsed.error.issues.map((issue) => issue.path.join('.')).join(', ')}`,
+    );
+  return parsed.data;
+}
+
+export function loadAzureConfig(
+  environment: NodeJS.ProcessEnv = process.env,
+): AzureConfig {
+  const parsed = configSchema.safeParse(selectConfig(environment, azureNames));
   if (!parsed.success) {
     throw new Error(
       `Invalid Azure configuration fields: ${parsed.error.issues.map((issue) => issue.path.join('.')).join(', ')}`,

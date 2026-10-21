@@ -4,7 +4,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { createAzureProviders, readAzureResponse } from './index.js';
-import { loadAzureConfig, type AzureConfig } from './config.js';
+import {
+  loadAzureConfig,
+  loadAzureSpeechConfig,
+  type AzureConfig,
+} from './config.js';
 import { makeSilentWav, validateWav } from './wav.js';
 import {
   validateSummary,
@@ -73,6 +77,15 @@ describe('Azure configuration boundaries', () => {
       expect(loaded.AZURE_OPENAI_DEPLOYMENT).toBe('override');
       expect(Object.keys(loaded)).toHaveLength(6);
       expect(JSON.stringify(loaded)).not.toContain('must-not-propagate');
+      const speech = loadAzureSpeechConfig({
+        AZURE_ENV_FILE: path,
+        AZURE_SPEECH_REGION: 'eastus',
+        AZURE_OPENAI_API_KEY: 'invalid-and-not-required',
+      });
+      expect(speech).toEqual({
+        AZURE_SPEECH_KEY: config.AZURE_SPEECH_KEY,
+        AZURE_SPEECH_REGION: 'eastus',
+      });
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -97,6 +110,20 @@ describe('Azure configuration boundaries', () => {
     } catch (error) {
       expect(String(error)).not.toContain('sensitive');
     }
+  });
+  it('requires only Speech fields and never logs invalid Speech secrets', () => {
+    expect(
+      loadAzureSpeechConfig({
+        AZURE_SPEECH_KEY: config.AZURE_SPEECH_KEY,
+        AZURE_SPEECH_REGION: config.AZURE_SPEECH_REGION,
+      }),
+    ).toEqual({
+      AZURE_SPEECH_KEY: config.AZURE_SPEECH_KEY,
+      AZURE_SPEECH_REGION: config.AZURE_SPEECH_REGION,
+    });
+    expect(() => loadAzureSpeechConfig({ AZURE_SPEECH_KEY: 'secret' })).toThrow(
+      'Invalid Azure Speech configuration fields: AZURE_SPEECH_KEY, AZURE_SPEECH_REGION',
+    );
   });
 });
 

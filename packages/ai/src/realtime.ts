@@ -12,7 +12,7 @@ import {
 } from '@windows-ai-notes/contracts/realtime';
 import { ServiceError, type Usage } from '@windows-ai-notes/contracts/server';
 import { z } from 'zod';
-import type { AzureConfig } from './config.js';
+import type { AzureSpeechConfig } from './config.js';
 import {
   LIVE_START_MS,
   LIVE_STALL_MS,
@@ -29,10 +29,26 @@ export interface RealtimeCompletion {
 }
 export interface RealtimeSession {
   readonly providerEpoch: string;
+  readonly finalizedSamples: number;
   readonly completion: Promise<RealtimeCompletion>;
   write(frame: LivePcmFrame): void;
   finish(): Promise<RealtimeCompletion>;
   cancel(): Promise<void>;
+}
+export interface RealtimeProgress {
+  provider_epoch: string;
+  finalized_samples: number;
+}
+export interface RealtimeProvider {
+  readonly provider: 'azure' | 'fixture';
+  readonly configurationVersion: string;
+  open(
+    source: LiveSource,
+    locale: 'en-US' | 'zh-CN',
+    signal: AbortSignal,
+    emit: (event: LiveRecognitionEvent) => undefined,
+    progress?: (value: RealtimeProgress) => undefined,
+  ): Promise<RealtimeSession>;
 }
 export type SpeechWorkerFactory = (locale: 'en-US' | 'zh-CN') => Worker;
 export const AZURE_REALTIME_CAPABILITIES = Object.freeze({
@@ -46,7 +62,7 @@ export const AZURE_REALTIME_CAPABILITIES = Object.freeze({
   speaker_identity: false,
 });
 export function createAzureRealtimeProvider(
-  config: AzureConfig,
+  config: AzureSpeechConfig,
   launch: SpeechWorkerFactory = (locale) =>
     new Worker(new URL('./realtime-worker.js', import.meta.url), {
       workerData: {
@@ -82,6 +98,7 @@ export function createAzureRealtimeProvider(
       locale: 'en-US' | 'zh-CN',
       signal: AbortSignal,
       emit: (event: LiveRecognitionEvent) => undefined,
+      progress?: (value: RealtimeProgress) => undefined,
     ): Promise<RealtimeSession> {
       const selected = liveSourceSchema.safeParse(source);
       if (
@@ -110,7 +127,13 @@ export function createAzureRealtimeProvider(
           true,
         );
       }
-      const session = new SpeechSession(selected.data, signal, emit, worker);
+      const session = new SpeechSession(
+        selected.data,
+        signal,
+        emit,
+        worker,
+        progress,
+      );
       try {
         await session.ready;
       } catch (error) {
@@ -160,6 +183,7 @@ class SpeechSession implements RealtimeSession {
     private readonly signal: AbortSignal,
     private readonly emit: (event: LiveRecognitionEvent) => undefined,
     private readonly worker: Worker,
+    private readonly progress?: (value: RealtimeProgress) => undefined,
   ) {
     this.completion = new Promise((resolve, reject) => {
       this.resolve = resolve;
@@ -188,6 +212,9 @@ class SpeechSession implements RealtimeSession {
       stream?.on('data', () => this.fail('live_provider_diagnostics'));
     signal.addEventListener('abort', this.abort, { once: true });
     if (signal.aborted) this.abort();
+  }
+  get finalizedSamples() {
+    return this.credited;
   }
   private close(): Promise<void> {
     if (!this.closing) {
@@ -384,6 +411,7 @@ class SpeechSession implements RealtimeSession {
     }
     if (result.result_type !== 'partial') {
       this.closedTicks = Math.max(this.closedTicks, endTicks);
+      const previousCredit = this.credited;
       this.credited = Math.max(
         this.credited,
         Math.floor(endTicks / 1_000_000) * 1600,
@@ -391,6 +419,16 @@ class SpeechSession implements RealtimeSession {
       while (this.pending[0] && this.pending[0].end <= this.credited)
         this.pending.shift();
       this.armStall();
+      if (this.credited > previousCredit && this.progress) {
+        const value: unknown = this.progress({
+          provider_epoch: this.providerEpoch,
+          finalized_samples: this.credited,
+        });
+        if (value !== undefined) {
+          if (value instanceof Promise) value.catch(() => undefined);
+          throw new Error('Live progress consumers must be synchronous.');
+        }
+      }
     }
     const partial =
       this.partial &&

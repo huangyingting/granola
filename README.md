@@ -89,12 +89,12 @@ Real Windows audio behavior still requires the hardware checks below.
   request-only 50 ms PCM frames with track/epoch/sample identity, at most five
   seconds buffered per source, and preview-only failure on overrun. Raw PCM is
   excluded from normal status/renderer observers. This does **not** enable live
-  Azure recognition; authenticated streaming and its consent UI remain open.
+  desktop Azure recognition; Main orchestration and its consent UI remain open.
 - An internal Azure streaming adapter using the official pinned Speech SDK in
   isolated workers, with versioned partial/final/discard events and bounded SDK
   input/replay. Durable owner-fenced source leases and shared quota reservations
-  are implemented internally. A synthetic live Azure probe is available; the server
-  WebSocket and desktop consent/transport flow are **not implemented yet**.
+  are integrated with an optional authenticated server WebSocket. A synthetic live
+  Azure probe is available; desktop consent/transport is **not implemented yet**.
 - Revision-pinned transcript pages backed by indexed immutable PostgreSQL segments.
   Synchronization atomically caches the first bounded page with the document and
   cursor; the desktop loads additional pages on demand into its encrypted cache.
@@ -537,7 +537,7 @@ cancelled/completed jobs cannot be resumed. Recording tracks remain bounded to f
 hours each (the desktop capture preview stops at one hour), with at most two tracks.
 
 This first slice uses PostgreSQL polling/leases as the durable scheduler rather
-than introducing unused Redis/BullMQ infrastructure. Realtime STT, chat,
+than introducing unused Redis/BullMQ infrastructure. Desktop realtime STT, chat,
 interactive desktop AI and token streaming remain later implementation work.
 Durable usage reservations and receipts are implemented as described above;
 they do not provide exactly-once billing or reconcile Azure invoices.
@@ -585,9 +585,77 @@ leases and prunes inactive metadata older than seven days in bounded batches,
 without erasing usage calls/holds. Long-running live transport must rotate
 bounded attempts rather than extend an old lease's token or media budget.
 
-These are internal database APIs, not new public routes. The authenticated
-WebSocket, per-frame/provider backpressure, native/main orchestration and
-separate desktop consent UI remain to be wired and validated.
+The optional gateway below uses these database APIs. Native/Main orchestration
+and separate desktop consent UI remain to be wired and validated.
+
+### Optional authenticated live gateway
+
+Set `LIVE_SPEECH_ENABLED=true` on the API to expose the native-client WebSocket
+at `/v1/documents/:id/live`; it is absent by default. This loads **only**
+`AZURE_SPEECH_KEY` and `AZURE_SPEECH_REGION`, directly or from `AZURE_ENV_FILE`;
+the API does not need OpenAI credentials. The ordinary batch worker still needs
+its existing six-field configuration. `/v1/models` advertises gateway availability
+and its fixed media/backlog limits. Production clients must use WSS through the
+deployment's TLS endpoint, with the existing provisioned OIDC access token in
+the `Authorization` header. Query parameters, browser origins and WebSocket
+subprotocols are rejected, not alternative token channels.
+
+The version-1 JSON protocol is defined in
+`packages/contracts/src/realtime.ts`. A socket handles exactly one native source.
+Its first `live.start` message contains a UUID `request_id`, the immutable
+`source`, `locale` and literal `consent: true`. Provider/configuration, access-token
+expiry and the sixty-second reservation come from the server, not this message.
+Source creation and reservation commit atomically before provider startup; an
+identical start key cannot dispatch twice or close the winning socket's lease.
+No private audio upload is required or implicitly authorized.
+
+After `live.ready`, send one `live.audio` batch of one to ten contiguous native
+50 ms frames, then wait for `live.accepted` before sending another batch.
+There is **no unbounded input queue**. Acceptance commits only durable
+source-cursor authorization before forwarding PCM; it does not acknowledge saved
+audio, recognition, delivery to Azure or billing. `live.accepted` reports explicit
+forward gaps. Separate `live.progress` messages expose monotonic, provider-epoch
+relative `finalized_samples`, in complete 100 ms units, solely to release bounded
+flow-control credit after validated final/NoMatch progress. Partials never release
+credit. Clients must merge that counter monotonically within the matching provider
+epoch, not treat an older pressure message as a fresh lower backlog. Neither
+message permits deletion of locally preserved recording chunks.
+
+Ready/terminal messages explicitly label `canonical: false` and
+`continuity: "unverified"`. A new provider attempt may have an uncertain preceding
+tail **even when the authorized forward gap is null**. Preserve these boundaries;
+do not present a seamless recovered transcript. There is no automatic reconnect,
+provider replay or transcript-text persistence in this gateway. Canonical final
+transcription still processes immutable saved recordings and cannot overwrite
+manual transcript revisions without explicit review.
+
+`live.finish` drains authorized pending results and settles a known media receipt
+before `live.closed`. `live.cancel`, network failure, expiry, revocation or server
+shutdown cancels the isolated provider without refunding uncertain usage.
+Terminal `usage_status: "check_account"` means consult `/v1/usage`: a committed
+reservation may remain held, or a later known receipt may settle it. Known
+receipts are retried idempotently with bounded database deadlines, including
+after cancellation/deletion; persistent database failure or a crash leaves the
+hold intact rather than inventing zero usage.
+
+The process permits at most sixteen live handlers and two per account, including
+not-yet-started sockets; database source/usage limits also apply across replicas.
+Startup, input idle, finish, original-token expiry and eighty-second lifetime
+deadlines terminate stalled sessions. Each batch and each published result
+rechecks current source authorization; an additional heartbeat detects revocation
+without new audio. Input messages are capped at 32 KiB, pending result publication
+at eight messages/32 KiB, and outbound sends at sixteen messages/64 KiB with a
+five-second drain deadline. Compression and automatic ping replies are disabled.
+Cloud/network failure does not command or stop the independent local recorder.
+The provider's stricter five-second unfinalized limit described below still
+applies, so this is not yet a reliable continuous-meeting STT release.
+
+Real PostgreSQL/WebSocket tests cover fixed reservations, duplicate dispatch,
+real signed-token expiry, revocation/regrant, cursor replay/gaps, slow/broken
+consumers, late receipts/deletion, finish ordering and shutdown. A synthetic
+loopback test crosses the actual isolated Speech SDK, API WebSocket, durable
+cursor authorization and settlement without contacting Azure. Desktop transport,
+explicit consent and physical/semantic quality gates remain incomplete.
 
 ### Internal Azure streaming adapter
 
@@ -621,10 +689,10 @@ reports submitted media units only, not Azure invoice duration, billing
 acknowledgment or exactly-once processing. Failed/unknown attempts must remain
 conservative usage holds when the authorized live-session ledger is integrated.
 
-This provider module has no server route or renderer access. Native transport,
-durable source authorization, account reservation/settlement and explicit
-live-cloud consent still need end-to-end wiring. Local encrypted capture must
-remain independent of a stopped preview.
+This provider module is used by the optional gateway above, not directly by a
+renderer. Native/Main transport and explicit desktop live-cloud consent still
+need end-to-end wiring. Local encrypted capture must remain independent of a
+stopped preview.
 
 ### Azure end-to-end probes
 
@@ -768,8 +836,9 @@ Commands are `list_devices`, `start_recording`, `pause_recording`,
 Recovery requires `accept_incomplete: true` and a fresh helper with no capture
 session. Authenticated, bounded archive export uses `get_recording`,
 `list_recording_chunks`, and `read_chunk`. A host handles a single recording
-lifetime. Desktop saved-audio uploads use these authenticated exports; realtime
-audio streaming remains later work.
+lifetime. Desktop saved-audio uploads use these authenticated exports. Request-only
+`start_live_preview`, `read_live_audio` and `stop_live_preview` commands provide
+bounded native PCM; their desktop cloud orchestration remains later work.
 Native validation and Zod validation share checked-in request fixtures.
 
 Recording directories contain an encrypted `manifest.enc`, UUID-named `.chunk`

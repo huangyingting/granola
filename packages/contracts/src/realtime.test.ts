@@ -1,6 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import { liveRecognitionEventSchema, liveSourceSchema } from './realtime.js';
+import {
+  liveRecognitionEventSchema,
+  liveSourceSchema,
+  liveClientMessageSchema,
+  liveServerMessageSchema,
+} from './realtime.js';
 
 const event = {
   schema_version: 1,
@@ -21,6 +26,103 @@ const event = {
   provider_result_id: 'synthetic-result',
 };
 describe('source-fenced live recognition contracts', () => {
+  it('bounds live wire batches and separates authorization cursors from finalization-only flow credit', () => {
+    const pcm = {
+      ...event.source,
+      format_version: 1,
+      sequence: 0,
+      sample_start: 0,
+      sample_count: 800,
+      sample_rate: 16_000,
+      channels: 1,
+      bits_per_sample: 16,
+      clock_start_ms: 0,
+      clock_end_ms: 50,
+      data_base64: Buffer.alloc(1600).toString('base64'),
+    };
+    const start = {
+      schema_version: 1,
+      event_type: 'live.start',
+      request_id: randomUUID(),
+      source: event.source,
+      locale: 'en-US',
+      consent: true,
+    };
+    expect(liveClientMessageSchema.parse(start)).toEqual(start);
+    for (const change of [
+      { consent: false },
+      { provider: 'azure' },
+      { budget: 1 },
+      { access_expires_at: 123 },
+    ])
+      expect(
+        liveClientMessageSchema.safeParse({ ...start, ...change }).success,
+      ).toBe(false);
+    const audio = {
+      schema_version: 1,
+      event_type: 'live.audio',
+      frames: [pcm],
+    };
+    expect(liveClientMessageSchema.parse(audio)).toEqual(audio);
+    for (const frames of [
+      [],
+      Array(11).fill(pcm),
+      [pcm, pcm],
+      [pcm, { ...pcm, sequence: 1, sample_start: 800, track_id: randomUUID() }],
+    ])
+      expect(
+        liveClientMessageSchema.safeParse({ ...audio, frames }).success,
+      ).toBe(false);
+    const accepted = {
+      schema_version: 1,
+      event_type: 'live.accepted',
+      source: event.source,
+      provider_epoch: event.provider_epoch,
+      acknowledgment: 'authorization_only',
+      next_sequence: 1,
+      next_sample: 800,
+      accepted_samples: 800,
+      finalized_samples: 0,
+      gap: null,
+    };
+    expect(liveServerMessageSchema.parse(accepted)).toEqual(accepted);
+    expect(
+      liveServerMessageSchema.safeParse({
+        ...accepted,
+        finalized_samples: 1600,
+      }).success,
+    ).toBe(false);
+    expect(
+      liveServerMessageSchema.safeParse({
+        ...accepted,
+        acknowledgment: 'persisted',
+      }).success,
+    ).toBe(false);
+    const progress = {
+      schema_version: 1,
+      event_type: 'live.progress',
+      source: event.source,
+      provider_epoch: event.provider_epoch,
+      acknowledgment: 'provider_finalization_only',
+      finalized_samples: 1600,
+    };
+    expect(liveServerMessageSchema.parse(progress)).toEqual(progress);
+    for (const finalized_samples of [0, 800, 1601, 960_001])
+      expect(
+        liveServerMessageSchema.safeParse({ ...progress, finalized_samples })
+          .success,
+      ).toBe(false);
+    expect(
+      liveServerMessageSchema.safeParse({
+        schema_version: 1,
+        event_type: 'live.closed',
+        reason: 'finished',
+        usage_status: 'settled',
+        canonical: true,
+        continuity: 'complete',
+      }).success,
+    ).toBe(false);
+  });
   it('requires complete immutable source identity and explicit bounded provider revisions', () => {
     expect(liveRecognitionEventSchema.parse(event)).toEqual(event);
     for (const change of [

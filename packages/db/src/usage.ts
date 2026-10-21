@@ -232,9 +232,13 @@ export class UsageStore {
     );
     return id;
   }
-  async settle(id: string, usage: Usage): Promise<void> {
+  async settle(
+    id: string,
+    usage: Usage,
+    transaction?: Transaction,
+  ): Promise<void> {
     const actual = totals(usage);
-    await this.database.transaction(async (tx) => {
+    const settle = async (tx: Transaction) => {
       const selected = (
         await tx.query<Call>(
           'SELECT owner_id,period_start::text,reserved,actual,live_lease_id FROM ai_usage_calls WHERE id=$1',
@@ -297,7 +301,9 @@ export class UsageStore {
             request_id: id,
           }),
         );
-    });
+    };
+    if (transaction) await settle(transaction);
+    else await this.database.transaction(settle);
   }
   async snapshot(owner: string) {
     return this.database.transaction(async (tx) => {

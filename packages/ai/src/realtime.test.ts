@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   createAzureRealtimeProvider,
   type RealtimeSession,
+  type RealtimeProgress,
 } from '@windows-ai-notes/ai/realtime';
 import type { LivePcmFrame } from '@windows-ai-notes/contracts';
 import type {
@@ -51,6 +52,7 @@ async function open(
   mode = 'normal',
   results: Record<number, unknown[]> = {},
   emit?: (event: LiveRecognitionEvent) => undefined,
+  progress?: (value: RealtimeProgress) => undefined,
 ) {
   const selected = source();
   const events: LiveRecognitionEvent[] = [];
@@ -78,6 +80,7 @@ async function open(
         events.push(event);
         return undefined;
       }),
+    progress,
   );
   owned.push(session);
   return { session, worker, selected, events, controller };
@@ -144,7 +147,16 @@ describe('bounded isolated streaming speech sessions', () => {
     expect(worker.threadId).toBe(-1);
   });
   it('credits only validated final/NoMatch progress at the pinned SDK replay-chunk boundary', async () => {
-    const { session, selected, events, worker } = await open('progress');
+    const credit: RealtimeProgress[] = [];
+    const { session, selected, events, worker } = await open(
+      'progress',
+      {},
+      undefined,
+      (value) => {
+        credit.push(value);
+        return undefined;
+      },
+    );
     for (let sequence = 0; sequence < 120; sequence += 2) {
       const progress = once(worker, 'message');
       session.write(frame(selected, sequence));
@@ -153,6 +165,13 @@ describe('bounded isolated streaming speech sessions', () => {
     }
     expect((await session.finish()).usage.audio_ms).toBe(6000);
     expect(events).toEqual([]);
+    expect(session.finalizedSamples).toBe(96_000);
+    expect(credit).toEqual(
+      Array.from({ length: 60 }, (_, index) => ({
+        provider_epoch: session.providerEpoch,
+        finalized_samples: (index + 1) * 1600,
+      })),
+    );
   });
   it.each(['recording_id', 'preview_id', 'track_id', 'capture_epoch'] as const)(
     'fences changed %s before forwarding it to the provider',
@@ -304,6 +323,39 @@ describe('bounded isolated streaming speech sessions', () => {
       code: 'live_consumer_failed',
     });
     expect(observer).toHaveBeenCalledOnce();
+  });
+  it('fails closed if the flow-credit consumer throws', async () => {
+    const observer = (): undefined => {
+      throw new Error('private-progress-consumer-error');
+    };
+    const { session, selected } = await open(
+      'progress',
+      {},
+      undefined,
+      observer,
+    );
+    session.write(frame(selected));
+    session.write(frame(selected, 1));
+    await expect(session.completion).rejects.toMatchObject({
+      code: 'live_consumer_failed',
+    });
+  });
+  it('rejects an asynchronous JavaScript flow-credit consumer without an unhandled rejection', async () => {
+    const observer = async () => {
+      throw new Error('private-async-progress-error');
+    };
+    const { session, selected } = await open(
+      'progress',
+      {},
+      undefined,
+      // @ts-expect-error Deliberately exercise a JavaScript caller bypassing the synchronous contract.
+      observer,
+    );
+    session.write(frame(selected));
+    session.write(frame(selected, 1));
+    await expect(session.completion).rejects.toMatchObject({
+      code: 'live_consumer_failed',
+    });
   });
   it('rejects an asynchronous JavaScript consumer without leaking its rejected promise or private error', async () => {
     const observer = async () => {
