@@ -419,7 +419,7 @@ export class RecordingController {
       cleanup_error: this.cleanupError,
     };
   }
-  reconcile(profile: string): Promise<void> {
+  async reconcile(profile: string): Promise<void> {
     if (this.owner && this.client) {
       let forbidden = this.owner.profile !== profile;
       if (!forbidden) {
@@ -430,7 +430,12 @@ export class RecordingController {
             this.owner.recording_id,
           );
         } catch (error) {
-          if (!missing(error)) throw error;
+          if (!missing(error)) {
+            this.revoked = true;
+            this.report(error);
+            await this.release(this.client);
+            throw error;
+          }
           forbidden = true;
         }
       }
@@ -441,7 +446,7 @@ export class RecordingController {
         );
       }
     }
-    return this.cleanup();
+    await this.cleanup();
   }
   cleanup(): Promise<void> {
     if (this.cleaning) return this.cleaning;

@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Track } from '@windows-ai-notes/contracts';
-import { LocalStore } from '@windows-ai-notes/local';
+import { LocalError, LocalStore } from '@windows-ai-notes/local';
 import { AudioHostClient, AudioHostError } from './audio.js';
 import { RecordingController } from './recording.js';
 import { ClientError } from './http.js';
@@ -134,6 +134,19 @@ describe('durable desktop capture coordination with a real framed helper process
     );
     await controller.stop(() => {});
   });
+  it('releases a paused helper after its unsolicited automatic-stop acknowledgement', async () => {
+    const draft = local.create('offline');
+    const { controller, remove } = setup('capture-auto-stop-paused');
+    await controller.start('offline', draft.id, choices(), () => {});
+    const active = controller.snapshot('offline', draft.id).active!;
+    await controller.control('offline', draft.id, active.id, 'pause', () => {});
+    await vi.waitFor(() => expect(controller.capturing).toBe(false));
+    const state = controller.snapshot('offline', draft.id);
+    expect(state.recordings[0]!.state).toBe('sealed');
+    expect(state.error).toBeNull();
+    expect(local.activeRecordingOwner()).toBeNull();
+    expect(remove).not.toHaveBeenCalled();
+  });
   it('never resumes an interrupted capture or starts a helper during recovery discovery', async () => {
     const draft = local.create('offline');
     const initial = local.beginRecording('offline', draft.id, choices());
@@ -170,6 +183,29 @@ describe('durable desktop capture coordination with a real framed helper process
     await controller.cleanup();
     expect(local.pendingRecordingDeletions()).toEqual([]);
     expect(controller.snapshot('offline', null).cleanup_error).toBeNull();
+  });
+  it('stops capture if ownership cannot be verified and rejects maintenance asynchronously without blocking workspace notifications', async () => {
+    const draft = local.create('offline');
+    const { controller, remove } = setup();
+    await controller.start('offline', draft.id, choices(), () => {});
+    const failure = new LocalError(
+      'local_data_corrupt',
+      'Synthetic recording ownership could not be verified.',
+    );
+    const read = vi.spyOn(local, 'getRecording').mockImplementation(() => {
+      throw failure;
+    });
+    try {
+      const maintenance = controller.reconcile('offline');
+      await expect(maintenance).rejects.toBe(failure);
+      expect(controller.capturing).toBe(false);
+      expect(controller.snapshot('offline', null).error?.code).toBe(
+        'local_data_corrupt',
+      );
+      expect(remove).not.toHaveBeenCalled();
+    } finally {
+      read.mockRestore();
+    }
   });
   it('rejects stale authorization before starting and closes capture if its authorization changes while awaiting the helper', async () => {
     const draft = local.create('offline');

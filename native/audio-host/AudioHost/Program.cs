@@ -30,7 +30,7 @@ try
     var pending = FrameCodec.ReadAsync(input);
     while (true)
     {
-        if (session?.Store.Status().State == "recording")
+        if (session?.Store.Status().State is "recording" or "paused")
         {
             var completed = session.Failure.IsCompleted ? session.Failure :
                 await Task.WhenAny(pending, session.Failure, Task.Delay(1000));

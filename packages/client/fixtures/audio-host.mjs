@@ -126,6 +126,30 @@ process.stdin.on('data', (bytes) => {
           })),
         },
       );
+      if (mode === 'capture-auto-stop-paused' && state === 'paused') {
+        setTimeout(
+          () =>
+            send(
+              { request_id: null, recording_id: request.recording_id },
+              'recording.stopped',
+              {
+                state: 'sealed',
+                tracks: capture.tracks.map((spec) => ({
+                  track_id: spec.track_id,
+                  saved_samples: savedSamples,
+                  device_id:
+                    spec.device_id === 'default'
+                      ? `synthetic-default-${spec.kind}`
+                      : spec.device_id,
+                  kind: spec.kind,
+                  capture_scope: spec.capture_scope,
+                  device_selection_policy: spec.device_selection_policy,
+                })),
+              },
+            ),
+          20,
+        );
+      }
     } else if (
       request.command === 'inspect_recording' &&
       mode.startsWith('capture')
