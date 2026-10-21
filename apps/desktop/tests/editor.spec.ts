@@ -20,6 +20,7 @@ test.skip(
   'Real Windows DPAPI and the sandboxed Electron renderer are required.',
 );
 const secret = 'Synthetic private planning note 439056.';
+const secondLine = '\u7b2c\u4e8c\u884c synthetic follow-up.';
 async function launch(directory: string) {
   return electron.launch({
     args: ['.'],
@@ -53,12 +54,36 @@ test('persists rich text across restart, isolates the renderer and keeps local f
     await page
       .getByRole('textbox', { name: 'Meeting notes', exact: true })
       .fill(secret);
+    const editor = page.getByRole('textbox', {
+      name: 'Meeting notes',
+      exact: true,
+    });
+    await editor.press('ControlOrMeta+A');
+    await page.getByRole('button', { name: 'Bold', exact: true }).click();
+    await expect(editor.locator('strong')).toContainText(secret);
+    await editor.press('End');
+    await editor.press('Shift+Enter');
+    await editor.pressSequentially(secondLine);
     await page
       .getByRole('textbox', { name: 'Meeting tags' })
       .fill('Planning, Review');
     await expect(
       page.getByText('SAVED LOCALLY', { exact: true }),
     ).toBeVisible();
+    const exportPath = join(directory, 'explicit-unencrypted-export.md');
+    await application.evaluate(({ dialog }, filePath) => {
+      dialog.showSaveDialog = async () => ({ canceled: false, filePath });
+    }, exportPath);
+    await page
+      .getByRole('button', { name: 'Export Markdown', exact: true })
+      .click();
+    await expect(
+      page.getByText('Unencrypted export saved.', { exact: true }),
+    ).toBeVisible();
+    const exported = await readFile(exportPath, 'utf8');
+    expect(exported).toContain('# Synthetic design review');
+    expect(exported).toContain('**');
+    expect(exported).toContain(secondLine.replace('.', '\\.'));
     expect(
       await page.evaluate(() => ({
         node: typeof (window as unknown as { require?: unknown }).require,
@@ -104,6 +129,7 @@ test('persists rich text across restart, isolates the renderer and keeps local f
         continue;
       const bytes = await readFile(join(directory, name));
       expect(bytes.includes(Buffer.from(secret))).toBe(false);
+      expect(bytes.includes(Buffer.from(secondLine))).toBe(false);
       expect(bytes.includes(Buffer.from('Synthetic design review'))).toBe(
         false,
       );
@@ -115,7 +141,16 @@ test('persists rich text across restart, isolates the renderer and keeps local f
     ).toHaveValue('Synthetic design review');
     await expect(
       restarted.getByRole('textbox', { name: 'Meeting notes', exact: true }),
-    ).toHaveText(secret);
+    ).toContainText(secret);
+    await expect(
+      restarted
+        .getByRole('textbox', { name: 'Meeting notes', exact: true })
+        .locator('strong')
+        .first(),
+    ).toContainText(secret);
+    await expect(
+      restarted.getByRole('textbox', { name: 'Meeting notes', exact: true }),
+    ).toContainText(secondLine);
     await expect(
       restarted.getByRole('textbox', { name: 'Meeting tags' }),
     ).toHaveValue('Planning, Review');

@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createCipheriv, randomBytes, randomUUID } from 'node:crypto';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -318,5 +318,220 @@ describe('encrypted local drafts and durable outbox', () => {
     expect(store.list(profile)).toHaveLength(0);
     expect(store.getValue(profile, 'refresh', z.string())).toBeNull();
     expect(store.get('other-account', other.id)).toEqual(other);
+  });
+  it('upgrades the released v1 vault without losing drafts, credentials or frozen retries', () => {
+    const store = open();
+    const draft = store.create(
+      profile,
+      fields('An upgrade must preserve this.'),
+    );
+    const mutation = store.nextMutation(profile, workspace);
+    close(store);
+    const legacy = new DatabaseSync(path);
+    function legacySeal(value: unknown, ...context: string[]) {
+      const nonce = randomBytes(12);
+      const cipher = createCipheriv('aes-256-gcm', key, nonce);
+      cipher.setAAD(
+        Buffer.from(JSON.stringify(['windows-ai-notes-local', 1, ...context])),
+      );
+      return Buffer.concat([
+        Buffer.from([1]),
+        nonce,
+        cipher.update(JSON.stringify(value)),
+        cipher.final(),
+        cipher.getAuthTag(),
+      ]);
+    }
+    try {
+      legacy.exec(`ALTER TABLE vault RENAME TO vault_v2;
+        CREATE TABLE vault(profile TEXT NOT NULL,id TEXT NOT NULL,payload BLOB NOT NULL,PRIMARY KEY(profile,id));
+        DROP TABLE vault_v2; DROP TABLE snapshot_candidates; PRAGMA user_version=1;`);
+      const insert = legacy.prepare('INSERT INTO vault VALUES(?,?,?)');
+      insert.run(
+        'root',
+        'key-check',
+        legacySeal('windows-ai-notes-local-v1', 'vault', 'root', 'key-check'),
+      );
+      insert.run(
+        profile,
+        'refresh',
+        legacySeal('synthetic-v1-refresh', 'vault', profile, 'refresh'),
+      );
+    } finally {
+      legacy.close();
+    }
+    const upgraded = open();
+    expect(upgraded.get(profile, draft.id)).toEqual(draft);
+    expect(upgraded.nextMutation(profile, workspace)).toEqual(mutation);
+    expect(upgraded.getValue(profile, 'refresh', z.string())).toBe(
+      'synthetic-v1-refresh',
+    );
+    close(upgraded);
+    const restarted = open();
+    expect(restarted.getValue(profile, 'refresh', z.string())).toBe(
+      'synthetic-v1-refresh',
+    );
+    expect(restarted.nextMutation(profile, workspace)).toEqual(mutation);
+  });
+  it('durably reconciles only the snapshot baseline, preserving new own creates and unsent edits', () => {
+    let store = open();
+    const sources = ['Seen.', 'Deleted.', 'Unsent edit.'].map((text) =>
+      store.create('fixtures', fields(text)),
+    );
+    for (const source of sources) store.applyRemote(profile, remote(source));
+    const [seen, removed, edited] = sources as [Draft, Draft, Draft];
+    store.putArtifact(profile, removed.id, 'transcript:1', {
+      text: 'Private removed evidence.',
+    });
+    const editing = store.get(profile, edited.id);
+    store.save(
+      profile,
+      edited.id,
+      editing.local_revision,
+      fields('Preserve unsent typing.'),
+    );
+    const progress = store.beginSnapshot(profile).bootstrap!;
+    store.acceptSnapshot(profile, progress, {
+      documents: [remote(seen)],
+      cursor: 'synthetic_cursor_1',
+      has_more: true,
+      next_after: seen.id,
+    });
+    close(store);
+    store = open();
+    const own = store.create(
+      'fixtures',
+      fields('Created after the snapshot began.'),
+    );
+    store.applyRemote(profile, remote(own));
+    store.acceptSnapshot(profile, store.syncCheckpoint(profile).bootstrap!, {
+      documents: [],
+      cursor: 'synthetic_cursor_1',
+      has_more: false,
+      next_after: null,
+    });
+    expect(store.get(profile, seen.id).status).toBe('synced');
+    expect(() => store.get(profile, removed.id)).toThrow('unavailable');
+    expect(store.get(profile, edited.id).status).toBe('deleted_remote');
+    expect(richTextToPlainText(store.get(profile, edited.id).content)).toBe(
+      'Preserve unsent typing.',
+    );
+    expect(store.get(profile, own.id).status).toBe('synced');
+    expect(
+      store.getArtifact(profile, removed.id, 'transcript:1', z.unknown()),
+    ).toBeNull();
+    expect(store.syncCheckpoint(profile)).toEqual({
+      cursor: 'synthetic_cursor_1',
+      bootstrap: null,
+    });
+  });
+  it('rolls back snapshot documents, artifacts and progress together on invalid input', () => {
+    const store = open();
+    const old = store.create('fixtures', fields('Baseline.'));
+    const incoming = store.create('fixtures', fields('Incoming.'));
+    store.applyRemote(profile, remote(old));
+    const progress = store.beginSnapshot(profile).bootstrap!;
+    const page = {
+      documents: [remote(incoming)],
+      cursor: 'synthetic_cursor_2',
+      has_more: false,
+      next_after: null,
+    };
+    expect(() =>
+      store.acceptSnapshot(profile, progress, page, [
+        { document_id: old.id, id: 'misassociated', value: 'not this page' },
+      ]),
+    ).toThrow('another page');
+    expect(store.syncCheckpoint(profile).bootstrap).toEqual(progress);
+    expect(store.get(profile, old.id).status).toBe('synced');
+    expect(() => store.get(profile, incoming.id)).toThrow('unavailable');
+    store.acceptSnapshot(profile, progress, page);
+    expect(store.get(profile, incoming.id).status).toBe('synced');
+    expect(() => store.get(profile, old.id)).toThrow('unavailable');
+  });
+  it('commits changed artifacts and the cursor atomically and rejects late callbacks after purge', () => {
+    const store = open();
+    const source = store.create('fixtures', fields('Current.'));
+    const progress = store.beginSnapshot(profile).bootstrap!;
+    store.acceptSnapshot(profile, progress, {
+      documents: [remote(source)],
+      cursor: 'cursor_10',
+      has_more: false,
+      next_after: null,
+    });
+    const changed = remote(source, 2, { title: 'New title' });
+    expect(() =>
+      store.acceptChanges(profile, 'cursor_10', 'cursor_11', [
+        {
+          id: source.id,
+          document: changed,
+          artifacts: [{ id: 'job:1', value: 'private artifact' }],
+        },
+        { id: randomUUID(), document: changed, artifacts: [] },
+      ]),
+    ).toThrow('identifier');
+    expect(store.get(profile, source.id).title).toBe(source.title);
+    expect(
+      store.getArtifact(profile, source.id, 'job:1', z.string()),
+    ).toBeNull();
+    expect(store.syncCheckpoint(profile).cursor).toBe('cursor_10');
+    store.acceptChanges(profile, 'cursor_10', 'cursor_11', [
+      {
+        id: source.id,
+        document: changed,
+        artifacts: [{ id: 'job:1', value: 'private artifact' }],
+      },
+    ]);
+    expect(store.getArtifact(profile, source.id, 'job:1', z.string())).toBe(
+      'private artifact',
+    );
+    store.purgeProfile(profile);
+    expect(() =>
+      store.acceptChanges(profile, 'cursor_11', 'cursor_12', [
+        { id: source.id, document: changed, artifacts: [] },
+      ]),
+    ).toThrow('no longer active');
+    expect(() =>
+      store.putArtifact(profile, source.id, 'job:late', 'late private data'),
+    ).toThrow('no longer available');
+    expect(store.list(profile)).toHaveLength(0);
+  });
+  it('removes artifacts on remote deletion even when local recovery keeps the draft', () => {
+    const store = open();
+    const source = store.create('fixtures', fields('Original.'));
+    store.applyRemote(profile, remote(source));
+    store.putArtifact(profile, source.id, 'transcript:1', {
+      text: 'Synthetic old transcript.',
+    });
+    const current = store.get(profile, source.id);
+    store.save(
+      profile,
+      source.id,
+      current.local_revision,
+      fields('Local recovery.'),
+    );
+    store.remoteDeleted(profile, source.id);
+    expect(store.get(profile, source.id).status).toBe('deleted_remote');
+    expect(
+      store.getArtifact(profile, source.id, 'transcript:1', z.unknown()),
+    ).toBeNull();
+    expect(() =>
+      store.putArtifact(profile, source.id, 'transcript:2', 'late callback'),
+    ).toThrow('no longer available');
+  });
+  it('does not strand an explicitly deleted draft when a newer remote edit arrives during a pull', () => {
+    const store = open();
+    const source = store.create('fixtures', fields('Original.'));
+    store.applyRemote(profile, remote(source));
+    store.remove(profile, source.id);
+    store.applyRemote(
+      profile,
+      remote(source, 2, { title: 'Newer remote title' }),
+    );
+    expect(store.list(profile)).toHaveLength(0);
+    const mutation = store.nextMutation(profile, workspace)!;
+    expect(mutation.kind).toBe('delete');
+    store.acknowledge(profile, mutation, null);
+    expect(store.nextMutation(profile, workspace)).toBeNull();
   });
 });

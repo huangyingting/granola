@@ -1,0 +1,25 @@
+{
+  "name": "@windows-ai-notes/client",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./http": {
+      "types": "./dist/http.d.ts",
+      "import": "./dist/http.js"
+    },
+    "./sync": {
+      "types": "./dist/sync.d.ts",
+      "import": "./dist/sync.js"
+    }
+  },
+  "dependencies": {
+    "@windows-ai-notes/contracts": "workspace:*",
+    "@windows-ai-notes/local": "workspace:*",
+    "zod": "^4.1.0"
+  },
+  "devDependencies": {
+    "@windows-ai-notes/api": "workspace:*",
+    "@windows-ai-notes/db": "workspace:*"
+  }
+}

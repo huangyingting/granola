@@ -219,6 +219,25 @@ importers:
         specifier: ^4.1.0
         version: 4.6.7
 
+  packages/client:
+    dependencies:
+      '@windows-ai-notes/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+      '@windows-ai-notes/local':
+        specifier: workspace:*
+        version: link:../local
+      zod:
+        specifier: ^4.1.0
+        version: 4.6.7
+    devDependencies:
+      '@windows-ai-notes/api':
+        specifier: workspace:*
+        version: link:../../apps/api
+      '@windows-ai-notes/db':
+        specifier: workspace:*
+        version: link:../db
+
   packages/contracts:
     dependencies:
       zod:

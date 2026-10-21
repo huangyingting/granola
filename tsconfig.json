@@ -6,6 +6,7 @@
     { "path": "./packages/ai" },
     { "path": "./packages/db" },
     { "path": "./packages/local" },
+    { "path": "./packages/client" },
     { "path": "./apps/api" },
     { "path": "./apps/worker" },
     { "path": "./apps/desktop" },

@@ -113,20 +113,25 @@ export const updateTranscriptSchema = z.strictObject({
   base_revision: revision,
   segments: segmentsSchema,
 });
-export const documentSchema = z.strictObject({
-  id: resourceId,
-  workspace_id: resourceId,
-  owner_id: resourceId,
-  title: z.string(),
-  revision: revision.min(1),
-  transcript_revision: revision,
-  notes: z.string(),
-  content: richTextSchema.nullable(),
-  tags: tagsSchema,
-  applied_revision: revision.min(1).optional(),
-  created_at: z.iso.datetime(),
-  updated_at: z.iso.datetime(),
-});
+export const documentSchema = z
+  .strictObject({
+    id: resourceId,
+    workspace_id: resourceId,
+    owner_id: resourceId,
+    title: z
+      .string()
+      .max(200)
+      .refine((value) => !value.includes('\0')),
+    revision: revision.min(1),
+    transcript_revision: revision,
+    notes: notesTextSchema,
+    content: richTextSchema.nullable(),
+    tags: tagsSchema,
+    applied_revision: revision.min(1).optional(),
+    created_at: z.iso.datetime(),
+    updated_at: z.iso.datetime(),
+  })
+  .superRefine(validateNoteFields);
 export const transcriptSchema = z.strictObject({
   document_id: resourceId,
   revision,

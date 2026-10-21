@@ -14,6 +14,7 @@ import {
   updateNotesSchema,
   updateDocumentSchema,
   resourceId,
+  syncSnapshotSchema,
 } from '@windows-ai-notes/contracts/server';
 import {
   richTextFromPlainText,
@@ -56,6 +57,20 @@ const rowSchema = z.strictObject({
   payload: z.instanceof(Uint8Array),
 });
 type Row = z.infer<typeof rowSchema>;
+const bootstrapSchema = z.strictObject({
+  cursor: syncSnapshotSchema.shape.cursor.nullable(),
+  after: resourceId.nullable(),
+});
+const checkpointSchema = z.strictObject({
+  cursor: syncSnapshotSchema.shape.cursor.nullable(),
+  bootstrap: bootstrapSchema.nullable(),
+});
+export type SyncCheckpoint = z.infer<typeof checkpointSchema>;
+export interface RemoteUpdate {
+  id: string;
+  document: Remote | null;
+  artifacts: { id: string; value: unknown }[];
+}
 const mutationFields = {
   id: resourceId,
   document_id: resourceId,
@@ -123,6 +138,7 @@ function context(row: Omit<Row, 'payload'>) {
 export class LocalStore {
   private readonly database: DatabaseSync;
   private readonly key: Buffer;
+  private transactionDepth = 0;
   constructor(path: string, key: Buffer) {
     if (key.length !== 32)
       throw new LocalError(
@@ -132,18 +148,30 @@ export class LocalStore {
     this.key = Buffer.from(key);
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     if (existsSync(path)) {
-      const inspect = new DatabaseSync(path, { readOnly: true });
+      let inspect: DatabaseSync | undefined;
       try {
+        inspect = new DatabaseSync(path, { readOnly: true });
         const tables = inspect
           .prepare(
             "SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'",
           )
           .all();
         if (tables.length) {
+          const version = inspect
+            .prepare('PRAGMA user_version')
+            .get()?.user_version;
+          if (version !== 1 && version !== 2)
+            throw new LocalError(
+              'local_version_unsupported',
+              'This local database needs a compatible application version.',
+            );
           if (
-            !['vault', 'drafts', 'outbox'].every((name) =>
-              tables.some((row) => row.name === name),
-            )
+            ![
+              'vault',
+              'drafts',
+              'outbox',
+              ...(version === 2 ? ['snapshot_candidates'] : []),
+            ].every((name) => tables.some((row) => row.name === name))
           )
             throw new LocalError(
               'local_data_corrupt',
@@ -151,7 +179,7 @@ export class LocalStore {
             );
           const verifier = inspect
             .prepare(
-              "SELECT payload FROM vault WHERE profile='root' AND id='key-check'",
+              `SELECT payload FROM vault WHERE profile='root' AND id='key-check'${version === 2 ? ' AND document_id IS NULL' : ''}`,
             )
             .get();
           if (!verifier)
@@ -162,14 +190,10 @@ export class LocalStore {
           this.open(
             z.literal('windows-ai-notes-local-v1'),
             z.instanceof(Uint8Array).parse(verifier.payload),
-            aad('vault', 'root', 'key-check'),
+            version === 1
+              ? aad('vault', 'root', 'key-check')
+              : aad('vault2', 'root', 'key-check', ''),
           );
-          const version = inspect.prepare('PRAGMA user_version').get();
-          if (version?.user_version !== 1)
-            throw new LocalError(
-              'local_version_unsupported',
-              'This local database needs a compatible application version.',
-            );
         }
       } catch (error) {
         this.key.fill(0);
@@ -180,16 +204,20 @@ export class LocalStore {
               'Local data could not be verified. Existing files were preserved.',
             );
       } finally {
-        inspect.close();
+        inspect?.close();
       }
     }
-    this.database = new DatabaseSync(path);
-    this.database.exec(
-      'PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;',
-    );
-    this.transaction(() => {
-      this.database.exec(`
-        CREATE TABLE IF NOT EXISTS vault (profile TEXT NOT NULL,id TEXT NOT NULL,payload BLOB NOT NULL,PRIMARY KEY(profile,id));
+    let opened: DatabaseSync | undefined;
+    try {
+      this.database = opened = new DatabaseSync(path);
+      this.database.exec(
+        'PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;',
+      );
+      this.transaction(() => {
+        const version = this.database
+          .prepare('PRAGMA user_version')
+          .get()?.user_version;
+        this.database.exec(`
         CREATE TABLE IF NOT EXISTS drafts (
           profile TEXT NOT NULL,id TEXT NOT NULL,revision INTEGER NOT NULL,remote_revision INTEGER NOT NULL,
           dirty INTEGER NOT NULL,conflict INTEGER NOT NULL,deleted INTEGER NOT NULL,
@@ -201,17 +229,62 @@ export class LocalStore {
           FOREIGN KEY(profile,document_id) REFERENCES drafts(profile,id) ON DELETE CASCADE
         );
         CREATE INDEX IF NOT EXISTS drafts_pending ON drafts(profile,dirty,conflict);
-        PRAGMA user_version=1;
+        CREATE TABLE IF NOT EXISTS snapshot_candidates (
+          profile TEXT NOT NULL,id TEXT NOT NULL,PRIMARY KEY(profile,id),
+          FOREIGN KEY(profile,id) REFERENCES drafts(profile,id) ON DELETE CASCADE
+        );
       `);
-      if (
-        !this.database
-          .prepare(
-            "SELECT 1 FROM vault WHERE profile='root' AND id='key-check'",
-          )
-          .get()
-      )
-        this.putValue('root', 'key-check', 'windows-ai-notes-local-v1');
-    });
+        if (version === 1) {
+          const values = this.database
+            .prepare('SELECT profile,id,payload FROM vault')
+            .all();
+          this.database.exec('ALTER TABLE vault RENAME TO vault_v1');
+          this.createVault();
+          for (const row of values) {
+            const profile = z.string().parse(row.profile);
+            const id = z.string().parse(row.id);
+            const value = this.open(
+              z.unknown(),
+              z.instanceof(Uint8Array).parse(row.payload),
+              aad('vault', profile, id),
+            );
+            this.putValue(profile, id, value);
+          }
+          this.database.exec('DROP TABLE vault_v1');
+        } else this.createVault();
+        if (
+          !this.database
+            .prepare(
+              "SELECT 1 FROM vault WHERE profile='root' AND id='key-check'",
+            )
+            .get()
+        )
+          this.putValue('root', 'key-check', 'windows-ai-notes-local-v1');
+        this.database.exec('PRAGMA user_version=2');
+      });
+    } catch (error) {
+      try {
+        opened?.close();
+      } finally {
+        this.key.fill(0);
+      }
+      throw error instanceof LocalError
+        ? error
+        : new LocalError(
+            'local_storage_unavailable',
+            'The local database could not be opened or upgraded. Existing files were preserved.',
+          );
+    }
+  }
+  private createVault() {
+    this.database.exec(`
+      CREATE TABLE IF NOT EXISTS vault (
+        profile TEXT NOT NULL,id TEXT NOT NULL,document_id TEXT,payload BLOB NOT NULL,
+        PRIMARY KEY(profile,id),
+        FOREIGN KEY(profile,document_id) REFERENCES drafts(profile,id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS vault_document ON vault(profile,document_id);
+    `);
   }
   close() {
     this.database.close();
@@ -263,34 +336,96 @@ export class LocalStore {
     }
   }
   private transaction<T>(run: () => T): T {
-    this.database.exec('BEGIN IMMEDIATE');
+    const nested = this.transactionDepth > 0;
+    const savepoint = `local_${this.transactionDepth}`;
+    this.database.exec(nested ? `SAVEPOINT ${savepoint}` : 'BEGIN IMMEDIATE');
+    this.transactionDepth++;
     try {
       const result = run();
-      this.database.exec('COMMIT');
+      this.database.exec(nested ? `RELEASE ${savepoint}` : 'COMMIT');
       return result;
     } catch (error) {
-      this.database.exec('ROLLBACK');
+      this.database.exec(
+        nested ? `ROLLBACK TO ${savepoint}; RELEASE ${savepoint}` : 'ROLLBACK',
+      );
       throw error;
+    } finally {
+      this.transactionDepth--;
     }
   }
   getValue<T>(profile: string, id: string, schema: z.ZodType<T>): T | null {
     const row = this.database
-      .prepare('SELECT payload FROM vault WHERE profile=? AND id=?')
+      .prepare('SELECT payload,document_id FROM vault WHERE profile=? AND id=?')
       .get(profile, id);
     return row
       ? this.open(
           schema,
           z.instanceof(Uint8Array).parse(row.payload),
-          aad('vault', profile, id),
+          aad(
+            'vault2',
+            profile,
+            id,
+            z.string().nullable().parse(row.document_id) ?? '',
+          ),
         )
       : null;
   }
   putValue(profile: string, id: string, value: unknown): void {
     this.database
       .prepare(
-        'INSERT INTO vault VALUES (?,?,?) ON CONFLICT(profile,id) DO UPDATE SET payload=excluded.payload',
+        'INSERT INTO vault (profile,id,document_id,payload) VALUES (?,?,NULL,?) ON CONFLICT(profile,id) DO UPDATE SET document_id=NULL,payload=excluded.payload',
       )
-      .run(profile, id, this.seal(value, aad('vault', profile, id)));
+      .run(profile, id, this.seal(value, aad('vault2', profile, id, '')));
+  }
+  putArtifact(
+    profile: string,
+    document: string,
+    id: string,
+    value: unknown,
+  ): void {
+    const row = this.row(profile, document);
+    const payload = row ? this.payload(row) : null;
+    if (
+      !row ||
+      row.deleted ||
+      payload?.recovery ||
+      (!payload?.server && !payload?.conflict)
+    )
+      throw new LocalError(
+        'local_document_missing',
+        'The artifact document is no longer available.',
+      );
+    const name = `artifact:${document}:${id}`;
+    this.database
+      .prepare(
+        `
+      INSERT INTO vault(profile,id,document_id,payload) VALUES (?,?,?,?)
+      ON CONFLICT(profile,id) DO UPDATE SET document_id=excluded.document_id,payload=excluded.payload
+    `,
+      )
+      .run(
+        profile,
+        name,
+        document,
+        this.seal(value, aad('vault2', profile, name, document)),
+      );
+  }
+  getArtifact<T>(
+    profile: string,
+    document: string,
+    id: string,
+    schema: z.ZodType<T>,
+  ): T | null {
+    const row = this.row(profile, document);
+    const payload = row ? this.payload(row) : null;
+    if (
+      !row ||
+      row.deleted ||
+      payload?.recovery ||
+      (!payload?.server && !payload?.conflict)
+    )
+      return null;
+    return this.getValue(profile, `artifact:${document}:${id}`, schema);
   }
   deleteValue(profile: string, id: string): void {
     this.database
@@ -625,7 +760,24 @@ export class LocalStore {
       const row = this.row(profile, remote.id);
       if (row) {
         const value = this.payload(row);
+        const known = value.server ?? value.conflict;
+        if (
+          known &&
+          (known.owner_id !== remote.owner_id ||
+            known.workspace_id !== remote.workspace_id)
+        )
+          throw new LocalError(
+            'invalid_server_response',
+            'The document account or workspace changed unexpectedly.',
+          );
         if (remote.revision < row.remote_revision) return;
+        if (row.deleted) {
+          this.write(
+            { ...row, remote_revision: remote.revision, conflict: 0 },
+            { ...value, server: remote, conflict: null },
+          );
+          return;
+        }
         if (remote.revision === row.remote_revision) {
           if (
             value.server &&
@@ -680,6 +832,9 @@ export class LocalStore {
   }
   remoteDeleted(profile: string, id: string): void {
     this.transaction(() => {
+      this.database
+        .prepare('DELETE FROM vault WHERE profile=? AND document_id=?')
+        .run(profile, id);
       const row = this.row(profile, id);
       if (!row) return;
       const value = this.payload(row);
@@ -700,6 +855,139 @@ export class LocalStore {
             recovery: 'deleted_remotely',
           },
         );
+    });
+  }
+  syncCheckpoint(profile: string): SyncCheckpoint {
+    return (
+      this.getValue(profile, 'sync:checkpoint', checkpointSchema) ?? {
+        cursor: null,
+        bootstrap: null,
+      }
+    );
+  }
+  beginSnapshot(profile: string): SyncCheckpoint {
+    if (profile === 'offline')
+      throw new LocalError(
+        'not_connected',
+        'Connect an account before synchronizing drafts.',
+      );
+    return this.transaction(() => {
+      this.database
+        .prepare('DELETE FROM snapshot_candidates WHERE profile=?')
+        .run(profile);
+      this.database
+        .prepare(
+          'INSERT INTO snapshot_candidates SELECT profile,id FROM drafts WHERE profile=? AND remote_revision>0',
+        )
+        .run(profile);
+      const checkpoint: SyncCheckpoint = {
+        cursor: null,
+        bootstrap: { cursor: null, after: null },
+      };
+      this.putValue(profile, 'sync:checkpoint', checkpoint);
+      return checkpoint;
+    });
+  }
+  acceptSnapshot(
+    profile: string,
+    expected: NonNullable<SyncCheckpoint['bootstrap']>,
+    input: z.infer<typeof syncSnapshotSchema>,
+    artifacts: { document_id: string; id: string; value: unknown }[] = [],
+  ): void {
+    const page = syncSnapshotSchema.parse(input);
+    this.transaction(() => {
+      const checkpoint = this.syncCheckpoint(profile);
+      if (
+        !checkpoint.bootstrap ||
+        canonicalJson(checkpoint.bootstrap) !== canonicalJson(expected)
+      )
+        throw new LocalError(
+          'local_sync_changed',
+          'This snapshot is no longer active.',
+        );
+      if (
+        (expected.cursor !== null && page.cursor !== expected.cursor) ||
+        page.has_more !== (page.next_after !== null) ||
+        (page.has_more &&
+          (!page.documents.length ||
+            page.next_after! <= (expected.after ?? '')))
+      )
+        throw new LocalError(
+          'invalid_server_response',
+          'The server returned inconsistent snapshot pagination.',
+        );
+      for (const document of page.documents) {
+        this.applyRemote(profile, document);
+        this.database
+          .prepare('DELETE FROM snapshot_candidates WHERE profile=? AND id=?')
+          .run(profile, document.id);
+      }
+      for (const artifact of artifacts) {
+        if (
+          !page.documents.some(
+            (document) => document.id === artifact.document_id,
+          )
+        )
+          throw new LocalError(
+            'invalid_server_response',
+            'A snapshot artifact belongs to another page.',
+          );
+        this.putArtifact(
+          profile,
+          artifact.document_id,
+          artifact.id,
+          artifact.value,
+        );
+      }
+      if (page.has_more)
+        this.putValue(profile, 'sync:checkpoint', {
+          cursor: null,
+          bootstrap: { cursor: page.cursor, after: page.next_after },
+        });
+      else {
+        const missing = this.database
+          .prepare('SELECT id FROM snapshot_candidates WHERE profile=?')
+          .all(profile);
+        for (const { id } of missing)
+          this.remoteDeleted(profile, z.string().parse(id));
+        this.database
+          .prepare('DELETE FROM snapshot_candidates WHERE profile=?')
+          .run(profile);
+        this.putValue(profile, 'sync:checkpoint', {
+          cursor: page.cursor,
+          bootstrap: null,
+        });
+      }
+    });
+  }
+  acceptChanges(
+    profile: string,
+    expected: string,
+    cursor: string,
+    updates: RemoteUpdate[],
+  ): void {
+    this.transaction(() => {
+      const checkpoint = this.syncCheckpoint(profile);
+      if (checkpoint.bootstrap || checkpoint.cursor !== expected)
+        throw new LocalError(
+          'local_sync_changed',
+          'This synchronization pass is no longer active.',
+        );
+      syncSnapshotSchema.shape.cursor.parse(cursor);
+      for (const update of updates) {
+        if (update.document === null) this.remoteDeleted(profile, update.id);
+        else {
+          if (update.document.id !== update.id)
+            throw new LocalError(
+              'invalid_server_response',
+              'The changed document does not match its identifier.',
+            );
+          this.applyRemote(profile, update.document);
+          for (const artifact of update.artifacts)
+            this.putArtifact(profile, update.id, artifact.id, artifact.value);
+        }
+      }
+      this.putValue(profile, 'sync:checkpoint', { cursor, bootstrap: null });
     });
   }
   resolve(

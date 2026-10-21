@@ -72,6 +72,15 @@ sandbox-compatible preload exposes a strictly validated, narrow IPC interface.
 The application refuses Linux plaintext key-storage backends rather than silently
 downgrading encryption; Windows is the supported desktop target.
 
+The main-process client core also implements bounded HTTPS transport and durable
+synchronization: frozen requests replay before pulls, snapshot pagination survives
+restarts, missing-document reconciliation preserves unsubmitted edits, and
+workspace revocation purges only the affected cache. Cursors, changed documents
+and encrypted transcript/job artifacts commit together. The v1 local vault is
+migrated transactionally without resetting keys, drafts or retries. Real
+HTTP/PostgreSQL/SQLite tests cover lost responses, two-device conflicts, expiry,
+deletion and revocation. This core is not yet wired to the offline preview UI.
+
 ```sh
 pnpm desktop:build
 pnpm desktop:test
@@ -213,7 +222,7 @@ idempotency key.
 This first slice uses PostgreSQL polling/leases as the durable scheduler rather
 than introducing unused Redis/BullMQ infrastructure. Full S3/resumable uploads,
 recording manifests/sealing, complete-meeting finalization, realtime STT, chat,
-the desktop sync engine, budget reservation/settlement and token streaming remain later
+the desktop account/sync UI, budget reservation/settlement and token streaming remain later
 implementation work. Successful jobs expose provider usage, but this is not a
 billing ledger; retries can incur duplicate provider charges.
 
