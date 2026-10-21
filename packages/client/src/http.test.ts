@@ -1,5 +1,6 @@
 import { createServer, type RequestListener } from 'node:http';
 import { once } from 'node:events';
+import { randomUUID } from 'node:crypto';
 import { afterEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { ApiClient, responseJson, serverUrl } from './http.js';
@@ -111,5 +112,43 @@ describe('bounded service transport', () => {
       throw failure;
     });
     await expect(client.identity()).rejects.toBe(failure);
+  });
+  it('pins transcript pages to the requested document, revision and position', async () => {
+    const id = randomUUID();
+    let change: Record<string, unknown> = {};
+    const base = await serve((request, response) => {
+      expect(request.url).toBe(
+        `/v1/documents/${id}/transcript/pages?revision=2&offset=50`,
+      );
+      response.end(
+        JSON.stringify({
+          document_id: id,
+          revision: 2,
+          source: 'manual',
+          offset: 50,
+          total_segments: 51,
+          segments: [
+            { id: randomUUID(), start_ms: 0, end_ms: 1, text: 'Evidence.' },
+          ],
+          has_more: false,
+          ...change,
+        }),
+      );
+    });
+    const client = new ApiClient(base, async () => ({}), {
+      allowLoopback: true,
+    });
+    expect(
+      (await client.transcriptPage(id, 2, 50, new AbortController().signal))
+        .offset,
+    ).toBe(50);
+    for (change of [
+      { document_id: randomUUID() },
+      { revision: 3 },
+      { offset: 49, total_segments: 50 },
+    ])
+      await expect(
+        client.transcriptPage(id, 2, 50, new AbortController().signal),
+      ).rejects.toMatchObject({ code: 'invalid_server_response' });
   });
 });

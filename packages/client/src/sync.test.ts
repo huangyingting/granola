@@ -20,7 +20,7 @@ import {
   richTextToPlainText,
 } from '@windows-ai-notes/contracts/content';
 import { z } from 'zod';
-import { ApiClient } from './http.js';
+import { ApiClient, ClientError } from './http.js';
 import { SyncEngine, workspaceProfile } from './sync.js';
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -270,6 +270,82 @@ describe.skipIf(!databaseUrl)(
           z.object({ jobs: z.array(z.unknown()) }),
         ),
       ).toEqual({ jobs: [] });
+    });
+    it('commits neither a newer transcript revision nor its cursor when the first page fetch fails', async () => {
+      const remote = await seed();
+      const segment = {
+        id: randomUUID(),
+        start_ms: 0,
+        end_ms: 1,
+        text: 'Original immutable evidence.',
+      };
+      await db.editTranscript(actor.user_id, remote.id, 0, [segment]);
+      await engine.synchronize();
+      const checkpoint = local.syncCheckpoint(engine.profile);
+      const newer = Array.from({ length: 1207 }, (_, index) => ({
+        ...segment,
+        id: randomUUID(),
+        text: `New meeting segment ${index}.`,
+      }));
+      await db.transaction((tx) =>
+        db.transcripts.write(
+          tx,
+          actor.user_id,
+          remote.id,
+          1,
+          'azure_speech_fast',
+          newer,
+        ),
+      );
+      const read = vi
+        .spyOn(api, 'transcriptPage')
+        .mockRejectedValueOnce(
+          new ClientError(
+            'service_unavailable',
+            'Synthetic page retrieval failed.',
+            503,
+            true,
+          ),
+        );
+      await expect(engine.synchronize()).rejects.toMatchObject({
+        code: 'service_unavailable',
+      });
+      expect(local.syncCheckpoint(engine.profile)).toEqual(checkpoint);
+      expect(local.details(engine.profile, remote.id).transcript_revision).toBe(
+        1,
+      );
+      expect(
+        local.getArtifact(
+          engine.profile,
+          remote.id,
+          'transcript:2',
+          z.unknown(),
+        ),
+      ).toBeNull();
+      expect(
+        local.getArtifact(
+          engine.profile,
+          remote.id,
+          'transcript:1',
+          z.object({ segments: z.array(z.unknown()) }),
+        ),
+      ).toMatchObject({ segments: [segment] });
+      read.mockRestore();
+      await engine.synchronize();
+      expect(local.details(engine.profile, remote.id).transcript_revision).toBe(
+        2,
+      );
+      expect(
+        local.getArtifact(
+          engine.profile,
+          remote.id,
+          'transcript:2',
+          z.object({
+            total_segments: z.number(),
+            segments: z.array(z.unknown()),
+          }),
+        ),
+      ).toEqual({ total_segments: 1207, segments: newer.slice(0, 50) });
     });
     it('purges only the revoked workspace, including artifacts and queued writes, without deleting account credentials', async () => {
       const remote = await seed();

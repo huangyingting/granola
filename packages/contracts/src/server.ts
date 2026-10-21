@@ -123,7 +123,12 @@ export const segmentSchema = z
     id: resourceId,
     start_ms: z.number().int().nonnegative().max(14_400_000),
     end_ms: z.number().int().nonnegative().max(14_400_000),
-    text: z.string().trim().min(1).max(10_000),
+    text: z
+      .string()
+      .trim()
+      .min(1)
+      .max(10_000)
+      .refine((text) => !text.includes('\0')),
   })
   .refine(
     (value) => value.end_ms >= value.start_ms,
@@ -168,6 +173,89 @@ export const transcriptSchema = z.strictObject({
   source: z.enum(['none', 'manual', 'azure_speech_fast']),
   segments: segmentsSchema,
 });
+export const MAX_TRANSCRIPT_SEGMENTS = 100_000;
+export const MAX_TRANSCRIPT_TEXT_BYTES = 8_000_000;
+export const TRANSCRIPT_PAGE_SIZE = 50;
+export const TRANSCRIPT_PAGE_TEXT_BYTES = 128_000;
+const utf8 = new TextEncoder();
+export const storedSegmentsSchema = z
+  .array(segmentSchema)
+  .max(MAX_TRANSCRIPT_SEGMENTS)
+  .refine(
+    (segments) =>
+      new Set(segments.map((segment) => segment.id)).size === segments.length &&
+      segments.reduce(
+        (sum, segment) => sum + utf8.encode(segment.text).length,
+        0,
+      ) <= MAX_TRANSCRIPT_TEXT_BYTES,
+    'Transcript segment IDs must be unique and stored text must fit the meeting limit.',
+  );
+export const transcriptHeaderSchema = transcriptSchema
+  .omit({ segments: true })
+  .extend({
+    total_segments: z.number().int().min(0).max(MAX_TRANSCRIPT_SEGMENTS),
+  });
+export const transcriptPageSchema = transcriptHeaderSchema
+  .extend({
+    offset: z.number().int().min(0).max(MAX_TRANSCRIPT_SEGMENTS),
+    segments: z.array(segmentSchema).max(TRANSCRIPT_PAGE_SIZE),
+    has_more: z.boolean(),
+  })
+  .refine(
+    (page) =>
+      page.offset + page.segments.length <= page.total_segments &&
+      page.has_more ===
+        page.offset + page.segments.length < page.total_segments &&
+      (!page.has_more || page.segments.length > 0) &&
+      (page.revision !== 0 ||
+        (page.source === 'none' && page.total_segments === 0)) &&
+      (page.source !== 'none' || page.revision === 0) &&
+      new Set(page.segments.map((segment) => segment.id)).size ===
+        page.segments.length &&
+      page.segments.reduce(
+        (sum, segment) => sum + utf8.encode(segment.text).length,
+        0,
+      ) <= TRANSCRIPT_PAGE_TEXT_BYTES,
+    'The transcript page has inconsistent bounds, identity, or text size.',
+  );
+export type TranscriptPage = z.infer<typeof transcriptPageSchema>;
+export const cachedTranscriptSchema = z
+  .union([transcriptPageSchema, transcriptSchema])
+  .refine(
+    (value) =>
+      value.revision === 0
+        ? value.source === 'none' && value.segments.length === 0
+        : value.source !== 'none',
+    'The cached transcript source must agree with its revision.',
+  );
+export const transcriptPageQuerySchema = z.strictObject({
+  revision: z.coerce.number().int().nonnegative().optional(),
+  offset: z.coerce
+    .number()
+    .int()
+    .min(0)
+    .max(MAX_TRANSCRIPT_SEGMENTS)
+    .default(0),
+});
+export function makeTranscriptPage(
+  header: z.infer<typeof transcriptHeaderSchema>,
+  offset: number,
+  candidates: z.infer<typeof segmentSchema>[],
+): TranscriptPage {
+  const segments: z.infer<typeof segmentSchema>[] = [];
+  let bytes = 0;
+  for (const segment of candidates.slice(0, TRANSCRIPT_PAGE_SIZE)) {
+    bytes += utf8.encode(segment.text).length;
+    if (bytes > TRANSCRIPT_PAGE_TEXT_BYTES) break;
+    segments.push(segment);
+  }
+  return transcriptPageSchema.parse({
+    ...header,
+    offset,
+    segments,
+    has_more: offset + segments.length < header.total_segments,
+  });
+}
 export const summaryRequestSchema = z.strictObject({
   note_revision: revision.min(1),
   transcript_revision: revision,

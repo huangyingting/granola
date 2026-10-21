@@ -97,9 +97,10 @@ export class SyncEngine {
   ): Promise<RemoteUpdate['artifacts']> {
     const artifacts: RemoteUpdate['artifacts'] = [];
     if (document.transcript_revision > 0) {
-      const transcript = await this.api.transcript(
+      const transcript = await this.api.transcriptPage(
         document.id,
         document.transcript_revision,
+        0,
         this.controller.signal,
       );
       if (

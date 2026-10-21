@@ -4,7 +4,10 @@ import {
   oidcClientConfigurationSchema,
   resourceId,
   jobSchema,
-  transcriptSchema,
+  cachedTranscriptSchema,
+  transcriptPageSchema,
+  makeTranscriptPage,
+  type TranscriptPage,
 } from '@windows-ai-notes/contracts/server';
 import type {
   DesktopChange,
@@ -55,6 +58,7 @@ export class WorkspaceController {
   private query = '';
   private offset = 0;
   private readonly selection = new Map<string, string | null>();
+  private readonly transcriptReads = new Set<AbortController>();
   constructor(
     private readonly local: LocalStore,
     private readonly openBrowser: (url: string) => Promise<void>,
@@ -128,6 +132,8 @@ export class WorkspaceController {
       );
   }
   private emit(kind: DesktopChange['kind']) {
+    if (this.critical || kind === 'scope' || kind === 'revoked')
+      for (const read of this.transcriptReads) read.abort();
     if (kind === 'scope' || kind === 'revoked') {
       this.query = '';
       this.offset = 0;
@@ -232,11 +238,10 @@ export class WorkspaceController {
       transcript_revision: details?.transcript_revision ?? 0,
       transcript:
         selected && details?.transcript_revision
-          ? this.local.getArtifact(
+          ? this.cachedTranscript(
               profile,
               selected.id,
-              `transcript:${details.transcript_revision}`,
-              transcriptSchema,
+              details.transcript_revision,
             )
           : null,
       jobs: selected
@@ -263,12 +268,148 @@ export class WorkspaceController {
     this.stopEngine();
   }
   private stopEngine() {
+    for (const read of this.transcriptReads) read.abort();
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
     this.timerDue = 0;
     this.engine?.stop();
     this.engine = null;
     this.running = null;
+  }
+  private cachedTranscript(profile: string, id: string, revision: number) {
+    const value = this.local.getArtifact(
+      profile,
+      id,
+      `transcript:${revision}`,
+      cachedTranscriptSchema,
+    );
+    if (
+      value &&
+      (value.document_id !== id ||
+        value.revision !== revision ||
+        ('offset' in value && value.offset !== 0))
+    )
+      throw new ClientError(
+        'invalid_server_response',
+        'The cached transcript does not match this meeting revision.',
+      );
+    return value;
+  }
+  async transcriptPage(
+    scope: number,
+    id: string,
+    revision: number,
+    offset: number,
+  ): Promise<TranscriptPage> {
+    this.assertScope(scope);
+    const profile = this.profile;
+    const draft = this.local.get(profile, id);
+    if (draft.status === 'deleted_remote' || draft.remote_revision === 0)
+      throw new ClientError(
+        'transcript_unavailable',
+        'This meeting has no available cloud transcript.',
+      );
+    const first = this.cachedTranscript(profile, id, revision);
+    let cached: TranscriptPage | null = null;
+    if (first && !('offset' in first)) {
+      if (offset > first.segments.length)
+        throw new ClientError(
+          'invalid_transcript_page',
+          'The requested transcript position is outside this revision.',
+        );
+      cached = makeTranscriptPage(
+        {
+          document_id: id,
+          revision: first.revision,
+          source: first.source,
+          total_segments: first.segments.length,
+        },
+        offset,
+        first.segments.slice(offset),
+      );
+    } else
+      cached =
+        offset === 0 && first && 'offset' in first
+          ? first
+          : this.local.getArtifact(
+              profile,
+              id,
+              `transcript-page:${revision}:${offset}`,
+              transcriptPageSchema,
+            );
+    const check = (page: TranscriptPage) => {
+      if (
+        page.document_id !== id ||
+        page.revision !== revision ||
+        page.offset !== offset ||
+        (first &&
+          (page.source !== first.source ||
+            ('total_segments' in first &&
+              page.total_segments !== first.total_segments)))
+      )
+        throw new ClientError(
+          'invalid_server_response',
+          'The transcript page does not match the requested revision.',
+        );
+      return page;
+    };
+    if (cached) return check(cached);
+    const api = this.api;
+    if (!api || !this.account?.active_workspace || this.auth)
+      throw new ClientError(
+        'transcript_not_cached',
+        'This page is not cached. Reconnect to download it.',
+      );
+    if (this.transcriptReads.size >= 4)
+      throw new ClientError(
+        'transcript_busy',
+        'Wait for the current transcript page requests to finish.',
+      );
+    const controller = new AbortController();
+    this.transcriptReads.add(controller);
+    try {
+      const page = await api.transcriptPage(
+        id,
+        revision,
+        offset,
+        controller.signal,
+      );
+      this.assertScope(scope);
+      if (api !== this.api || profile !== this.profile || this.auth)
+        throw new ClientError(
+          'workspace_changed',
+          'The active account changed while loading the transcript.',
+        );
+      if (controller.signal.aborted)
+        throw new ClientError(
+          'request_cancelled',
+          'The transcript page request was cancelled.',
+        );
+      check(page);
+      this.local.putArtifact(
+        profile,
+        id,
+        offset === 0
+          ? `transcript:${revision}`
+          : `transcript-page:${revision}:${offset}`,
+        page,
+      );
+      return page;
+    } catch (error) {
+      if (
+        api === this.api &&
+        profile === this.profile &&
+        !this.disposed &&
+        error instanceof ClientError &&
+        error.status === 403 &&
+        (error.code === 'identity_not_provisioned' ||
+          error.code === 'workspace_access_revoked')
+      )
+        this.revoke(error);
+      throw error;
+    } finally {
+      this.transcriptReads.delete(controller);
+    }
   }
   private replaceEngine() {
     this.stopEngine();

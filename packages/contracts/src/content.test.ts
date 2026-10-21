@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   exportMeeting,
+  exportMeetingStream,
   richTextSchema,
   richTextFromPlainText,
   richTextToPlainText,
@@ -10,6 +11,38 @@ import {
 import { createDocumentSchema, updateNotesSchema } from './server.js';
 
 describe('meeting content', () => {
+  it('streams exactly the existing export format, including empty bodies, whitespace and Markdown escaping', async () => {
+    for (const format of ['markdown', 'text'] as const)
+      for (const timestamps of [true, false])
+        for (const notes of ['', 'Notes <tag>.\n\n  '])
+          for (const segments of [
+            [],
+            [
+              { start_ms: 3_661_000, text: '中文 <speech>.\n  ' },
+              { start_ms: 1, text: 'Last line.  ' },
+            ],
+          ]) {
+            const meeting = {
+              title: 'Synthetic *meeting*',
+              notes,
+              tags: ['tag'],
+            };
+            async function* entries() {
+              yield* segments;
+            }
+            let text = '';
+            for await (const part of exportMeetingStream(
+              meeting,
+              entries(),
+              format,
+              timestamps,
+            ))
+              text += part;
+            expect(text).toBe(
+              exportMeeting({ ...meeting, segments }, format, timestamps),
+            );
+          }
+  });
   it('round-trips existing plain text without duplicating line breaks', () => {
     for (const text of [
       '',

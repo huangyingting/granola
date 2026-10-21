@@ -8,6 +8,7 @@ import {
   documentSchema,
   updateDocumentSchema,
   updateNotesSchema,
+  makeTranscriptPage,
   type Segment,
 } from '@windows-ai-notes/contracts/server';
 import { canonicalJson } from '@windows-ai-notes/contracts/content';
@@ -45,6 +46,7 @@ export async function desktopFixture() {
   const tombstones = new Set<string>();
   const state = {
     active: true,
+    transcript_online: true,
     user,
     workspace,
     documents,
@@ -66,7 +68,7 @@ export async function desktopFixture() {
       },
     });
   }
-  function seed(text: string, transcript?: string) {
+  function seed(text: string, transcript?: string | Segment[]) {
     const document = documentSchema.parse({
       id: randomUUID(),
       workspace_id: workspace,
@@ -86,9 +88,17 @@ export async function desktopFixture() {
         document_id: document.id,
         revision: 1,
         source: 'manual',
-        segments: [
-          { id: randomUUID(), start_ms: 0, end_ms: 1000, text: transcript },
-        ],
+        segments:
+          typeof transcript === 'string'
+            ? [
+                {
+                  id: randomUUID(),
+                  start_ms: 0,
+                  end_ms: 1000,
+                  text: transcript,
+                },
+              ]
+            : transcript,
       });
     record(document);
     return document;
@@ -191,12 +201,28 @@ export async function desktopFixture() {
         if (!existing) return error(response, 'document_not_found', 404);
         if (parts[4] === 'jobs') return send(response, { jobs: [] });
         if (parts[4] === 'transcript') {
+          if (!state.transcript_online)
+            return error(response, 'service_unavailable', 503);
           const transcript = transcripts.get(
             `${id}:${url.searchParams.get('revision')}`,
           );
-          return transcript
-            ? send(response, transcript)
-            : error(response, 'transcript_not_found', 404);
+          if (!transcript) return error(response, 'transcript_not_found', 404);
+          const offset = Number(url.searchParams.get('offset') ?? 0);
+          return send(
+            response,
+            parts[5] === 'pages'
+              ? makeTranscriptPage(
+                  {
+                    document_id: id,
+                    revision: transcript.revision,
+                    source: transcript.source,
+                    total_segments: transcript.segments.length,
+                  },
+                  offset,
+                  transcript.segments.slice(offset),
+                )
+              : transcript,
+          );
         }
         return send(response, existing);
       }

@@ -5,6 +5,7 @@ import {
   type ElectronApplication,
 } from '@playwright/test';
 import { mkdtemp, rm } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { desktopFixture } from '../../../packages/client/src/desktop.fixture.js';
@@ -198,6 +199,114 @@ test('requires inline upload consent and preserves the encrypted journal after n
     ).toBeVisible();
     await expect(
       page.getByRole('button', { name: 'Resume or retry upload', exact: true }),
+    ).toBeVisible();
+    await close(application);
+    application = null;
+  } finally {
+    if (application) await application.close();
+    await fixture.close();
+    expect(fixture.state.failures).toEqual([]);
+    expect(fixture.issuer.state.failures).toEqual([]);
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('pages long transcripts without losing editor text and reads opened pages offline after restart', async () => {
+  const directory = await mkdtemp(
+    join(tmpdir(), 'windows-notes-transcript-pages-'),
+  );
+  const fixture = await desktopFixture();
+  fixture.seed(
+    'Synthetic notes remain editable.',
+    Array.from({ length: 137 }, (_, index) => ({
+      id: randomUUID(),
+      start_ms: index * 1000,
+      end_ms: index * 1000 + 999,
+      text: `Synthetic transcript segment ${index}.`,
+    })),
+  );
+  let application: ElectronApplication | null = null;
+  try {
+    application = await launch(directory);
+    let page = await application.firstWindow();
+    await page.getByRole('button', { name: /Account & sync/ }).click();
+    await page.getByRole('textbox', { name: 'Service URL' }).fill(fixture.url);
+    await page
+      .getByRole('button', { name: 'Sign in with browser', exact: true })
+      .click();
+    await page
+      .getByRole('button', {
+        name: /^Synthetic cloud workspace (Open workspace|Current workspace)$/,
+      })
+      .click();
+    const editor = page.getByRole('textbox', {
+      name: 'Meeting notes',
+      exact: true,
+    });
+    await expect(editor).toHaveText('Synthetic notes remain editable.');
+    await page
+      .getByText('Transcript', { exact: false })
+      .filter({ hasText: 'Revision 1' })
+      .first()
+      .click();
+    await expect(
+      page.getByText('Segments 1-50 of 137', { exact: true }),
+    ).toBeVisible();
+    await expect(page.locator('.transcript-segment')).toHaveCount(50);
+    await editor.fill('Synthetic edited notes survive transcript navigation.');
+    await page
+      .getByRole('button', { name: 'Next transcript page', exact: true })
+      .click();
+    await expect(
+      page.getByText('Segments 51-100 of 137', { exact: true }),
+    ).toBeVisible();
+    await expect(editor).toHaveText(
+      'Synthetic edited notes survive transcript navigation.',
+    );
+    await expect(page.locator('.transcript-segment')).toHaveCount(50);
+    await close(application);
+    application = await launch(directory);
+    page = await application.firstWindow();
+    await expect(
+      page.getByRole('textbox', { name: 'Meeting notes', exact: true }),
+    ).toHaveText('Synthetic edited notes survive transcript navigation.');
+    await page
+      .getByText('Transcript', { exact: false })
+      .filter({ hasText: 'Revision 1' })
+      .first()
+      .click();
+    fixture.state.transcript_online = false;
+    await page
+      .getByRole('button', { name: 'Next transcript page', exact: true })
+      .click();
+    await expect(
+      page.getByText('Segments 51-100 of 137', { exact: true }),
+    ).toBeVisible();
+    await page
+      .getByRole('button', { name: 'Next transcript page', exact: true })
+      .click();
+    await expect(
+      page.getByText('Synthetic service unavailable.', { exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByText('Segments 51-100 of 137', { exact: true }),
+    ).toBeVisible();
+    fixture.state.transcript_online = true;
+    await page
+      .getByRole('button', { name: 'Next transcript page', exact: true })
+      .click();
+    await expect(
+      page.getByText('Segments 101-137 of 137', { exact: true }),
+    ).toBeVisible();
+    await expect(page.locator('.transcript-segment')).toHaveCount(37);
+    await expect(
+      page.getByRole('button', { name: 'Next transcript page', exact: true }),
+    ).toHaveCount(0);
+    await page
+      .getByRole('button', { name: 'Previous transcript page', exact: true })
+      .click();
+    await expect(
+      page.getByText('Segments 51-100 of 137', { exact: true }),
     ).toBeVisible();
     await close(application);
     application = null;

@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
+import { Readable } from 'node:stream';
 import { setTimeout as delay } from 'node:timers/promises';
 import Fastify from 'fastify';
 import rateLimit from '@fastify/rate-limit';
@@ -13,12 +14,13 @@ import {
   updateTranscriptSchema,
   summaryRequestSchema,
   transcriptionQuerySchema,
+  transcriptPageQuerySchema,
   resourceId,
   idempotencyKey,
   syncSnapshotQuerySchema,
   syncChangesQuerySchema,
 } from '@windows-ai-notes/contracts/server';
-import { exportMeeting } from '@windows-ai-notes/contracts/content';
+import { exportMeetingStream } from '@windows-ai-notes/contracts/content';
 import type { Database } from '@windows-ai-notes/db';
 import { validateWav } from '@windows-ai-notes/ai/wav';
 import { createAuthenticator, principal, type AuthConfig } from './auth.js';
@@ -260,9 +262,27 @@ export async function createServer(
     );
     const user = principal(request).userId;
     const document = await db.document(user, id);
-    const transcript = await db.transcript(user, id);
-    const content = exportMeeting(
-      { ...document, segments: transcript.segments },
+    const first = await db.transcripts.page(
+      user,
+      id,
+      document.transcript_revision,
+    );
+    async function* segments() {
+      let page = first;
+      while (true) {
+        yield* page.segments;
+        if (!page.has_more) return;
+        page = await db.transcripts.page(
+          user,
+          id,
+          first.revision,
+          page.offset + page.segments.length,
+        );
+      }
+    }
+    const content = exportMeetingStream(
+      document,
+      segments(),
       query.format,
       query.timestamps === 'true',
     );
@@ -277,7 +297,7 @@ export async function createServer(
         'Content-Disposition',
         `attachment; filename="meeting-${id}.${query.format === 'markdown' ? 'md' : 'txt'}"`,
       )
-      .send(content);
+      .send(Readable.from(content));
   });
   app.delete('/v1/documents/:id', async (request, reply) => {
     const { id } = parse(idParams, request.params);
@@ -288,6 +308,16 @@ export async function createServer(
     const { id } = parse(idParams, request.params);
     const { revision } = parse(revisionQuery, request.query);
     return db.transcript(principal(request).userId, id, revision);
+  });
+  app.get('/v1/documents/:id/transcript/pages', async (request) => {
+    const { id } = parse(idParams, request.params);
+    const query = parse(transcriptPageQuerySchema, request.query);
+    return db.transcripts.page(
+      principal(request).userId,
+      id,
+      query.revision,
+      query.offset,
+    );
   });
   app.put('/v1/documents/:id/transcript', async (request) => {
     const { id } = parse(idParams, request.params);

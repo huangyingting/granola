@@ -23,12 +23,14 @@ import {
 } from '@windows-ai-notes/contracts/content';
 import { recordChange, SyncStore } from './sync.js';
 import { RecordingStore } from './recordings.js';
+import { TranscriptStore } from './transcripts.js';
 export { recordChange } from './sync.js';
 
 const migrationFiles = [
   '001_initial.sql',
   '002_editing_sync.sql',
   '003_recordings.sql',
+  '004_transcript_pages.sql',
 ];
 
 export type Transaction = pg.PoolClient;
@@ -125,6 +127,7 @@ export class Database {
   readonly pool: pg.Pool;
   readonly sync: SyncStore;
   readonly recordings: RecordingStore;
+  readonly transcripts: TranscriptStore;
   constructor(url: string) {
     this.pool = new pg.Pool({
       connectionString: url,
@@ -134,6 +137,7 @@ export class Database {
     });
     this.sync = new SyncStore(this);
     this.recordings = new RecordingStore(this);
+    this.transcripts = new TranscriptStore(this);
     this.pool.on('error', () =>
       console.error(
         'database_connection_failed: idle PostgreSQL connection closed.',
@@ -488,30 +492,7 @@ export class Database {
     return { document_id: id, revision: version, ...result.rows[0] };
   }
   async transcript(userId: string, id: string, version?: number) {
-    const doc = await this.document(userId, id);
-    const selected = version ?? doc.transcript_revision;
-    if (selected === 0)
-      return { document_id: id, revision: 0, source: 'none', segments: [] };
-    const result = await this.pool.query<{ source: string; segments: unknown }>(
-      `
-      SELECT t.source,t.segments FROM transcript_revisions t JOIN documents d ON d.id=t.document_id
-      JOIN memberships m ON m.workspace_id=d.workspace_id AND m.user_id=d.owner_id AND m.active
-      JOIN users u ON u.id=d.owner_id AND u.active
-      WHERE t.document_id=$1 AND t.revision=$2 AND d.owner_id=$3 AND d.deleted_at IS NULL`,
-      [id, selected, userId],
-    );
-    if (!result.rows[0])
-      throw new ServiceError(
-        'revision_not_found',
-        'The requested transcript revision is unavailable.',
-        404,
-      );
-    return {
-      document_id: id,
-      revision: selected,
-      source: result.rows[0].source,
-      segments: segmentsSchema.parse(result.rows[0].segments),
-    };
+    return this.transcripts.legacy(userId, id, version);
   }
   async editTranscript(
     userId: string,
@@ -523,26 +504,16 @@ export class Database {
       const doc = await this.document(userId, id, tx);
       if (doc.transcript_revision !== base)
         throw conflict(doc.transcript_revision);
-      await this.writeTranscript(tx, id, base + 1, 'manual', segments);
+      await this.transcripts.write(
+        tx,
+        userId,
+        id,
+        base,
+        'manual',
+        segmentsSchema.parse(segments),
+      );
     });
-    return this.transcript(userId, id);
-  }
-  private async writeTranscript(
-    tx: Transaction,
-    id: string,
-    version: number,
-    source: string,
-    segments: Segment[],
-  ) {
-    await tx.query(
-      'INSERT INTO transcript_revisions (document_id,revision,source,segments) VALUES ($1,$2,$3,$4)',
-      [id, version, source, JSON.stringify(segments)],
-    );
-    await tx.query(
-      'UPDATE documents SET transcript_revision=$2,updated_at=now() WHERE id=$1',
-      [id, version],
-    );
-    await recordChange(tx, id, 'transcript');
+    return this.transcript(userId, id, base + 1);
   }
   async enqueueSummary(
     userId: string,
@@ -560,19 +531,28 @@ export class Database {
         if (doc.revision !== input.note_revision) throw conflict(doc.revision);
         if (doc.transcript_revision !== input.transcript_revision)
           throw conflict(doc.transcript_revision);
-        const rows =
-          input.transcript_revision === 0
-            ? []
-            : (
-                await tx.query<{ segments: unknown }>(
-                  'SELECT segments FROM transcript_revisions WHERE document_id=$1 AND revision=$2',
-                  [id, input.transcript_revision],
-                )
-              ).rows;
+        const header = await this.transcripts.header(
+          userId,
+          id,
+          input.transcript_revision,
+          tx,
+        );
+        if (header.total_segments > 1000 || header.text_bytes > 48_000)
+          throw new ServiceError(
+            'context_too_large',
+            'This transcript requires the long-meeting summary workflow.',
+            413,
+          );
+        const transcript = await this.transcripts.legacy(
+          userId,
+          id,
+          input.transcript_revision,
+          tx,
+        );
         const snapshot = {
           document_id: id,
           notes: doc.notes,
-          segments: rows[0] ? segmentsSchema.parse(rows[0].segments) : [],
+          segments: transcript.segments,
           note_revision: input.note_revision,
           transcript_revision: input.transcript_revision,
           language: input.language,
@@ -942,10 +922,11 @@ export class Database {
         } else {
           if (!transcript)
             throw new Error('Transcription completion requires segments.');
-          await this.writeTranscript(
+          await this.transcripts.write(
             tx,
+            job.ownerId,
             job.documentId,
-            doc.transcript_revision + 1,
+            doc.transcript_revision,
             'azure_speech_fast',
             segmentsSchema.parse(transcript),
           );

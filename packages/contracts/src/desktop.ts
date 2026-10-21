@@ -1,6 +1,12 @@
 import { z } from 'zod';
 import { richTextSchema, tagsSchema } from './content.js';
-import { resourceId, jobSchema, transcriptSchema } from './server.js';
+import {
+  resourceId,
+  jobSchema,
+  cachedTranscriptSchema,
+  transcriptPageSchema,
+  MAX_TRANSCRIPT_SEGMENTS,
+} from './server.js';
 import { deviceSchema, trackSchema } from './index.js';
 import { audioStateSchema } from './recording.js';
 
@@ -29,6 +35,13 @@ export type DraftSummary = z.infer<typeof draftSummarySchema>;
 const scoped = { scope: z.number().int().positive() };
 export const desktopCommandSchema = z.discriminatedUnion('operation', [
   z.strictObject({ operation: z.literal('bootstrap') }),
+  z.strictObject({
+    operation: z.literal('getTranscriptPage'),
+    ...scoped,
+    id: resourceId,
+    revision: z.number().int().positive(),
+    offset: z.number().int().min(0).max(MAX_TRANSCRIPT_SEGMENTS),
+  }),
   z.strictObject({ operation: z.literal('listAudioDevices'), ...scoped }),
   z.strictObject({
     operation: z.literal('getRecordingState'),
@@ -189,7 +202,7 @@ export const desktopStateSchema = z.strictObject({
   connection: desktopConnectionSchema,
   conflict: desktopConflictSchema.nullable(),
   transcript_revision: z.number().int().nonnegative(),
-  transcript: transcriptSchema.nullable(),
+  transcript: cachedTranscriptSchema.nullable(),
   jobs: z.array(jobSchema).max(20),
 });
 export const desktopChangeSchema = z.strictObject({
@@ -208,6 +221,10 @@ export const desktopResponseSchema = z.union([
     error: z.strictObject({ code: z.string(), message: z.string() }),
   }),
   z.strictObject({ ok: z.literal(true), closing: z.literal(true) }),
+  z.strictObject({
+    ok: z.literal(true),
+    transcript_page: z.strictObject({ ...scoped, page: transcriptPageSchema }),
+  }),
   z.strictObject({
     ok: z.literal(true),
     audio_state: z.strictObject({ ...scoped, state: audioStateSchema }),

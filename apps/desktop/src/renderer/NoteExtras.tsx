@@ -1,10 +1,158 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { richTextToPlainText } from '@windows-ai-notes/contracts/content';
+import {
+  makeTranscriptPage,
+  type TranscriptPage,
+} from '@windows-ai-notes/contracts/server';
 import type {
   DesktopState,
   Draft,
   EditableDraft,
 } from '@windows-ai-notes/contracts/desktop';
+
+function Transcript({ state, id }: { state: DesktopState; id: string }) {
+  function initial(): TranscriptPage | null {
+    const value = state.transcript;
+    if (!value) return null;
+    if ('offset' in value) return value;
+    return makeTranscriptPage(
+      {
+        document_id: value.document_id,
+        revision: value.revision,
+        source: value.source,
+        total_segments: value.segments.length,
+      },
+      0,
+      value.segments,
+    );
+  }
+  const [page, setPage] = useState(initial);
+  const [previous, setPrevious] = useState<number[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    setPage((current) => current ?? initial());
+  }, [state.transcript]);
+  async function load(
+    offset: number,
+    direction: 'next' | 'previous' | 'first',
+  ) {
+    setLoading(true);
+    setError(null);
+    try {
+      const response = await window.notes.invoke({
+        operation: 'getTranscriptPage',
+        scope: state.scope,
+        id,
+        revision: state.transcript_revision,
+        offset,
+      });
+      if (!response.ok) throw new Error(response.error.message);
+      if (
+        !('transcript_page' in response) ||
+        response.transcript_page.scope !== state.scope
+      )
+        throw new Error(
+          'The transcript response did not match this workspace.',
+        );
+      setPrevious((positions) =>
+        direction === 'previous'
+          ? positions.slice(0, -1)
+          : direction === 'next' && page
+            ? [...positions, page.offset]
+            : [],
+      );
+      setPage(response.transcript_page.page);
+    } catch (failure) {
+      setError(
+        failure instanceof Error
+          ? failure.message
+          : 'The transcript page could not be loaded.',
+      );
+    } finally {
+      setLoading(false);
+    }
+  }
+  return (
+    <details>
+      <summary>
+        Transcript <span>Revision {state.transcript_revision}</span>
+      </summary>
+      {page ? (
+        <>
+          <p className="quiet-note" role="status">
+            {page.total_segments === 0
+              ? 'This transcript revision has no segments.'
+              : `Segments ${page.offset + 1}-${page.offset + page.segments.length} of ${page.total_segments}`}
+          </p>
+          {page.segments.map((segment) => (
+            <p className="transcript-segment" key={segment.id}>
+              <span>
+                {Math.floor(segment.start_ms / 60_000)}:
+                {String(Math.floor(segment.start_ms / 1000) % 60).padStart(
+                  2,
+                  '0',
+                )}
+              </span>
+              {segment.text}
+            </p>
+          ))}
+          <div className="inline-actions">
+            {previous.length > 0 && (
+              <button
+                className="quiet-button"
+                disabled={loading}
+                onClick={() =>
+                  void load(previous[previous.length - 1]!, 'previous')
+                }
+              >
+                Previous transcript page
+              </button>
+            )}
+            {page.has_more && (
+              <button
+                className="quiet-button"
+                disabled={loading}
+                onClick={() =>
+                  void load(page.offset + page.segments.length, 'next')
+                }
+              >
+                Next transcript page
+              </button>
+            )}
+          </div>
+        </>
+      ) : (
+        <>
+          <p className="quiet-note">
+            This transcript has not been cached yet. Reconnect to download it.
+          </p>
+          <button
+            className="quiet-button"
+            disabled={loading}
+            onClick={() => void load(0, 'first')}
+          >
+            Download transcript page
+          </button>
+        </>
+      )}
+      {loading && (
+        <p className="quiet-note" role="status">
+          Loading transcript page...
+        </p>
+      )}
+      {error && (
+        <p className="account-alert" role="alert">
+          {error}
+        </p>
+      )}
+      <p className="quiet-note">
+        Opened pages are cached on this device for offline reading. Pages you
+        have not opened require a connection.
+      </p>
+    </details>
+  );
+}
 
 function Version({ label, value }: { label: string; value: EditableDraft }) {
   const [expanded, setExpanded] = useState(false);
@@ -129,29 +277,11 @@ export function NoteExtras({
       {(state.transcript_revision > 0 || state.jobs.length > 0) && (
         <section className="meeting-artifacts">
           {state.transcript_revision > 0 && (
-            <details>
-              <summary>
-                Transcript <span>Revision {state.transcript_revision}</span>
-              </summary>
-              {state.transcript ? (
-                state.transcript.segments.map((segment) => (
-                  <p className="transcript-segment" key={segment.id}>
-                    <span>
-                      {Math.floor(segment.start_ms / 60_000)}:
-                      {String(
-                        Math.floor(segment.start_ms / 1000) % 60,
-                      ).padStart(2, '0')}
-                    </span>
-                    {segment.text}
-                  </p>
-                ))
-              ) : (
-                <p className="quiet-note">
-                  This transcript has not been cached yet. Reconnect to download
-                  it.
-                </p>
-              )}
-            </details>
+            <Transcript
+              key={`${state.scope}:${draft.id}:${state.transcript_revision}`}
+              state={state}
+              id={draft.id}
+            />
           )}
           {state.jobs.length > 0 && (
             <details>

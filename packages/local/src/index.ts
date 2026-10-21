@@ -183,7 +183,13 @@ export class LocalStore {
           const version = inspect
             .prepare('PRAGMA user_version')
             .get()?.user_version;
-          if (version !== 1 && version !== 2 && version !== 3 && version !== 4)
+          if (
+            version !== 1 &&
+            version !== 2 &&
+            version !== 3 &&
+            version !== 4 &&
+            version !== 5
+          )
             throw new LocalError(
               'local_version_unsupported',
               'This local database needs a compatible application version.',
@@ -194,7 +200,7 @@ export class LocalStore {
               'drafts',
               'outbox',
               ...(version !== 1 ? ['snapshot_candidates'] : []),
-              ...(version === 4 ? ['recording_uploads'] : []),
+              ...(version === 4 || version === 5 ? ['recording_uploads'] : []),
             ].every((name) => tables.some((row) => row.name === name))
           )
             throw new LocalError(
@@ -292,7 +298,7 @@ export class LocalStore {
             .get()
         )
           this.putValue('root', 'key-check', 'windows-ai-notes-local-v1');
-        this.database.exec('PRAGMA user_version=4');
+        this.database.exec('PRAGMA user_version=5');
       });
     } catch (error) {
       try {

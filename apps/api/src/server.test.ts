@@ -787,11 +787,52 @@ describe.skipIf(!databaseUrl)('PostgreSQL API and durable AI worker', () => {
         'INSERT INTO note_versions (document_id,revision,notes) VALUES ($1,1,$2)',
         [id, input.notes],
       );
+      const evidence = [
+        {
+          id: randomUUID().toUpperCase(),
+          start_ms: 1,
+          end_ms: 1000,
+          text: 'Legacy 中文 🎙️ evidence.',
+        },
+        {
+          id: randomUUID(),
+          start_ms: 1001,
+          end_ms: 2000,
+          text: 'Preserved second segment.',
+        },
+      ];
+      await legacy.pool.query(
+        "INSERT INTO transcript_revisions (document_id,revision,source,segments) VALUES ($1,1,'manual',$2)",
+        [id, JSON.stringify(evidence)],
+      );
+      await legacy.pool.query(
+        'UPDATE documents SET transcript_revision=1 WHERE id=$1',
+        [id],
+      );
       await legacy.migrate();
       await legacy.assertReady();
       expect(
         await legacy.createDocument(user.user_id, input, key),
       ).toMatchObject({ id, notes: input.notes, content: null, tags: [] });
+      expect(await legacy.transcript(user.user_id, id)).toMatchObject({
+        revision: 1,
+        source: 'manual',
+        segments: evidence,
+      });
+      expect(await legacy.transcripts.page(user.user_id, id, 1)).toMatchObject({
+        total_segments: 2,
+        offset: 0,
+        segments: evidence,
+        has_more: false,
+      });
+      expect(
+        (await legacy.transcripts.header(user.user_id, id, 1)).text_bytes,
+      ).toBe(
+        evidence.reduce(
+          (sum, segment) => sum + Buffer.byteLength(segment.text),
+          0,
+        ),
+      );
       await legacy.pool.query(
         "UPDATE schema_migrations SET checksum='modified' WHERE version=1",
       );

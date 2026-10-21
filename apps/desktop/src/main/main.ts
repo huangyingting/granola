@@ -312,6 +312,18 @@ async function start() {
             : { ok: true, state: state() };
         }
         const db = database();
+        if (command.operation === 'getTranscriptPage') {
+          const page = await workspace().transcriptPage(
+            command.scope,
+            command.id,
+            command.revision,
+            command.offset,
+          );
+          return desktopResponseSchema.parse({
+            ok: true,
+            transcript_page: { scope: command.scope, page },
+          });
+        }
         if (command.operation === 'listAudioDevices') {
           const active = workspace();
           active.assertScope(command.scope);

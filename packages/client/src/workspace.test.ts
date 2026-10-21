@@ -27,6 +27,8 @@ import { AccountSession, OidcClient } from './auth.js';
 import { WorkspaceController } from './workspace.js';
 import { workspaceProfile } from './sync.js';
 import { oidcFixture } from './oidc.fixture.js';
+import { ApiClient } from './http.js';
+import { transcriptPageSchema } from '@windows-ai-notes/contracts/server';
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 describe.skipIf(!databaseUrl)(
@@ -243,6 +245,203 @@ describe.skipIf(!databaseUrl)(
       expect(richTextToPlainText(controller.snapshot().selected!.content)).toBe(
         'Original device-only text.',
       );
+    });
+    it('synchronizes only the first bounded transcript page and preserves opened pages through encrypted restart', async () => {
+      const remote = await seed();
+      const segments = Array.from({ length: 1207 }, (_, index) => ({
+        id: randomUUID(),
+        start_ms: index * 1000,
+        end_ms: index * 1000 + 999,
+        text: `Synthetic immutable segment ${index}.`,
+      }));
+      await db.transaction((tx) =>
+        db.transcripts.write(
+          tx,
+          actor.user_id,
+          remote.id,
+          0,
+          'azure_speech_fast',
+          segments,
+        ),
+      );
+      await connect();
+      await activate();
+      await controller.synchronize();
+      const state = controller.snapshot();
+      expect(state.transcript).toMatchObject({
+        total_segments: 1207,
+        offset: 0,
+        has_more: true,
+        segments: segments.slice(0, 50),
+      });
+      expect(
+        (await controller.transcriptPage(state.scope, remote.id, 1, 50))
+          .segments,
+      ).toEqual(segments.slice(50, 100));
+      const profile = controller.profile;
+      controller.dispose();
+      local.close();
+      local = new LocalStore(join(directory, 'notes.sqlite'), key);
+      controller = open();
+      const request = vi
+        .spyOn(ApiClient.prototype, 'transcriptPage')
+        .mockRejectedValue(new Error('Synthetic offline connection.'));
+      expect(
+        (await controller.transcriptPage(controller.scope, remote.id, 1, 50))
+          .segments,
+      ).toEqual(segments.slice(50, 100));
+      expect(request).not.toHaveBeenCalled();
+      await expect(
+        controller.transcriptPage(controller.scope, remote.id, 1, 100),
+      ).rejects.toThrow('Synthetic offline connection.');
+      expect(
+        local.getArtifact(
+          profile,
+          remote.id,
+          'transcript-page:1:100',
+          transcriptPageSchema,
+        ),
+      ).toBeNull();
+      expect(
+        local.getArtifact(
+          profile,
+          remote.id,
+          'transcript-page:1:50',
+          transcriptPageSchema,
+        )?.segments,
+      ).toEqual(segments.slice(50, 100));
+    });
+    it('rejects page responses arriving after scope changes, document deletion and changed immutable headers', async () => {
+      const remote = await seed();
+      const segments = Array.from({ length: 60 }, (_, index) => ({
+        id: randomUUID(),
+        start_ms: index,
+        end_ms: index + 1,
+        text: `Segment ${index}.`,
+      }));
+      await db.editTranscript(actor.user_id, remote.id, 0, segments);
+      await connect();
+      await activate();
+      await controller.synchronize();
+      const page = await db.transcripts.page(actor.user_id, remote.id, 1, 50);
+      const profile = controller.profile;
+      const read = vi
+        .spyOn(ApiClient.prototype, 'transcriptPage')
+        .mockResolvedValue({ ...page, total_segments: 61, has_more: true });
+      await expect(
+        controller.transcriptPage(controller.scope, remote.id, 1, 50),
+      ).rejects.toMatchObject({ code: 'invalid_server_response' });
+      expect(
+        local.getArtifact(
+          profile,
+          remote.id,
+          'transcript-page:1:50',
+          transcriptPageSchema,
+        ),
+      ).toBeNull();
+      read.mockImplementationOnce(async () => {
+        local.remoteDeleted(profile, remote.id);
+        return page;
+      });
+      await expect(
+        controller.transcriptPage(controller.scope, remote.id, 1, 50),
+      ).rejects.toMatchObject({ code: 'local_document_missing' });
+      expect(
+        local.getArtifact(
+          profile,
+          remote.id,
+          'transcript-page:1:50',
+          transcriptPageSchema,
+        ),
+      ).toBeNull();
+      const restored = await db.document(actor.user_id, remote.id);
+      local.applyRemote(profile, {
+        ...restored,
+        created_at: restored.created_at.toISOString(),
+        updated_at: restored.updated_at.toISOString(),
+      });
+      let finish!: (value: typeof page) => void;
+      let signal: AbortSignal | undefined;
+      read.mockImplementationOnce((_id, _revision, _offset, pending) => {
+        signal = pending;
+        return new Promise((resolve) => {
+          finish = resolve;
+        });
+      });
+      const scope = controller.scope;
+      const pending = controller.transcriptPage(scope, remote.id, 1, 50);
+      const rejected = expect(pending).rejects.toMatchObject({
+        code: 'workspace_changed',
+      });
+      await controller.execute({ operation: 'workOffline', scope });
+      expect(signal?.aborted).toBe(true);
+      finish(page);
+      await rejected;
+      expect(
+        local.getArtifact(
+          profile,
+          remote.id,
+          'transcript-page:1:50',
+          transcriptPageSchema,
+        ),
+      ).toBeNull();
+    });
+    it('reads legacy full-transcript caches without a connection and purges paged evidence on confirmed revocation', async () => {
+      const remote = await seed();
+      const segments = Array.from({ length: 60 }, (_, index) => ({
+        id: randomUUID(),
+        start_ms: index,
+        end_ms: index + 1,
+        text: `Legacy cached segment ${index}.`,
+      }));
+      await db.editTranscript(actor.user_id, remote.id, 0, segments);
+      await connect();
+      await activate();
+      await controller.synchronize();
+      const profile = controller.profile;
+      local.putArtifact(profile, remote.id, 'transcript:1', {
+        document_id: remote.id,
+        revision: 1,
+        source: 'manual',
+        segments,
+      });
+      const read = vi.spyOn(ApiClient.prototype, 'transcriptPage');
+      expect(
+        (await controller.transcriptPage(controller.scope, remote.id, 1, 50))
+          .segments,
+      ).toEqual(segments.slice(50));
+      expect(read).not.toHaveBeenCalled();
+      local.putArtifact(
+        profile,
+        remote.id,
+        'transcript:1',
+        await db.transcripts.page(actor.user_id, remote.id, 1),
+      );
+      await controller.transcriptPage(controller.scope, remote.id, 1, 50);
+      expect(
+        local.getArtifact(
+          profile,
+          remote.id,
+          'transcript-page:1:50',
+          transcriptPageSchema,
+        ),
+      ).not.toBeNull();
+      await db.pool.query('UPDATE users SET active=false WHERE id=$1', [
+        actor.user_id,
+      ]);
+      await expect(
+        controller.transcriptPage(controller.scope, remote.id, 1, 51),
+      ).rejects.toMatchObject({ code: 'identity_not_provisioned' });
+      expect(controller.profile).toBe('offline');
+      expect(
+        local.getArtifact(
+          profile,
+          remote.id,
+          'transcript-page:1:50',
+          transcriptPageSchema,
+        ),
+      ).toBeNull();
+      expect(controller.snapshot().documents).toEqual([]);
     });
     it('exposes both versions and resolves conflicts or remote deletion only through explicit new-copy decisions', async () => {
       const remote = await seed();

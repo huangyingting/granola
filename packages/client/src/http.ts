@@ -3,6 +3,8 @@ import {
   documentSchema,
   jobSchema,
   transcriptSchema,
+  transcriptPageSchema,
+  transcriptPageQuerySchema,
   resourceId,
   syncChangesSchema,
   syncSnapshotSchema,
@@ -275,6 +277,29 @@ export class ApiClient {
       transcriptSchema,
       { signal },
     );
+  }
+  async transcriptPage(
+    id: string,
+    revision: number,
+    offset: number,
+    signal: AbortSignal,
+  ) {
+    const query = transcriptPageQuerySchema.parse({ revision, offset });
+    const page = await this.request(
+      `/v1/documents/${resourceId.parse(id)}/transcript/pages?revision=${query.revision}&offset=${query.offset}`,
+      transcriptPageSchema,
+      { signal },
+    );
+    if (
+      page.document_id !== id ||
+      page.revision !== revision ||
+      page.offset !== offset
+    )
+      throw new ClientError(
+        'invalid_server_response',
+        'The service returned an inconsistent transcript page.',
+      );
+    return page;
   }
   jobs(id: string, signal: AbortSignal) {
     return this.request(

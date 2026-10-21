@@ -281,10 +281,42 @@ export interface MeetingExport {
   tags: string[];
   segments?: { start_ms: number; text: string }[];
 }
-export function exportMeeting(
-  meeting: MeetingExport,
+function exportSegment(
+  segment: { start_ms: number; text: string },
+  format: 'markdown' | 'text',
+  timestamps: boolean,
+) {
+  const seconds = Math.floor(segment.start_ms / 1000);
+  const clock = `${Math.floor(seconds / 3600)
+    .toString()
+    .padStart(2, '0')}:${Math.floor((seconds / 60) % 60)
+    .toString()
+    .padStart(2, '0')}:${(seconds % 60).toString().padStart(2, '0')}`;
+  const text =
+    format === 'markdown' ? escapeMarkdown(segment.text) : segment.text;
+  return `${timestamps ? `[${clock}] ` : ''}${text}`;
+}
+export async function* exportMeetingStream(
+  meeting: Omit<MeetingExport, 'segments'>,
+  segments: AsyncIterable<{ start_ms: number; text: string }>,
   format: 'markdown' | 'text',
   timestamps = true,
+): AsyncGenerator<string> {
+  let pending = exportNotes(meeting, format);
+  let first = true;
+  for await (const segment of segments) {
+    yield pending;
+    yield first
+      ? `\n\n${format === 'markdown' ? '## Transcript' : 'Transcript'}\n\n`
+      : '\n\n';
+    first = false;
+    pending = exportSegment(segment, format, timestamps);
+  }
+  yield pending.trimEnd() + '\n';
+}
+function exportNotes(
+  meeting: Omit<MeetingExport, 'segments'>,
+  format: 'markdown' | 'text',
 ): string {
   const markdown = format === 'markdown';
   const heading = (text: string, level = 2) =>
@@ -302,20 +334,19 @@ export function exportMeeting(
       `Tags: ${meeting.tags.map((tag) => (markdown ? escapeMarkdown(tag) : tag)).join(', ')}`,
     );
   sections.push(heading('Notes'), notes);
+  return sections.join('\n\n');
+}
+export function exportMeeting(
+  meeting: MeetingExport,
+  format: 'markdown' | 'text',
+  timestamps = true,
+): string {
+  const sections = [exportNotes(meeting, format)];
   if (meeting.segments?.length) {
     sections.push(
-      heading('Transcript'),
+      format === 'markdown' ? '## Transcript' : 'Transcript',
       meeting.segments
-        .map((segment) => {
-          const seconds = Math.floor(segment.start_ms / 1000);
-          const clock = `${Math.floor(seconds / 3600)
-            .toString()
-            .padStart(2, '0')}:${Math.floor((seconds / 60) % 60)
-            .toString()
-            .padStart(2, '0')}:${(seconds % 60).toString().padStart(2, '0')}`;
-          const text = markdown ? escapeMarkdown(segment.text) : segment.text;
-          return `${timestamps ? `[${clock}] ` : ''}${text}`;
-        })
+        .map((segment) => exportSegment(segment, format, timestamps))
         .join('\n\n'),
     );
   }

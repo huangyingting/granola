@@ -73,6 +73,11 @@ Real Windows audio behavior still requires the hardware checks below.
 - Azure Speech Fast Transcription and Azure OpenAI structured summaries. Inputs
   freeze their revisions; generated summaries never overwrite notes. Citations
   must resolve to the supplied immutable evidence. Provider errors are explicit.
+- Revision-pinned transcript pages backed by indexed immutable PostgreSQL segments.
+  Synchronization atomically caches the first bounded page with the document and
+  cursor; the desktop loads additional pages on demand into its encrypted cache.
+  Server Markdown/plain-text exports stream the entire pinned transcript instead
+  of truncating it. Legacy short-transcript and summary context limits remain unchanged.
 
 ## Desktop preview
 
@@ -142,11 +147,26 @@ The main-process client core also implements bounded HTTPS transport and durable
 synchronization: frozen requests replay before pulls, snapshot pagination survives
 restarts, missing-document reconciliation preserves unsubmitted edits, and
 workspace revocation purges only the affected cache. Cursors, changed documents
-and encrypted transcript/job artifacts commit together. The v1/v2/v3 local vault is
-migrated transactionally to v4 without resetting keys, drafts or retries. Older
-previews reject this version instead of using recording/upload-unaware deletion logic. Real
+and encrypted transcript/job artifacts commit together. The v1/v2/v3/v4 local vault is
+migrated transactionally to v5 without resetting keys, drafts, recording intents or retries.
+Legacy full-transcript caches remain readable offline. Older previews reject this
+version rather than mistaking a cached transcript page for the complete revision. Real
 HTTP/PostgreSQL/SQLite tests cover lost responses, two-device conflicts, expiry,
 deletion and revocation.
+
+The transcript viewer shows its current segment range and replaces, rather than
+accumulates, rendered pages. Opened pages remain available offline after restart;
+unopened pages require a connection and a failed fetch leaves the current page
+visible with an explicit error. Switching workspaces, revocation or deletion fences
+late page responses. This storage/viewing foundation does not yet connect saved
+recordings to complete-meeting transcription.
+
+Before starting an updated server, run `pnpm db:migrate`. PostgreSQL migration 004
+preserves existing segment IDs, order and revisions while normalizing legacy JSON
+arrays into indexed segment rows. Stored revisions are bounded to 100,000 segments
+and 8,000,000 UTF-8 text bytes; each API page contains at most 50 segments and
+128,000 UTF-8 text bytes. Oversized legacy API reads fail explicitly with
+`transcript_pagination_required`; full exports use the streaming path.
 The OIDC client core uses a system-browser code/S256 flow and a loopback-only
 callback, validates signed ID/access tokens and state/nonce/audience/scope, and
 stores rotating refresh credentials only in the encrypted main-process vault.
