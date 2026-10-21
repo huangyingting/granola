@@ -15,17 +15,25 @@ export function parseOptions(args: string[]) {
       'data-dir': { type: 'string', default: '.probe-data' },
       'pause-at': { type: 'string' },
       'pause-for': { type: 'string', default: '2' },
+      'accept-incomplete': { type: 'boolean', default: false },
       help: { type: 'boolean', default: false },
     },
   });
   if (values.help || args.length === 0) return { help: true as const };
   const command = positionals[0];
-  if (!['devices', 'record', 'inspect'].includes(command ?? '')) {
-    throw new Error('Use devices, record, or inspect <recording-id>.');
+  if (!['devices', 'record', 'inspect', 'recover'].includes(command ?? '')) {
+    throw new Error(
+      'Use devices, record, inspect <recording-id>, or recover <recording-id> --accept-incomplete.',
+    );
   }
-  if (positionals.length !== (command === 'inspect' ? 2 : 1)) {
+  const archive = command === 'inspect' || command === 'recover';
+  if (positionals.length !== (archive ? 2 : 1)) {
     throw new Error('Unexpected or missing positional arguments.');
   }
+  if ((command === 'recover') !== values['accept-incomplete'])
+    throw new Error(
+      'Only recover accepts, and requires, --accept-incomplete: the unsaved audio tail may be missing.',
+    );
   const seconds = Number(values.seconds);
   const pauseAt =
     values['pause-at'] === undefined ? undefined : Number(values['pause-at']);
@@ -47,12 +55,14 @@ export function parseOptions(args: string[]) {
       'The pause must fit within --seconds; --pause-for must be 1 to 60 seconds.',
     );
   }
-  const recordingId = command === 'inspect' ? positionals[1]! : randomUUID();
-  if (command === 'inspect') {
+  const recordingId = archive ? positionals[1]! : randomUUID();
+  if (archive) {
     audioRequestSchema.parse({
       protocol_version: 1,
       request_id: randomUUID(),
-      command: 'inspect_recording',
+      ...(command === 'recover'
+        ? { command: 'recover_recording', accept_incomplete: true }
+        : { command: 'inspect_recording' }),
       recording_id: recordingId,
     });
   }

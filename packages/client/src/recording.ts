@@ -43,6 +43,13 @@ export class RecordingController {
   private running = false;
   private closing: Promise<void> | null = null;
   private cleaning: Promise<void> | null = null;
+  private reviewing: {
+    client: AudioClient;
+    profile: string;
+    document: string;
+    id: string;
+    revoked: boolean;
+  } | null = null;
   private deviceRequest: Promise<
     Extract<AudioEvent, { event_type: 'devices' }>['payload']['devices']
   > | null = null;
@@ -87,7 +94,10 @@ export class RecordingController {
     try {
       return await operation();
     } catch (error) {
-      this.error = problem(error);
+      const failure = problem(error);
+      // Cancellation must not hide the ownership failure that stopped a review.
+      if (failure.code !== 'recording_review_cancelled' || this.error === null)
+        this.error = failure;
       throw error;
     } finally {
       this.running = false;
@@ -314,6 +324,10 @@ export class RecordingController {
     });
   }
   async stop(authorize: () => void) {
+    if (this.reviewing) {
+      authorize();
+      await this.closeReview();
+    }
     const owner = this.owner;
     if (owner)
       await this.control(
@@ -348,47 +362,159 @@ export class RecordingController {
     this.deviceRequest = request;
     return request;
   }
-  async inspect(
+  inspect(
     profile: string,
     document: string,
     id: string,
     authorize: () => void,
+  ) {
+    return this.review(profile, document, id, authorize, false);
+  }
+  recover(
+    profile: string,
+    document: string,
+    id: string,
+    authorize: () => void,
+  ) {
+    return this.review(profile, document, id, authorize, true);
+  }
+  private async closeReview() {
+    const review = this.reviewing;
+    if (review) {
+      review.revoked = true;
+      await review.client.close();
+    }
+  }
+  private async review(
+    profile: string,
+    document: string,
+    id: string,
+    authorize: () => void,
+    recover: boolean,
   ) {
     return this.exclusive(async () => {
       authorize();
       if (this.client)
         throw new LocalError(
           'recording_in_progress',
-          'Stop capture before inspecting saved recordings.',
+          'Stop capture before inspecting or recovering saved recordings.',
         );
       this.local.getRecording(profile, document, id);
       const client = this.create(() => {});
-      try {
-        const event = await client.request({
-          command: 'inspect_recording',
-          recording_id: id,
-        });
+      const review = { client, profile, document, id, revoked: false };
+      this.reviewing = review;
+      const check = () => {
         authorize();
-        if (event.event_type !== 'recording.inspected')
+        if (review.revoked)
+          throw new LocalError(
+            'recording_review_cancelled',
+            'Audio inspection or recovery was cancelled. Inspect preserved files before retrying.',
+          );
+        return this.local.getRecording(profile, document, id);
+      };
+      try {
+        const event = await client.request(
+          recover
+            ? {
+                command: 'recover_recording',
+                recording_id: id,
+                accept_incomplete: true,
+              }
+            : { command: 'inspect_recording', recording_id: id },
+        );
+        const previous = check();
+        if (
+          (event.event_type !== 'recording.inspected' &&
+            event.event_type !== 'recording.recovered') ||
+          (event.event_type === 'recording.recovered') !== recover
+        )
           throw new AudioHostError(
             'audio_protocol_error',
             'The helper did not return an integrity report.',
             false,
           );
+        let tracks = previous.tracks;
+        if (
+          recover &&
+          (event.event_type !== 'recording.recovered' ||
+            event.payload.state === 'sealed' ||
+            event.payload.state === 'key_unavailable' ||
+            event.payload.recovered_chunks !== 0)
+        )
+          throw new AudioHostError(
+            'audio_protocol_error',
+            'Recovery did not confirm adoption of saved chunks into an interrupted recording.',
+            false,
+          );
+        if (recover || event.payload.state === 'sealed') {
+          const described = await client.request({
+            command: 'get_recording',
+            recording_id: id,
+            offset: 0,
+          });
+          check();
+          if (
+            described.event_type !== 'recording.manifest' ||
+            described.payload.state !== (recover ? 'failed' : 'sealed') ||
+            described.payload.tracks.length !== tracks.length ||
+            described.payload.tracks.reduce(
+              (total, track) => total + track.saved_samples,
+              0,
+            ) !== event.payload.total_samples ||
+            described.payload.tracks.reduce(
+              (total, track) => total + track.chunk_count,
+              0,
+            ) !== event.payload.verified_chunks
+          )
+            throw new AudioHostError(
+              'audio_protocol_error',
+              'Verified chunk counts or manifest state are inconsistent.',
+              false,
+            );
+          const savedTracks = described.payload.tracks;
+          tracks = tracks.map((track) => {
+            const saved = savedTracks.find(
+              (value) => value.spec.track_id === track.spec.track_id,
+            );
+            if (
+              !saved ||
+              canonicalJson(saved.spec) !== canonicalJson(track.spec) ||
+              (track.actual_device_id &&
+                track.actual_device_id !== saved.actual_device_id) ||
+              saved.saved_samples < track.saved_samples
+            )
+              throw new AudioHostError(
+                'audio_protocol_error',
+                'Inspection or recovery changed the recording source identity or lost acknowledged samples.',
+                false,
+              );
+            return {
+              ...track,
+              actual_device_id: saved.actual_device_id,
+              saved_samples: saved.saved_samples,
+            };
+          });
+        }
         this.local.updateRecording(profile, document, id, {
           state: event.payload.state === 'sealed' ? 'sealed' : 'interrupted',
+          tracks,
           inspection: event.payload,
           error:
             event.payload.state === 'sealed'
               ? null
               : {
                   code: 'recording_incomplete',
-                  message:
-                    'Inspection did not confirm a complete sealed recording. Saved files were preserved.',
+                  message: recover
+                    ? 'Authenticated saved chunks were recovered. Capture was not resumed; the uncommitted audio tail may still be missing.'
+                    : 'Inspection did not confirm a complete sealed recording. Saved files were preserved.',
                 },
         });
       } finally {
-        await client.close();
+        try {
+          await client.close();
+        } finally {
+          if (this.reviewing === review) this.reviewing = null;
+        }
       }
     });
   }
@@ -420,6 +546,23 @@ export class RecordingController {
     };
   }
   async reconcile(profile: string): Promise<void> {
+    const review = this.reviewing;
+    if (review) {
+      let forbidden = review.profile !== profile;
+      if (!forbidden) {
+        try {
+          this.local.getRecording(review.profile, review.document, review.id);
+        } catch (error) {
+          if (!missing(error)) {
+            await this.closeReview();
+            this.report(error);
+            throw error;
+          }
+          forbidden = true;
+        }
+      }
+      if (forbidden) await this.closeReview();
+    }
     if (this.owner && this.client) {
       let forbidden = this.owner.profile !== profile;
       if (!forbidden) {
@@ -454,6 +597,7 @@ export class RecordingController {
       this.cleanupError = null;
       try {
         for (const id of this.local.pendingRecordingDeletions()) {
+          if (this.reviewing?.id === id) await this.closeReview();
           if (this.owner?.recording_id === id && this.client) {
             this.revoked = true;
             await this.release(this.client);

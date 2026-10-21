@@ -4,6 +4,45 @@
     "request": {
       "protocol_version": 1,
       "request_id": "9c73575e-426d-4f72-98ed-7b4479f890ab",
+      "command": "recover_recording",
+      "recording_id": "75048e79-2b45-440f-8609-b80a37635b4a",
+      "accept_incomplete": true
+    }
+  },
+  {
+    "valid": false,
+    "request": {
+      "protocol_version": 1,
+      "request_id": "9c73575e-426d-4f72-98ed-7b4479f890ab",
+      "command": "recover_recording",
+      "recording_id": "75048e79-2b45-440f-8609-b80a37635b4a"
+    }
+  },
+  {
+    "valid": false,
+    "request": {
+      "protocol_version": 1,
+      "request_id": "9c73575e-426d-4f72-98ed-7b4479f890ab",
+      "command": "recover_recording",
+      "recording_id": "75048e79-2b45-440f-8609-b80a37635b4a",
+      "accept_incomplete": false
+    }
+  },
+  {
+    "valid": false,
+    "request": {
+      "protocol_version": 1,
+      "request_id": "9c73575e-426d-4f72-98ed-7b4479f890ab",
+      "command": "inspect_recording",
+      "recording_id": "75048e79-2b45-440f-8609-b80a37635b4a",
+      "accept_incomplete": true
+    }
+  },
+  {
+    "valid": true,
+    "request": {
+      "protocol_version": 1,
+      "request_id": "9c73575e-426d-4f72-98ed-7b4479f890ab",
       "command": "get_recording",
       "recording_id": "75048e79-2b45-440f-8609-b80a37635b4a",
       "offset": 0

@@ -89,6 +89,13 @@ remain under **Saved audio** for inspection. Saved durations count only acknowle
 encrypted chunks and may trail capture by up to 30 seconds. Audio meters and
 physical-device reliability evidence remain release work.
 
+After inspection finds safe, authenticated orphan chunks, **Recover saved chunks**
+offers an inline confirmation before attaching them to the encrypted manifest.
+Recovery updates per-track saved durations but never resumes capture or marks an
+interrupted recording complete. Missing or ambiguous chunks, damaged manifests,
+and unavailable keys block adoption without deleting audio. Temporary inspection
+and recovery helpers also shut down before account revocation deletes their files.
+
 No API credentials are needed for the offline editor. Edits display **Saved locally**
 only after SQLite acknowledges the save. Document changes, exports and window
 close wait for queued edits; invalid or failed saves keep the editor open.
@@ -403,6 +410,20 @@ kill can lose up to the currently buffered 30-second chunk per track; committed
 chunks remain independently verifiable. A damaged manifest blocks verification
 rather than inventing a complete recording from partial evidence.
 
+To explicitly attach authenticated, contiguous orphan chunks left by a crash
+between chunk and manifest commits:
+
+```sh
+pnpm audio:probe recover RECORDING_UUID --accept-incomplete --data-dir "C:\AudioProbeData"
+```
+
+Recovery atomically updates only the encrypted manifest and preserves audio and
+unfinished files. It requires an unsealed, authentic manifest with consistent
+declared chunks and unambiguous sample ranges. The result remains interrupted
+(or incomplete when unfinished files remain), never `sealed`; an unsaved tail
+cannot be reconstructed. Repeating a completed adoption does not rewrite files.
+The command's success means adoption succeeded, not that a whole meeting survived.
+
 The probe stops after one hour of wall time, at 5 GiB of PCM per recording, or
 when a chunk commit finds less than 64 MiB of free disk space. Recording data is not automatically
 deleted. Manually remove a test recording only after reviewing its inspection.
@@ -417,9 +438,11 @@ track selection, and oversized frames are rejected. No control command accepts
 a filesystem path or executable. Logs go only to stderr.
 
 Commands are `list_devices`, `start_recording`, `pause_recording`,
-`resume_recording`, `stop_recording`, and `inspect_recording`. A host handles a
-single recording lifetime. This first contract is for local control only; desktop
-audio streaming and upload integration remain later work.
+`resume_recording`, `stop_recording`, `inspect_recording`, and `recover_recording`.
+Recovery requires `accept_incomplete: true` and a fresh helper with no capture
+session. Authenticated, bounded archive export uses `get_recording`,
+`list_recording_chunks`, and `read_chunk`. A host handles a single recording
+lifetime. Realtime audio streaming and cloud upload integration remain later work.
 Native validation and Zod validation share checked-in request fixtures.
 
 Recording directories contain an encrypted `manifest.enc`, UUID-named `.chunk`

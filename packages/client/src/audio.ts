@@ -24,6 +24,7 @@ const expectedEvents: Record<
   resume_recording: 'recording.resumed',
   stop_recording: 'recording.stopped',
   inspect_recording: 'recording.inspected',
+  recover_recording: 'recording.recovered',
   get_recording: 'recording.manifest',
   list_recording_chunks: 'recording.chunks',
   read_chunk: 'recording.chunk_range',

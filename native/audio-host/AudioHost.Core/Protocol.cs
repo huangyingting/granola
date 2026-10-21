@@ -4,12 +4,15 @@ using System.Text.Json;
 namespace WindowsAiNotes.Audio;
 
 public sealed record AudioRequest(int ProtocolVersion, Guid RequestId, string Command, Guid? RecordingId = null, TrackSpec[]? Tracks = null,
-    Guid? TrackId = null, Guid? ChunkId = null, int? SequenceStart = null, int? Offset = null, int? Length = null)
+    Guid? TrackId = null, Guid? ChunkId = null, int? SequenceStart = null, int? Offset = null, int? Length = null,
+    bool? AcceptIncomplete = null)
 {
     public void Validate()
     {
         if (ProtocolVersion != 1 || RequestId == Guid.Empty)
             throw new AudioException("invalid_request", "Unsupported protocol version or invalid request ID.");
+        if (Command == "recover_recording" ? AcceptIncomplete != true : AcceptIncomplete is not null)
+            throw new AudioException("invalid_request", "Only recovery accepts, and requires, explicit acceptance of a possibly missing audio tail.");
         if (Command == "list_devices")
         {
             if (RecordingId is not null || Tracks is not null || TrackId is not null || ChunkId is not null
@@ -18,7 +21,7 @@ public sealed record AudioRequest(int ProtocolVersion, Guid RequestId, string Co
             return;
         }
         if (Command is not ("start_recording" or "pause_recording" or "resume_recording" or "stop_recording" or "inspect_recording"
-            or "get_recording" or "list_recording_chunks" or "read_chunk")
+            or "recover_recording" or "get_recording" or "list_recording_chunks" or "read_chunk")
             || RecordingId is null || RecordingId == Guid.Empty)
             throw new AudioException("invalid_request", "A supported command and recording ID are required.");
         if (Command == "get_recording")

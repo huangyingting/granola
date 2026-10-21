@@ -124,6 +124,22 @@ test('requires explicit source selection, rejects stale capture requests and doe
       ok: false,
       error: { code: 'workspace_changed' },
     });
+    const staleRecovery = await page.evaluate(async () => {
+      const initial = await window.notes.invoke({ operation: 'bootstrap' });
+      if (!initial.ok || !('state' in initial) || !initial.state.selected_id)
+        throw new Error('No selected draft.');
+      return window.notes.invoke({
+        operation: 'recoverRecording',
+        scope: initial.state.scope + 1,
+        id: initial.state.selected_id,
+        recording_id: crypto.randomUUID(),
+        confirmed: true,
+      });
+    });
+    expect(staleRecovery).toMatchObject({
+      ok: false,
+      error: { code: 'workspace_changed' },
+    });
     await page.getByRole('button', { name: 'Cancel', exact: true }).click();
     await expect(
       page.getByRole('button', { name: 'Start recording', exact: true }),

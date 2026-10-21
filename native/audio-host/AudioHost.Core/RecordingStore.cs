@@ -103,28 +103,79 @@ public sealed class RecordingStore
     private void SaveManifest() => EncryptedFile.Write(Path.Combine(directory, "manifest.enc"), RecordingId,
         "manifest", null, JsonSerializer.SerializeToUtf8Bytes(manifest, AudioJson.Options), protector);
 
-    public static RecoveryReport Inspect(string root, Guid recordingId, IKeyProtector protector)
+    public static RecoveryReport Inspect(string root, Guid recordingId, IKeyProtector protector) =>
+        Scan(root, recordingId, protector).Report;
+
+    public static RecoveryReport Recover(string root, Guid recordingId, IKeyProtector protector, bool acceptIncomplete)
+    {
+        if (!acceptIncomplete)
+            throw new AudioException("confirmation_required", "Recovery requires accepting that the uncommitted audio tail may be missing.");
+        var (manifest, chunks, report) = Scan(root, recordingId, protector);
+        if (manifest is null || manifest.State == "sealed" || report.State == "key_unavailable"
+            || report.Issues.Any(i => i.Code is not ("unsealed_tail" or "uncommitted_file")))
+            throw new AudioException("recovery_unsafe",
+                "Recovery requires an authenticated, unsealed manifest and unambiguous contiguous chunks. Original files were preserved.");
+        if (report.RecoveredChunks == 0)
+        {
+            if (manifest.Events.LastOrDefault()?.EventType == "recovery.adopted")
+                return report;
+            throw new AudioException("nothing_to_recover", "No authenticated orphan chunks are available to recover.");
+        }
+        if (manifest.Events.Count >= 10_000 || report.TotalSamples * 2 > 5L * 1024 * 1024 * 1024)
+            throw new AudioException("storage_limit", "Recovery would exceed the supported recording limits.");
+        foreach (var track in manifest.Tracks)
+        {
+            var ordered = chunks.Where(c => c.TrackId == track.Spec.TrackId).OrderBy(c => c.Sequence).ToArray();
+            track.ChunkIds.Clear();
+            track.ChunkIds.AddRange(ordered.Select(c => c.ChunkId));
+            track.SavedSamples = ordered.Sum(c => (long)c.SampleCount);
+        }
+        manifest.State = "failed";
+        var clock = Math.Max(manifest.Events.Select(e => e.ClockMs).DefaultIfEmpty().Max(),
+            chunks.Select(c => c.ClockEndMs).DefaultIfEmpty().Max());
+        manifest.Events.Add(new TimelineEvent("recovery.adopted", clock, null, "unsealed_tail"));
+        RecordingArchive.ValidateManifest(manifest, recordingId);
+        var plaintext = JsonSerializer.SerializeToUtf8Bytes(manifest, AudioJson.Options);
+        try
+        {
+            EncryptedFile.Write(Path.Combine(Path.GetFullPath(root), recordingId.ToString("D"), "manifest.enc"),
+                recordingId, "manifest", null, plaintext, protector);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(plaintext);
+        }
+        return Inspect(root, recordingId, protector);
+    }
+
+    private static (RecordingManifest? Manifest, List<ChunkMetadata> Chunks, RecoveryReport Report)
+        Scan(string root, Guid recordingId, IKeyProtector protector)
     {
         var directory = Path.Combine(Path.GetFullPath(root), recordingId.ToString("D"));
         if (!Directory.Exists(directory))
             throw new AudioException("recording_not_found", "No local recording exists with this ID.");
         var issues = new List<RecoveryIssue>();
         RecordingManifest manifest;
+        byte[]? manifestBytes = null;
         try
         {
-            var (_, plaintext) = EncryptedFile.Read(Path.Combine(directory, "manifest.enc"), recordingId, "manifest", protector);
-            manifest = JsonSerializer.Deserialize<RecordingManifest>(plaintext, AudioJson.Options)
+            (_, manifestBytes) = EncryptedFile.Read(Path.Combine(directory, "manifest.enc"), recordingId, "manifest", protector);
+            manifest = JsonSerializer.Deserialize<RecordingManifest>(manifestBytes, AudioJson.Options)
                 ?? throw new InvalidDataException("Missing recording manifest.");
             RecordingArchive.ValidateManifest(manifest, recordingId);
         }
         catch (AudioException error) when (error.Code == "key_unavailable")
         {
-            return new RecoveryReport("key_unavailable", 0, 0, 0, [new(error.Code, error.Message)]);
+            return (null, [], new RecoveryReport("key_unavailable", 0, 0, 0, [new(error.Code, error.Message)]));
         }
         catch (Exception error) when (IsDamagedFile(error))
         {
-            return new RecoveryReport("incomplete", 0, 0, 0,
-                [new("manifest_unreadable", "The encrypted manifest is missing, damaged, or unauthenticated. No files were changed.")]);
+            return (null, [], new RecoveryReport("incomplete", 0, 0, 0,
+                [new("manifest_unreadable", "The encrypted manifest is missing, damaged, or unauthenticated. No files were changed.")]));
+        }
+        finally
+        {
+            if (manifestBytes is not null) CryptographicOperations.ZeroMemory(manifestBytes);
         }
         var verified = new List<ChunkMetadata>();
         var keyUnavailable = false;
@@ -135,9 +186,11 @@ public sealed class RecordingStore
                 AddIssue("storage_limit", "The recording exceeds the supported chunk count.");
                 break;
             }
+            byte[]? pcm = null;
             try
             {
-                var (header, pcm) = EncryptedFile.Read(path, recordingId, "audio_chunk", protector);
+                EnvelopeHeader header;
+                (header, pcm) = EncryptedFile.Read(path, recordingId, "audio_chunk", protector);
                 var chunk = header.Chunk ?? throw new InvalidDataException("Missing chunk descriptor.");
                 RecordingArchive.ValidateChunk(chunk, pcm, recordingId, chunk.ChunkId);
                 if (Path.GetFileName(path) != chunk.ChunkId.ToString("D") + ".chunk"
@@ -154,13 +207,28 @@ public sealed class RecordingStore
             {
                 AddIssue("chunk_corrupt", "A chunk is truncated, damaged, or unauthenticated.");
             }
+            finally
+            {
+                if (pcm is not null) CryptographicOperations.ZeroMemory(pcm);
+            }
         }
+        var byId = verified.ToDictionary(c => c.ChunkId);
         var expected = manifest.Tracks.SelectMany(t => t.ChunkIds).ToHashSet();
         if (expected.Except(verified.Select(c => c.ChunkId)).Any())
             AddIssue("chunk_missing", "At least one manifest chunk is missing or failed verification.");
         var orphans = verified.Count(c => !expected.Contains(c.ChunkId));
         foreach (var track in manifest.Tracks)
         {
+            long declaredPosition = 0;
+            for (var i = 0; i < track.ChunkIds.Count; i++)
+            {
+                if (!byId.TryGetValue(track.ChunkIds[i], out var chunk)) continue;
+                if (chunk.TrackId != track.Spec.TrackId || chunk.Sequence != i || chunk.SampleStart != declaredPosition)
+                    AddIssue("manifest_mismatch", "The declared chunk order or ownership does not match its authenticated metadata.");
+                declaredPosition += chunk.SampleCount;
+            }
+            if (declaredPosition != track.SavedSamples)
+                AddIssue("manifest_mismatch", "The declared saved sample count does not match its authenticated chunks.");
             long position = 0;
             var chunks = verified.Where(c => c.TrackId == track.Spec.TrackId).OrderBy(c => c.Sequence).ToArray();
             for (var i = 0; i < chunks.Length; i++)
@@ -177,9 +245,9 @@ public sealed class RecordingStore
         if (manifest.State != "sealed")
             AddIssue("unsealed_tail", "The recording did not seal successfully; its uncommitted tail may be missing.");
         var damaged = issues.Any(i => i.Code != "unsealed_tail");
-        return new RecoveryReport(keyUnavailable ? "key_unavailable" : damaged ? "incomplete" :
+        return (manifest, verified, new RecoveryReport(keyUnavailable ? "key_unavailable" : damaged ? "incomplete" :
             manifest.State == "sealed" ? "sealed" : "interrupted", verified.Count, orphans,
-            verified.Sum(c => (long)c.SampleCount), issues);
+            verified.Sum(c => (long)c.SampleCount), issues));
 
         void AddIssue(string code, string message)
         {

@@ -313,6 +313,7 @@ async function start() {
           command.operation === 'startRecording' ||
           command.operation === 'controlRecording' ||
           command.operation === 'inspectRecording' ||
+          command.operation === 'recoverRecording' ||
           command.operation === 'removeRecording' ||
           command.operation === 'retryRecordingCleanup'
         ) {
@@ -333,6 +334,13 @@ async function start() {
             );
           else if (command.operation === 'inspectRecording')
             await capture.inspect(
+              profile,
+              command.id,
+              command.recording_id,
+              authorize,
+            );
+          else if (command.operation === 'recoverRecording')
+            await capture.recover(
               profile,
               command.id,
               command.recording_id,

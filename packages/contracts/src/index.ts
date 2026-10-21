@@ -36,6 +36,12 @@ export const audioRequestSchema = z.discriminatedUnion('command', [
   z.object({ ...baseRequest, command: z.literal('list_devices') }).strict(),
   z.strictObject({
     ...baseRequest,
+    command: z.literal('recover_recording'),
+    recording_id: uuid,
+    accept_incomplete: z.literal(true),
+  }),
+  z.strictObject({
+    ...baseRequest,
     command: z.literal('get_recording'),
     recording_id: uuid,
     offset: z.number().int().min(0).max(10_000),
@@ -312,13 +318,16 @@ export const audioEventSchema = z.discriminatedUnion('event_type', [
       })
       .strict(),
   ),
-  z
-    .object({
-      ...eventBase,
-      event_type: z.literal('recording.inspected'),
-      payload: recoverySchema,
-    })
-    .strict(),
+  ...(['recording.inspected', 'recording.recovered'] as const).map(
+    (event_type) =>
+      z
+        .object({
+          ...eventBase,
+          event_type: z.literal(event_type),
+          payload: recoverySchema,
+        })
+        .strict(),
+  ),
   z
     .object({
       ...eventBase,

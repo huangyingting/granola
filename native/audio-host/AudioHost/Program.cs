@@ -84,6 +84,12 @@ try
                     await Emit("recording.inspected", RecordingStore.Inspect(root, request.RecordingId!.Value, protector),
                         request.RequestId, request.RecordingId);
                     break;
+                case "recover_recording":
+                    if (session is not null)
+                        throw new AudioException("invalid_state", "Use a fresh AudioHost process to recover an inactive recording.");
+                    await Emit("recording.recovered", RecordingStore.Recover(root, request.RecordingId!.Value, protector,
+                        request.AcceptIncomplete == true), request.RequestId, request.RecordingId);
+                    break;
                 case "start_recording":
                     if (session is not null)
                         throw new AudioException("invalid_state", "Use a new AudioHost process for each recording.");

@@ -31,4 +31,20 @@ describe('audio probe options', () => {
       loopback: 'off',
     });
   });
+  it('requires explicit acceptance for recovery and rejects it on read-only commands', () => {
+    const id = '75048e79-2b45-440f-8609-b80a37635b4a';
+    expect(parseOptions(['recover', id, '--accept-incomplete'])).toMatchObject({
+      command: 'recover',
+      recordingId: id,
+    });
+    for (const args of [
+      ['recover', id],
+      ['recover', '../../outside', '--accept-incomplete'],
+      ['recover', '--accept-incomplete'],
+      ['inspect', id, '--accept-incomplete'],
+      ['record', '--accept-incomplete'],
+      ['devices', '--accept-incomplete'],
+    ])
+      expect(() => parseOptions(args)).toThrow();
+  });
 });

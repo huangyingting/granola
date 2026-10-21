@@ -56,6 +56,13 @@ export const desktopCommandSchema = z.discriminatedUnion('operation', [
     recording_id: resourceId,
   }),
   z.strictObject({
+    operation: z.literal('recoverRecording'),
+    ...scoped,
+    id: resourceId,
+    recording_id: resourceId,
+    confirmed: z.literal(true),
+  }),
+  z.strictObject({
     operation: z.literal('removeRecording'),
     ...scoped,
     id: resourceId,

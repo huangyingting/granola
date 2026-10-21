@@ -41,6 +41,8 @@ const upload = {
 };
 let capture = null;
 let savedSamples = 16_000;
+const recoveryTrack = process.argv[3] ? JSON.parse(process.argv[3]) : null;
+let adopted = false;
 function send(request, event_type, payload) {
   const frame = encodeFrame({
     protocol_version: 1,
@@ -151,8 +153,71 @@ process.stdin.on('data', (bytes) => {
         );
       }
     } else if (
+      request.command === 'recover_recording' &&
+      mode.startsWith('recovery')
+    ) {
+      adopted = true;
+      const reply = () =>
+        send(request, 'recording.recovered', {
+          state: mode === 'recovery-claims-sealed' ? 'sealed' : 'interrupted',
+          verified_chunks: 2,
+          recovered_chunks: 0,
+          issues: [
+            {
+              code: 'unsealed_tail',
+              message: 'The synthetic unsaved tail remains incomplete.',
+            },
+          ],
+          total_samples: 32000,
+        });
+      if (mode === 'recovery-slow') setTimeout(reply, 100);
+      else reply();
+    } else if (
+      request.command === 'get_recording' &&
+      ((mode.startsWith('recovery') && adopted) ||
+        mode.startsWith('inspection') ||
+        (mode === 'capture' && recoveryTrack))
+    ) {
+      send(request, 'recording.manifest', {
+        format_version: 1,
+        recording_id: request.recording_id,
+        created_at: '2026-01-01T00:00:00+00:00',
+        state: mode.startsWith('recovery') ? 'failed' : 'sealed',
+        tracks: [
+          {
+            spec: mode.endsWith('wrong-track')
+              ? { ...recoveryTrack, track_id: track }
+              : mode.endsWith('wrong-source')
+                ? {
+                    ...recoveryTrack,
+                    device_selection_policy: 'explicit',
+                    device_id: 'unexpected-source',
+                  }
+                : recoveryTrack,
+            actual_device_id: `synthetic-default-${recoveryTrack.kind}`,
+            saved_samples: mode.endsWith('bad-count')
+              ? 48000
+              : mode.startsWith('recovery')
+                ? 32000
+                : 16000,
+            chunk_count: mode.startsWith('recovery') ? 2 : 1,
+          },
+        ],
+        event_offset: 0,
+        event_count: 1,
+        events: [
+          {
+            event_type: 'recovery.adopted',
+            clock_ms: 2000,
+            capture_epoch: null,
+            code: 'unsealed_tail',
+          },
+        ],
+        has_more: false,
+      });
+    } else if (
       request.command === 'inspect_recording' &&
-      mode.startsWith('capture')
+      (mode.startsWith('capture') || mode.startsWith('inspection'))
     ) {
       send(request, 'recording.inspected', {
         state: 'sealed',

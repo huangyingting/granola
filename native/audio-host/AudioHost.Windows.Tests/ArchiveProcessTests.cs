@@ -10,8 +10,10 @@ namespace WindowsAiNotes.AudioWindowsTests;
 
 public sealed class ArchiveProcessTests
 {
-    [Fact]
-    public async Task ReadsDpapiProtectedWavRangesAcrossTheRealFramedProcessBoundary()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ReadsDpapiProtectedWavRangesAcrossTheRealFramedProcessBoundary(bool recover)
     {
         var root = Path.Combine(Path.GetTempPath(), "windows-ai-notes-archive-process", Guid.NewGuid().ToString("D"));
         try
@@ -19,12 +21,15 @@ public sealed class ArchiveProcessTests
             var id = Guid.NewGuid();
             var track = new TrackSpec(Guid.NewGuid(), "microphone", "endpoint", "explicit", "synthetic");
             var store = new RecordingStore(root, id, [track], new DpapiKeyProtector());
+            var manifestPath = Path.Combine(store.DirectoryPath, "manifest.enc");
+            var originalManifest = File.ReadAllBytes(manifestPath);
             var pcm = RandomNumberGenerator.GetBytes(40_000);
             var writer = new PcmChunkWriter(store, track.TrackId);
             writer.BeginEpoch(Guid.NewGuid());
             writer.Append(pcm, 0, 1250);
             writer.Flush();
-            store.Transition("sealed", "capture.stopped", 1250);
+            if (recover) File.WriteAllBytes(manifestPath, originalManifest);
+            else store.Transition("sealed", "capture.stopped", 1250);
             var start = new ProcessStartInfo("dotnet")
             {
                 RedirectStandardInput = true,
@@ -43,7 +48,21 @@ public sealed class ArchiveProcessTests
             {
                 var manifest = await Send(new AudioRequest(1, Guid.NewGuid(), "get_recording", id, Offset: 0));
                 Assert.Equal("recording.manifest", manifest.GetProperty("event_type").GetString());
-                Assert.Equal("sealed", manifest.GetProperty("payload").GetProperty("state").GetString());
+                Assert.Equal(recover ? "recording" : "sealed", manifest.GetProperty("payload").GetProperty("state").GetString());
+                if (recover)
+                {
+                    for (var retry = 0; retry < 2; retry++)
+                    {
+                        var recovered = await Send(new AudioRequest(1, Guid.NewGuid(), "recover_recording", id, AcceptIncomplete: true));
+                        Assert.Equal("recording.recovered", recovered.GetProperty("event_type").GetString());
+                        Assert.Equal("interrupted", recovered.GetProperty("payload").GetProperty("state").GetString());
+                        Assert.Equal(0, recovered.GetProperty("payload").GetProperty("recovered_chunks").GetInt32());
+                    }
+                    manifest = await Send(new AudioRequest(1, Guid.NewGuid(), "get_recording", id, Offset: 0));
+                    Assert.Equal("failed", manifest.GetProperty("payload").GetProperty("state").GetString());
+                    Assert.Equal(pcm.Length / 2,
+                        manifest.GetProperty("payload").GetProperty("tracks")[0].GetProperty("saved_samples").GetInt64());
+                }
                 var listed = await Send(new AudioRequest(1, Guid.NewGuid(), "list_recording_chunks", id,
                     TrackId: track.TrackId, SequenceStart: 0));
                 var upload = listed.GetProperty("payload").GetProperty("chunks")[0];

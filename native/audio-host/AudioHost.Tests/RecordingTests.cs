@@ -178,6 +178,145 @@ public sealed class RecordingTests : IDisposable
         Assert.Equal(oldManifest, File.ReadAllBytes(manifestPath));
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ExplicitRecoveryAdoptsAuthenticatedOrphansWithoutSealingResumingOrChangingAudio(bool partialFile)
+    {
+        var store = Create(microphone, loopback);
+        var manifestPath = Path.Combine(store.DirectoryPath, "manifest.enc");
+        var original = File.ReadAllBytes(manifestPath);
+        var pcm = RandomNumberGenerator.GetBytes(3200);
+        foreach (var track in new[] { microphone, loopback })
+        {
+            var writer = Writer(store, track.TrackId);
+            writer.Append(pcm, 0, 100);
+            writer.Flush();
+        }
+        File.WriteAllBytes(manifestPath, original);
+        if (partialFile) File.WriteAllBytes(Path.Combine(store.DirectoryPath, "crash.partial"), [1, 2, 3]);
+        var preserved = Directory.GetFiles(store.DirectoryPath).Where(p => p != manifestPath).ToDictionary(p => p, File.ReadAllBytes);
+        Assert.Equal("confirmation_required",
+            Assert.Throws<AudioException>(() => RecordingStore.Recover(root, recordingId, protector, false)).Code);
+        Assert.Equal(original, File.ReadAllBytes(manifestPath));
+        var report = RecordingStore.Recover(root, recordingId, protector, true);
+        Assert.Equal(partialFile ? "incomplete" : "interrupted", report.State);
+        Assert.Equal(0, report.RecoveredChunks);
+        Assert.Equal(2, report.VerifiedChunks);
+        Assert.Equal(3200, report.TotalSamples);
+        Assert.Contains(report.Issues, issue => issue.Code == "unsealed_tail");
+        var archive = new RecordingArchive(root, protector);
+        var manifest = archive.Describe(recordingId);
+        Assert.Equal("failed", manifest.State);
+        Assert.Equal("recovery.adopted", Assert.Single(manifest.Events).EventType);
+        foreach (var track in manifest.Tracks)
+        {
+            Assert.Equal(1600, track.SavedSamples);
+            var upload = Assert.Single(archive.List(recordingId, track.Spec.TrackId).Chunks);
+            var range = archive.Read(recordingId, upload.Chunk.ChunkId, 0, RecordingArchive.MaxRangeBytes);
+            Assert.Equal(PcmChunkWriter.ToWav(pcm), Convert.FromBase64String(range.DataBase64));
+        }
+        var committed = File.ReadAllBytes(manifestPath);
+        Assert.Equal(report.State, RecordingStore.Recover(root, recordingId, protector, true).State);
+        Assert.Equal(committed, File.ReadAllBytes(manifestPath));
+        foreach (var (path, bytes) in preserved) Assert.Equal(bytes, File.ReadAllBytes(path));
+        Assert.Equal(preserved.Count + 1, Directory.GetFiles(store.DirectoryPath).Length);
+    }
+
+    [Theory]
+    [InlineData("missing")]
+    [InlineData("corrupt")]
+    [InlineData("gap")]
+    [InlineData("duplicate")]
+    [InlineData("foreign-track")]
+    [InlineData("sealed")]
+    [InlineData("key")]
+    [InlineData("manifest-order")]
+    [InlineData("manifest-samples")]
+    public void UnsafeRecoveryPreservesEveryFileWithoutChoosingOrFabricatingAudio(string damage)
+    {
+        var store = Create();
+        var writer = Writer(store, microphone.TrackId);
+        writer.Append(new byte[3200], 0, 100);
+        writer.Flush();
+        writer.Append(new byte[3200], 100, 200);
+        writer.Flush();
+        var manifestPath = Path.Combine(store.DirectoryPath, "manifest.enc");
+        var (_, manifestBytes) = EncryptedFile.Read(manifestPath, recordingId, "manifest", protector);
+        var manifest = JsonSerializer.Deserialize<RecordingManifest>(manifestBytes, AudioJson.Options)!;
+        writer.Append(new byte[3200], 200, 300);
+        writer.Flush();
+        if (damage == "sealed") manifest.State = "sealed";
+        if (damage == "manifest-order") manifest.Tracks[0].ChunkIds.Reverse();
+        if (damage == "manifest-samples") manifest.Tracks[0].SavedSamples++;
+        EncryptedFile.Write(manifestPath, recordingId, "manifest", null,
+            JsonSerializer.SerializeToUtf8Bytes(manifest, AudioJson.Options), protector);
+        var orphanPath = Chunks(store).Single(path =>
+            EncryptedFile.Read(path, recordingId, "audio_chunk", protector).Header.Chunk!.Sequence == 2);
+        var (header, pcm) = EncryptedFile.Read(orphanPath, recordingId, "audio_chunk", protector);
+        if (damage == "missing")
+            File.Delete(Path.Combine(store.DirectoryPath, manifest.Tracks[0].ChunkIds[0].ToString("D") + ".chunk"));
+        else if (damage == "corrupt")
+        {
+            var bytes = File.ReadAllBytes(orphanPath);
+            bytes[^1] ^= 1;
+            File.WriteAllBytes(orphanPath, bytes);
+        }
+        else if (damage is "gap" or "duplicate" or "foreign-track")
+        {
+            var chunk = header.Chunk!;
+            chunk = damage switch
+            {
+                "gap" => chunk with { Sequence = 3, SampleStart = 4800 },
+                "duplicate" => chunk with { ChunkId = Guid.NewGuid() },
+                _ => chunk with { TrackId = Guid.NewGuid() }
+            };
+            if (chunk.ChunkId == header.Chunk!.ChunkId) File.Delete(orphanPath);
+            EncryptedFile.Write(Path.Combine(store.DirectoryPath, chunk.ChunkId.ToString("D") + ".chunk"),
+                recordingId, "audio_chunk", chunk, pcm, protector);
+        }
+        var before = Directory.GetFiles(store.DirectoryPath).ToDictionary(path => path, File.ReadAllBytes);
+        Assert.Equal("recovery_unsafe", Assert.Throws<AudioException>(() =>
+            RecordingStore.Recover(root, recordingId, damage == "key" ? new TestKeyProtector() : protector, true)).Code);
+        foreach (var (path, bytes) in before) Assert.Equal(bytes, File.ReadAllBytes(path));
+        Assert.Equal(before.Count, Directory.GetFiles(store.DirectoryPath).Length);
+    }
+
+    [Fact]
+    public void InspectionOnlyAndRecoveryWithoutOrphansNeverRewriteTheManifest()
+    {
+        var store = Create();
+        var before = Directory.GetFiles(store.DirectoryPath).ToDictionary(path => path, File.ReadAllBytes);
+        Assert.Equal("interrupted", Inspect().State);
+        Assert.Equal("nothing_to_recover", Assert.Throws<AudioException>(() =>
+            RecordingStore.Recover(root, recordingId, protector, true)).Code);
+        foreach (var (path, bytes) in before) Assert.Equal(bytes, File.ReadAllBytes(path));
+    }
+
+    [Fact]
+    public void FailureToProtectTheReplacementManifestLeavesAllOriginalFilesIntact()
+    {
+        var store = Create();
+        var manifestPath = Path.Combine(store.DirectoryPath, "manifest.enc");
+        var original = File.ReadAllBytes(manifestPath);
+        var writer = Writer(store, microphone.TrackId);
+        writer.Append(new byte[3200], 0, 100);
+        writer.Flush();
+        File.WriteAllBytes(manifestPath, original);
+        var before = Directory.GetFiles(store.DirectoryPath).ToDictionary(path => path, File.ReadAllBytes);
+        Assert.Throws<CryptographicException>(() =>
+            RecordingStore.Recover(root, recordingId, new FailingProtection(protector), true));
+        Assert.Equal(1, Inspect().RecoveredChunks);
+        foreach (var (path, bytes) in before) Assert.Equal(bytes, File.ReadAllBytes(path));
+        Assert.Equal(before.Count, Directory.GetFiles(store.DirectoryPath).Length);
+    }
+
+    private sealed class FailingProtection(IKeyProtector inner) : IKeyProtector
+    {
+        public byte[] Protect(byte[] key) => throw new CryptographicException("Synthetic key protection failure.");
+        public byte[] Unprotect(byte[] wrappedKey) => inner.Unprotect(wrappedKey);
+    }
+
     [Fact]
     public void UnavailableKeyNeverResetsOrDeletesExistingData()
     {

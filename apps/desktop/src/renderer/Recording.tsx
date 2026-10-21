@@ -216,7 +216,10 @@ export function RecordingPanel({
   const [loopback, setLoopback] = useState(false);
   const [microphoneId, setMicrophoneId] = useState('default');
   const [loopbackId, setLoopbackId] = useState('default');
-  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  const [confirmation, setConfirmation] = useState<{
+    id: string;
+    action: 'delete' | 'recover';
+  } | null>(null);
   const generation = useRef(0);
   useEffect(
     () => () => {
@@ -470,45 +473,99 @@ export function RecordingPanel({
                 >
                   Inspect saved audio
                 </button>
+                {!!recording.inspection?.recovered_chunks &&
+                  recording.inspection.state !== 'key_unavailable' &&
+                  recording.inspection.issues.every((issue) =>
+                    ['unsealed_tail', 'uncommitted_file'].includes(issue.code),
+                  ) && (
+                    <button
+                      className="secondary"
+                      disabled={busy || !!state.active}
+                      onClick={() =>
+                        setConfirmation({
+                          id: recording.id,
+                          action: 'recover',
+                        })
+                      }
+                    >
+                      Recover saved chunks
+                    </button>
+                  )}
                 <button
                   className="quiet-button danger"
                   disabled={busy || !!state.active}
-                  onClick={() => setConfirmDelete(recording.id)}
+                  onClick={() =>
+                    setConfirmation({ id: recording.id, action: 'delete' })
+                  }
                 >
                   Delete audio only
                 </button>
               </div>
-              {confirmDelete === recording.id && (
-                <div className="delete-confirm">
-                  <span>
-                    Delete this device's only audio copy? Notes stay. This
-                    cannot be undone.
-                  </span>
-                  <button
-                    className="secondary"
-                    onClick={() => setConfirmDelete(null)}
-                  >
-                    Keep audio
-                  </button>
-                  <button
-                    className="danger-button"
-                    disabled={busy}
-                    onClick={() =>
-                      void act({
-                        operation: 'removeRecording',
-                        scope,
-                        id: document,
-                        recording_id: recording.id,
-                        confirmed: true,
-                      }).then((removed) => {
-                        if (removed) setConfirmDelete(null);
-                      })
-                    }
-                  >
-                    Confirm audio deletion
-                  </button>
-                </div>
-              )}
+              {confirmation?.id === recording.id &&
+                confirmation.action === 'recover' && (
+                  <div className="delete-confirm">
+                    <span>
+                      Attach authenticated saved chunks? Capture will not
+                      resume. The unsaved audio tail may be lost.
+                    </span>
+                    <button
+                      className="secondary"
+                      disabled={busy}
+                      onClick={() => setConfirmation(null)}
+                    >
+                      Cancel recovery
+                    </button>
+                    <button
+                      className="primary"
+                      disabled={busy}
+                      onClick={() =>
+                        void act({
+                          operation: 'recoverRecording',
+                          scope,
+                          id: document,
+                          recording_id: recording.id,
+                          confirmed: true,
+                        }).then((recovered) => {
+                          if (recovered) setConfirmation(null);
+                        })
+                      }
+                    >
+                      Confirm recovery
+                    </button>
+                  </div>
+                )}
+              {confirmation?.id === recording.id &&
+                confirmation.action === 'delete' && (
+                  <div className="delete-confirm">
+                    <span>
+                      Delete this device's only audio copy? Notes stay. This
+                      cannot be undone.
+                    </span>
+                    <button
+                      className="secondary"
+                      onClick={() => setConfirmation(null)}
+                    >
+                      Keep audio
+                    </button>
+                    <button
+                      className="danger-button"
+                      disabled={busy}
+                      onClick={() =>
+                        void act({
+                          operation: 'removeRecording',
+                          scope,
+                          id: document,
+                          recording_id: recording.id,
+                          confirmed: true,
+                        }).then((removed) => {
+                          if (removed) setConfirmation(null);
+                        })
+                      }
+                    >
+                      Confirm audio deletion
+                    </button>
+                  </div>
+                )}
             </article>
           ))}
           {(offset > 0 || state.has_more) && (

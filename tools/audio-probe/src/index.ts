@@ -12,6 +12,7 @@ pnpm audio:probe devices
 pnpm audio:probe record --seconds 60 [--microphone default|off|DEVICE_ID] [--loopback default|off|DEVICE_ID]
 pnpm audio:probe record --seconds 60 --pause-at 20 --pause-for 5
 pnpm audio:probe inspect RECORDING_ID [--data-dir PATH]
+pnpm audio:probe recover RECORDING_ID --accept-incomplete [--data-dir PATH]
 
 Capture is endpoint-wide, NOT application-isolated. Only record with consent.
 Both tracks default to the Windows multimedia endpoints. Ctrl+C requests a clean stop.
@@ -76,6 +77,29 @@ async function main(): Promise<void> {
           'The recording is not verified complete. Review the inspection issues; no files were changed.',
         );
       }
+      return;
+    }
+    if (options.command === 'recover') {
+      const report = await client.request({
+        command: 'recover_recording',
+        recording_id: options.recordingId,
+        accept_incomplete: true,
+      });
+      if (
+        report.event_type !== 'recording.recovered' ||
+        !['interrupted', 'incomplete'].includes(report.payload.state) ||
+        report.payload.recovered_chunks !== 0 ||
+        report.payload.issues.some(
+          (issue) =>
+            !['unsealed_tail', 'uncommitted_file'].includes(issue.code),
+        )
+      )
+        throw new Error(
+          'Recovery did not confirm safe chunk adoption. Inspect the preserved recording before retrying.',
+        );
+      console.error(
+        'Authenticated saved chunks are attached. Capture was not resumed or sealed; the unsaved tail may still be missing.',
+      );
       return;
     }
     const tracks: Track[] = [];
