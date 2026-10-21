@@ -317,6 +317,8 @@ revision. Exported files are **unencrypted**.
 Completed results record their exact immutable prompt version. Summary context
 is still bounded to 48,000 bytes. Long-meeting extraction, current-meeting chat
 and token-streamed generation are not implemented yet.
+The lazy, provenance-preserving long-meeting chunker is tested groundwork only;
+durable extraction/merge/resume orchestration is not wired into generation.
 
 ## Server setup
 

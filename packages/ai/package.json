@@ -6,6 +6,7 @@
   "exports": {
     ".": "./dist/index.js",
     "./config": "./dist/config.js",
+    "./chunks": "./dist/chunks.js",
     "./realtime": "./dist/realtime.js",
     "./wav": "./dist/wav.js"
   },
