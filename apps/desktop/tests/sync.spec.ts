@@ -79,10 +79,15 @@ test('requires inline upload consent and preserves the encrypted journal after n
     ).toHaveText(remote.notes);
     const recording = await application.evaluate(
       async ({ safeStorage }, { directory, id }) => {
-        const { readFileSync } = await import('node:fs');
-        const { join } = await import('node:path');
-        const { DatabaseSync } = await import('node:sqlite');
-        const { LocalStore } = await import('@windows-ai-notes/local');
+        const { readFileSync } = process.getBuiltinModule('node:fs');
+        const { join } = process.getBuiltinModule('node:path');
+        const { DatabaseSync } = process.getBuiltinModule('node:sqlite');
+        const require = process
+          .getBuiltinModule('node:module')
+          .createRequire(join(process.cwd(), 'synthetic-upload-fixture.cjs'));
+        const {
+          LocalStore,
+        }: typeof import('@windows-ai-notes/local') = require('@windows-ai-notes/local');
         const path = join(directory, 'notes.sqlite');
         const inspect = new DatabaseSync(path, { readOnly: true });
         let profile: unknown;
