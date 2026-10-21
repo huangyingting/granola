@@ -77,6 +77,84 @@ test('discovers audio endpoints through the bundled helper without starting capt
     await rm(directory, { recursive: true, force: true });
   }
 });
+test('requires explicit source selection, rejects stale capture requests and does not record when configuration is cancelled', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'windows-notes-capture-ui-'));
+  let application: ElectronApplication | null = null;
+  try {
+    application = await launch(directory);
+    const page = await application.firstWindow();
+    await page
+      .getByRole('button', { name: '+ New meeting', exact: true })
+      .click();
+    await page
+      .getByRole('button', { name: 'Record audio', exact: true })
+      .click();
+    await expect(
+      page.getByRole('button', { name: 'Start recording', exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole('checkbox', { name: /^Microphone/ }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole('checkbox', { name: /^System audio/ }),
+    ).not.toBeChecked();
+    await expect(
+      page.getByRole('region', { name: 'Meeting audio' }),
+    ).toContainText('Nothing is sent to Azure or uploaded yet.');
+    const rejected = await page.evaluate(async () => {
+      const initial = await window.notes.invoke({ operation: 'bootstrap' });
+      if (!initial.ok || !('state' in initial) || !initial.state.selected_id)
+        throw new Error('No selected draft.');
+      return window.notes.invoke({
+        operation: 'startRecording',
+        scope: initial.state.scope + 1,
+        id: initial.state.selected_id,
+        tracks: [
+          {
+            track_id: crypto.randomUUID(),
+            kind: 'microphone',
+            capture_scope: 'endpoint',
+            device_selection_policy: 'default',
+            device_id: 'default',
+          },
+        ],
+      });
+    });
+    expect(rejected).toMatchObject({
+      ok: false,
+      error: { code: 'workspace_changed' },
+    });
+    await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+    await expect(
+      page.getByRole('button', { name: 'Start recording', exact: true }),
+    ).toHaveCount(0);
+    const state = await page.evaluate(async () => {
+      const initial = await window.notes.invoke({ operation: 'bootstrap' });
+      if (!initial.ok || !('state' in initial))
+        throw new Error('No desktop state.');
+      return window.notes.invoke({
+        operation: 'getRecordingState',
+        scope: initial.state.scope,
+        document_id: initial.state.selected_id,
+        offset: 0,
+      });
+    });
+    expect(state).toMatchObject({
+      ok: true,
+      audio_state: { state: { active: null, recordings: [] } },
+    });
+    expect(
+      (await readdir(join(directory, 'recordings'))).filter(
+        (name) => name !== 'audio-host.lock',
+      ),
+    ).toEqual([]);
+    await close(application);
+    application = null;
+  } finally {
+    if (application) await application.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 test('pages meeting summaries and saves the selected editor even when a search excludes it', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'windows-notes-paging-ui-'));
   let application: ElectronApplication | null = null;

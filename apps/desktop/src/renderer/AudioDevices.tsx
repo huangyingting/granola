@@ -54,8 +54,8 @@ export function AudioDevices({ scope }: { scope: number }) {
       <span className="eyebrow">WINDOWS AUDIO</span>
       <h1>Know what is listening.</h1>
       <p className="quiet-note">
-        Checking devices does not start recording. Capture controls are still in
-        development.
+        Checking devices does not start recording. Open a meeting and choose
+        Record audio to select capture sources.
       </p>
       <button
         className="secondary"

@@ -135,6 +135,9 @@ export class WorkspaceController {
     this.revision++;
     this.changed({ version: this.revision, scope: this.scopeRevision, kind });
   }
+  audioChanged() {
+    if (!this.disposed) this.emit('audio');
+  }
   private persist(account: Account) {
     this.local.putValue('root', 'account', account);
     this.account = account;

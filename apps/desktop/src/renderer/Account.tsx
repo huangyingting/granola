@@ -133,7 +133,8 @@ export function Account({
                 onChange={(event) => setCopyOffline(event.target.checked)}
               />
               Copy my device-only drafts ({connection.offline_count}) into the
-              workspace I open. Keep the originals on this device.
+              workspace I open. Keep the originals on this device. Copies
+              include written notes, not raw audio.
             </label>
           )}
           <div className="workspace-list">
@@ -207,7 +208,9 @@ export function Account({
               <p>
                 Cloud caches and all pending operations will be removed from
                 this device. Pending deletions will not be sent. Cloud documents
-                are not deleted.
+                are not deleted. Cached workspace audio is deleted too,
+                including recordings not yet uploaded. Kept draft copies contain
+                notes only.
               </p>
               {connection.unsent_count > 0 && (
                 <label className="checkbox-label">

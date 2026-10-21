@@ -39,6 +39,8 @@ const upload = {
       ? '0'.repeat(64)
       : createHash('sha256').update(wav).digest('hex'),
 };
+let capture = null;
+let savedSamples = 16_000;
 function send(request, event_type, payload) {
   const frame = encodeFrame({
     protocol_version: 1,
@@ -53,7 +55,89 @@ function send(request, event_type, payload) {
 process.stdin.on('data', (bytes) => {
   for (const input of decoder.push(bytes)) {
     const request = audioRequestSchema.parse(input);
-    if (request.command === 'list_devices') {
+    if (request.command === 'start_recording' && mode.startsWith('capture')) {
+      capture = request;
+      send(request, 'recording.started', {
+        state: 'recording',
+        tracks: request.tracks.map((spec) => ({
+          track_id: mode === 'capture-wrong-track' ? track : spec.track_id,
+          saved_samples: savedSamples,
+          device_id:
+            spec.device_id === 'default'
+              ? `synthetic-default-${spec.kind}`
+              : spec.device_id,
+          kind: spec.kind,
+          capture_scope: spec.capture_scope,
+          device_selection_policy: spec.device_selection_policy,
+        })),
+      });
+      if (mode === 'capture-fail')
+        setTimeout(
+          () =>
+            send(
+              { request_id: null, recording_id: request.recording_id },
+              'error',
+              {
+                code: 'device_lost',
+                message: 'Synthetic capture device disconnected.',
+                retryable: true,
+              },
+            ),
+          20,
+        );
+      if (mode === 'capture-fail-immediate')
+        send(
+          { request_id: null, recording_id: request.recording_id },
+          'error',
+          {
+            code: 'device_lost',
+            message: 'Synthetic capture device disconnected.',
+            retryable: true,
+          },
+        );
+    } else if (
+      capture &&
+      ['pause_recording', 'resume_recording', 'stop_recording'].includes(
+        request.command,
+      )
+    ) {
+      savedSamples += 16000;
+      const state =
+        request.command === 'pause_recording'
+          ? 'paused'
+          : request.command === 'resume_recording'
+            ? 'recording'
+            : 'sealed';
+      send(
+        request,
+        `recording.${state === 'paused' ? 'paused' : state === 'recording' ? 'resumed' : 'stopped'}`,
+        {
+          state,
+          tracks: capture.tracks.map((spec) => ({
+            track_id: spec.track_id,
+            saved_samples: savedSamples,
+            device_id:
+              spec.device_id === 'default'
+                ? `synthetic-default-${spec.kind}`
+                : spec.device_id,
+            kind: spec.kind,
+            capture_scope: spec.capture_scope,
+            device_selection_policy: spec.device_selection_policy,
+          })),
+        },
+      );
+    } else if (
+      request.command === 'inspect_recording' &&
+      mode.startsWith('capture')
+    ) {
+      send(request, 'recording.inspected', {
+        state: 'sealed',
+        verified_chunks: 1,
+        recovered_chunks: 0,
+        issues: [],
+        total_samples: 16000,
+      });
+    } else if (request.command === 'list_devices') {
       const reply = () => send(request, 'devices', { devices: [] });
       if (mode === 'slow') setTimeout(reply, 100);
       else reply();

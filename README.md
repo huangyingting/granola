@@ -9,8 +9,8 @@ Granola code, branding, credentials, or private services.
 The server can transcribe short WAV clips with Azure Speech and produce cited,
 structured meeting summaries with Azure OpenAI. The Windows helper is not yet
 wired to that server. The Electron editor supports browser login, isolated cloud
-workspaces, background synchronization and explicit conflict recovery. Recording
-controls, live transcription and interactive AI workflows remain in progress.
+workspaces, background synchronization and explicit conflict recovery. Audio
+upload, live transcription and interactive AI workflows remain in progress.
 Real Windows audio behavior still requires the hardware checks below.
 
 ## Implemented
@@ -36,6 +36,15 @@ Real Windows audio behavior still requires the hardware checks below.
   and verifies ranges without forwarding media to UI/status observers. No
   plaintext audio temporary files are created. Cloud upload is not yet connected.
 - A small CLI using inherited, length-prefixed stdio, and Linux/Windows CI.
+- Explicit desktop microphone/system-output selection, local start/pause/resume/stop,
+  an always-visible stop control, acknowledged saved-chunk durations and recording
+  integrity inspection. Capture is optional and bounded to the helper's one-hour
+  preview limit; it does not upload audio or call Azure.
+- Encrypted, durable recording ownership is committed before launching capture.
+  Restart marks unfinished sessions for inspection, never automatic capture.
+  Document deletion, workspace revocation and disconnect journal physical audio
+  cleanup before dropping their association; failed removal remains observable
+  and retryable. Explicit audio-only deletion preserves written notes.
 - Structured basic rich-text notes, tags, Markdown/plain-text export, stable
   offline document IDs, idempotent saves, and owner-scoped snapshot/incremental
   synchronization with deletion tombstones and expired-cursor handling.
@@ -71,6 +80,15 @@ failures are shown inline; the application never downloads or searches PATH for
 an alternative executable. For a source checkout, install the .NET SDK selected
 by `global.json` and run `pnpm audio:publish` before opening that screen.
 
+Inside a meeting, choose **Record audio**, review the sources and explicitly
+choose **Start recording**. System audio is off initially. The top recording bar
+keeps pause/resume/stop available while you edit or navigate; stopping is not
+blocked by invalid note text. Changing accounts/workspaces requires stopping
+capture first. Closing the window waits for capture shutdown; interrupted sessions
+remain under **Saved audio** for inspection. Saved durations count only acknowledged
+encrypted chunks and may trail capture by up to 30 seconds. Audio meters and
+physical-device reliability evidence remain release work.
+
 No API credentials are needed for the offline editor. Edits display **Saved locally**
 only after SQLite acknowledges the save. Document changes, exports and window
 close wait for queued edits; invalid or failed saves keep the editor open.
@@ -88,8 +106,9 @@ The main-process client core also implements bounded HTTPS transport and durable
 synchronization: frozen requests replay before pulls, snapshot pagination survives
 restarts, missing-document reconciliation preserves unsubmitted edits, and
 workspace revocation purges only the affected cache. Cursors, changed documents
-and encrypted transcript/job artifacts commit together. The v1 local vault is
-migrated transactionally without resetting keys, drafts or retries. Real
+and encrypted transcript/job artifacts commit together. The v1/v2 local vault is
+migrated transactionally to v3 without resetting keys, drafts or retries. Older
+previews reject this version instead of using recording-unaware deletion logic. Real
 HTTP/PostgreSQL/SQLite tests cover lost responses, two-device conflicts, expiry,
 deletion and revocation.
 The OIDC client core uses a system-browser code/S256 flow and a loopback-only
@@ -104,12 +123,14 @@ Open **Account & sync**, enter your administrator's HTTPS service origin and
 choose **Sign in with browser**. Select a provisioned workspace after signing in.
 Device-only drafts are **not uploaded automatically**: explicitly check the copy
 option when opening a workspace. Copies get new IDs; originals remain on the
-device, and repeated imports of an unchanged draft do not duplicate it.
+device, and repeated imports of an unchanged draft do not duplicate it. Copies
+include written notes only; they do not copy or upload raw audio.
 Switching back to **On this device** pauses cloud sync without signing out.
 
 Disconnecting clears all cached workspaces and local credentials transactionally.
 You can explicitly keep unsynced drafts as new device-only copies; pending
-deletions are not sent. Known access revocation removes the affected cache rather
+deletions are not sent. Workspace audio is also deleted, including not-yet-uploaded
+recordings; the disconnect confirmation makes this explicit. Known access revocation removes the affected cache rather
 than copying forbidden content into an offline profile. If storage prevents its
 removal, the workspace is blocked and the failure is reported. Stale renderer
 writes cannot cross workspace boundaries, and failed editor saves offer new-copy

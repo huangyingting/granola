@@ -11,6 +11,7 @@ import {
   richTextToPlainText,
 } from '@windows-ai-notes/contracts/content';
 import type { Draft } from '@windows-ai-notes/contracts/desktop';
+import type { Track } from '@windows-ai-notes/contracts';
 import { LocalStore } from './index.js';
 
 describe('encrypted local drafts and durable outbox', () => {
@@ -32,6 +33,17 @@ describe('encrypted local drafts and durable outbox', () => {
   }
   function fields(text: string, title = 'Synthetic meeting') {
     return { title, content: richTextFromPlainText(text), tags: ['Planning'] };
+  }
+  function tracks(): Track[] {
+    return [
+      {
+        track_id: randomUUID(),
+        kind: 'microphone',
+        capture_scope: 'endpoint',
+        device_selection_policy: 'explicit',
+        device_id: 'synthetic-private-microphone',
+      },
+    ];
   }
   function remote(
     draft: Draft,
@@ -64,6 +76,236 @@ describe('encrypted local drafts and durable outbox', () => {
     stores.clear();
     key.fill(0);
     rmSync(directory, { recursive: true, force: true });
+  });
+  it('durably binds encrypted recording metadata to exactly one document and profile before capture', () => {
+    const store = open();
+    const draft = store.create('offline', fields('Private offline recording.'));
+    const other = store.create('offline', fields('Another document.'));
+    const recording = store.beginRecording('offline', draft.id, tracks());
+    expect(recording.state).toBe('starting');
+    expect(store.activeRecordingOwner()).toEqual({
+      profile: 'offline',
+      document_id: draft.id,
+      recording_id: recording.id,
+    });
+    expect(() => store.beginRecording('offline', other.id, tracks())).toThrow(
+      'Stop the current recording',
+    );
+    expect(() => store.getRecording(profile, draft.id, recording.id)).toThrow(
+      'document is no longer available',
+    );
+    expect(() => store.getRecording('offline', other.id, recording.id)).toThrow(
+      'not available in this document',
+    );
+    close(store);
+    const reopened = open();
+    expect(reopened.recordings('offline', draft.id)).toEqual({
+      recordings: [recording],
+      has_more: false,
+    });
+    expect(reopened.activeRecordingOwner()?.recording_id).toBe(recording.id);
+    for (const file of [path, `${path}-wal`]) {
+      if (existsSync(file))
+        expect(
+          readFileSync(file).includes(
+            Buffer.from('synthetic-private-microphone'),
+          ),
+        ).toBe(false);
+    }
+    const interrupted = reopened.updateRecording(
+      'offline',
+      draft.id,
+      recording.id,
+      {
+        state: 'interrupted',
+        error: {
+          code: 'capture_interrupted',
+          message: 'Inspect preserved audio before treating it as complete.',
+        },
+      },
+    );
+    expect(interrupted.tracks).toEqual(recording.tracks);
+    expect(reopened.activeRecordingOwner()).toBeNull();
+    expect(reopened.pendingRecordingDeletions()).toEqual([]);
+  });
+  it('upgrades v2 vaults without resetting drafts and fences older applications from recording-aware deletion semantics', () => {
+    const original = open();
+    const draft = original.create('offline', fields('Existing v2 draft.'));
+    original.putValue('root', 'synthetic-migration-value', { kept: true });
+    close(original);
+    const older = new DatabaseSync(path);
+    older.exec('PRAGMA user_version=2');
+    older.close();
+    const upgraded = open();
+    expect(upgraded.get('offline', draft.id)).toEqual(draft);
+    expect(
+      upgraded.getValue(
+        'root',
+        'synthetic-migration-value',
+        z.object({ kept: z.boolean() }),
+      ),
+    ).toEqual({ kept: true });
+    const inspect = new DatabaseSync(path, { readOnly: true });
+    try {
+      expect(inspect.prepare('PRAGMA user_version').get()?.user_version).toBe(
+        3,
+      );
+    } finally {
+      inspect.close();
+    }
+  });
+  it('pages recording metadata without returning another document or changing historical order on status updates', () => {
+    const store = open();
+    const draft = store.create('offline');
+    const ids: string[] = [];
+    for (let index = 0; index < 53; index++) {
+      const recording = store.beginRecording('offline', draft.id, tracks());
+      ids.push(recording.id);
+      store.updateRecording('offline', draft.id, recording.id, {
+        state: 'sealed',
+      });
+    }
+    const other = store.create('offline');
+    const unrelated = store.beginRecording('offline', other.id, tracks());
+    store.updateRecording('offline', other.id, unrelated.id, {
+      state: 'sealed',
+    });
+    store.updateRecording('offline', draft.id, ids[0]!, {
+      error: {
+        code: 'synthetic_status',
+        message: 'Synthetic historical update.',
+      },
+    });
+    const first = store.recordings('offline', draft.id);
+    const next = store.recordings('offline', draft.id, 50);
+    expect(first.recordings.map((recording) => recording.id)).toEqual(
+      ids.slice(3).reverse(),
+    );
+    expect(first.has_more).toBe(true);
+    expect(next.recordings.map((recording) => recording.id)).toEqual(
+      ids.slice(0, 3).reverse(),
+    );
+    expect(next.has_more).toBe(false);
+    expect(() => store.recordings('offline', draft.id, -1)).toThrow(
+      'supported recording page',
+    );
+  });
+  it('preserves recording identity and monotonically acknowledged saved samples, never reviving terminal capture', () => {
+    const store = open();
+    const draft = store.create(profile, fields('Capture status.'));
+    const recording = store.beginRecording(profile, draft.id, tracks());
+    const saved = recording.tracks.map((track) => ({
+      ...track,
+      actual_device_id: track.spec.device_id,
+      saved_samples: 16000,
+    }));
+    store.updateRecording(profile, draft.id, recording.id, {
+      state: 'recording',
+      tracks: saved,
+    });
+    expect(() =>
+      store.updateRecording(profile, draft.id, recording.id, {
+        tracks: recording.tracks,
+      }),
+    ).toThrow('saved samples');
+    expect(() =>
+      store.updateRecording(profile, draft.id, recording.id, {
+        tracks: saved.map((track) => ({
+          ...track,
+          spec: { ...track.spec, track_id: randomUUID() },
+        })),
+      }),
+    ).toThrow('recording identity');
+    store.updateRecording(profile, draft.id, recording.id, { state: 'sealed' });
+    expect(() =>
+      store.updateRecording(profile, draft.id, recording.id, {
+        state: 'recording',
+      }),
+    ).toThrow('active state');
+    expect(store.activeRecordingOwner()).toBeNull();
+  });
+  it.each(['local', 'remote', 'profile'] as const)(
+    'journals audio cleanup before %s deletion and retains unrelated recording ownership',
+    (mode) => {
+      const store = open();
+      const draft = store.create(profile, fields('Deleted recording.'));
+      store.applyRemote(profile, remote(draft));
+      const recording = store.beginRecording(profile, draft.id, tracks());
+      store.updateRecording(profile, draft.id, recording.id, {
+        state: 'sealed',
+      });
+      const retained = store.create('offline', fields('Retained recording.'));
+      const kept = store.beginRecording('offline', retained.id, tracks());
+      if (mode === 'local') store.remove(profile, draft.id);
+      else if (mode === 'remote') store.remoteDeleted(profile, draft.id);
+      else store.purgeProfile(profile);
+      expect(() =>
+        store.getRecording(profile, draft.id, recording.id),
+      ).toThrow();
+      expect(store.pendingRecordingDeletions()).toEqual([recording.id]);
+      expect(store.activeRecordingOwner()?.recording_id).toBe(kept.id);
+      close(store);
+      const reopened = open();
+      expect(reopened.pendingRecordingDeletions()).toEqual([recording.id]);
+      expect(reopened.getRecording('offline', retained.id, kept.id)).toEqual(
+        kept,
+      );
+      reopened.acknowledgeRecordingDeletion(recording.id);
+      reopened.acknowledgeRecordingDeletion(recording.id);
+      expect(reopened.pendingRecordingDeletions()).toEqual([]);
+    },
+  );
+  it('rolls back document removal and ownership changes if the durable audio deletion journal cannot be written', () => {
+    const store = open();
+    const draft = store.create(
+      profile,
+      fields('Preserved on storage failure.'),
+    );
+    const recording = store.beginRecording(profile, draft.id, tracks());
+    const original = store.putValue.bind(store);
+    vi.spyOn(store, 'putValue').mockImplementation((owner, id, value) => {
+      if (owner === 'root' && id === 'recording:deletions')
+        throw new Error('Synthetic cleanup journal failure.');
+      original(owner, id, value);
+    });
+    expect(() => store.remove(profile, draft.id)).toThrow(
+      'cleanup journal failure',
+    );
+    expect(store.get(profile, draft.id).id).toBe(draft.id);
+    expect(store.getRecording(profile, draft.id, recording.id)).toEqual(
+      recording,
+    );
+    expect(store.activeRecordingOwner()?.recording_id).toBe(recording.id);
+    expect(store.pendingRecordingDeletions()).toEqual([]);
+  });
+  it('does not copy or implicitly move private audio when notes are copied into a workspace', () => {
+    const store = open();
+    const draft = store.create('offline', fields('Copy notes only.'));
+    const recording = store.beginRecording('offline', draft.id, tracks());
+    store.updateRecording('offline', draft.id, recording.id, {
+      state: 'sealed',
+    });
+    store.copyDrafts('offline', profile, 'all');
+    const copy = store.list(profile)[0]!;
+    expect(copy.id).not.toBe(draft.id);
+    expect(store.recordings(profile, copy.id).recordings).toEqual([]);
+    expect(store.getRecording('offline', draft.id, recording.id).state).toBe(
+      'sealed',
+    );
+    expect(() => store.bindOffline(profile)).toThrow('Copy notes explicitly');
+    expect(store.getRecording('offline', draft.id, recording.id).state).toBe(
+      'sealed',
+    );
+  });
+  it('removes only explicitly selected raw audio while preserving notes and the retryable deletion journal', () => {
+    const store = open();
+    const draft = store.create('offline', fields('Retain the written notes.'));
+    const recording = store.beginRecording('offline', draft.id, tracks());
+    store.removeRecording('offline', draft.id, recording.id);
+    expect(store.get('offline', draft.id).id).toBe(draft.id);
+    expect(store.recordings('offline', draft.id).recordings).toEqual([]);
+    expect(store.pendingRecordingDeletions()).toEqual([recording.id]);
+    expect(store.activeRecordingOwner()).toBeNull();
   });
   it('pages encrypted summaries without returning full note bodies and reuses unchanged search results', () => {
     const store = open();

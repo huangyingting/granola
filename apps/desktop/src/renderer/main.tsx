@@ -18,6 +18,7 @@ import './style.css';
 import { Account } from './Account.js';
 import { NoteExtras } from './NoteExtras.js';
 import { AudioDevices } from './AudioDevices.js';
+import { RecordingBar, RecordingPanel } from './Recording.js';
 
 declare global {
   interface Window {
@@ -72,6 +73,7 @@ function App() {
       }
       if ('closing' in response) return null;
       if ('audio_devices' in response) return null;
+      if ('audio_state' in response) return null;
       if (
         !discardEditor &&
         ['bootstrap', 'search'].includes(command.operation) &&
@@ -105,10 +107,14 @@ function App() {
     const offFlush = window.notes.onFlush((nonce) => {
       void flush
         .current()
-        .then((saved) => {
-          if (saved)
-            return window.notes.invoke({ operation: 'closeReady', nonce });
-          return undefined;
+        .then(async (saved) => {
+          if (saved) {
+            const response = await window.notes.invoke({
+              operation: 'closeReady',
+              nonce,
+            });
+            if (!response.ok) setError(response.error.message);
+          }
         })
         .catch(() =>
           setError('Notes could not be saved. The window was kept open.'),
@@ -117,6 +123,7 @@ function App() {
     let refreshing = false;
     let requestedVersion = 0;
     const offChanged = window.notes.onChanged((change) => {
+      if (change.kind === 'audio') return;
       requestedVersion = Math.max(requestedVersion, change.version);
       if (change.kind === 'revoked' || change.scope !== scope.current) {
         minimumVersion.current = Math.max(
@@ -377,6 +384,7 @@ function App() {
             {state ? 'Encrypted on this device' : 'Storage unavailable'}
           </span>
         </header>
+        {state && <RecordingBar key={state.scope} scope={state.scope} />}
         {error && (
           <div className="error-banner" role="alert">
             {error}
@@ -745,7 +753,9 @@ function Note({
             <p>
               {state.connection.active_workspace
                 ? 'Deletion will sync to the cloud. Other devices will remove their cached copy.'
-                : 'This removes the saved notes from this device.'}
+                : 'This removes the saved notes from this device.'}{' '}
+              Local audio for this meeting is also deleted, even if it has not
+              been uploaded.
             </p>
           </div>
           <button className="secondary" onClick={() => setConfirmDelete(false)}>
@@ -840,6 +850,13 @@ function Note({
             });
         }}
       />
+      {draft.status !== 'deleted_remote' && (
+        <RecordingPanel
+          scope={state.scope}
+          document={draft.id}
+          beforeStart={save}
+        />
+      )}
       <input
         className="title-input"
         aria-label="Meeting title"

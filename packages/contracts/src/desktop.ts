@@ -1,7 +1,8 @@
 import { z } from 'zod';
 import { richTextSchema, tagsSchema } from './content.js';
 import { resourceId, jobSchema, transcriptSchema } from './server.js';
-import { deviceSchema } from './index.js';
+import { deviceSchema, trackSchema } from './index.js';
+import { audioStateSchema } from './recording.js';
 
 export const editableSchema = z.strictObject({
   title: z
@@ -29,6 +30,39 @@ const scoped = { scope: z.number().int().positive() };
 export const desktopCommandSchema = z.discriminatedUnion('operation', [
   z.strictObject({ operation: z.literal('bootstrap') }),
   z.strictObject({ operation: z.literal('listAudioDevices'), ...scoped }),
+  z.strictObject({
+    operation: z.literal('getRecordingState'),
+    ...scoped,
+    document_id: resourceId.nullable(),
+    offset: z.number().int().min(0).max(1_000_000),
+  }),
+  z.strictObject({
+    operation: z.literal('startRecording'),
+    ...scoped,
+    id: resourceId,
+    tracks: z.array(trackSchema).min(1).max(2),
+  }),
+  z.strictObject({
+    operation: z.literal('controlRecording'),
+    ...scoped,
+    id: resourceId,
+    recording_id: resourceId,
+    action: z.enum(['pause', 'resume', 'stop']),
+  }),
+  z.strictObject({
+    operation: z.literal('inspectRecording'),
+    ...scoped,
+    id: resourceId,
+    recording_id: resourceId,
+  }),
+  z.strictObject({
+    operation: z.literal('removeRecording'),
+    ...scoped,
+    id: resourceId,
+    recording_id: resourceId,
+    confirmed: z.literal(true),
+  }),
+  z.strictObject({ operation: z.literal('retryRecordingCleanup'), ...scoped }),
   z.strictObject({
     operation: z.literal('create'),
     ...scoped,
@@ -140,7 +174,7 @@ export const desktopStateSchema = z.strictObject({
 export const desktopChangeSchema = z.strictObject({
   version: z.number().int().positive(),
   scope: z.number().int().positive(),
-  kind: z.enum(['data', 'scope', 'revoked', 'status']),
+  kind: z.enum(['data', 'scope', 'revoked', 'status', 'audio']),
 });
 export const desktopResponseSchema = z.union([
   z.strictObject({
@@ -153,6 +187,10 @@ export const desktopResponseSchema = z.union([
     error: z.strictObject({ code: z.string(), message: z.string() }),
   }),
   z.strictObject({ ok: z.literal(true), closing: z.literal(true) }),
+  z.strictObject({
+    ok: z.literal(true),
+    audio_state: z.strictObject({ ...scoped, state: audioStateSchema }),
+  }),
   z.strictObject({
     ok: z.literal(true),
     audio_devices: z.strictObject({

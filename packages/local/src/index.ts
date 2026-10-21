@@ -28,6 +28,13 @@ import {
   type EditableDraft,
   type DraftSummary,
 } from '@windows-ai-notes/contracts/desktop';
+import type { Track } from '@windows-ai-notes/contracts';
+import {
+  localRecordingSchema,
+  recordingOwnerSchema,
+  type LocalRecording,
+  type RecordingOwner,
+} from '@windows-ai-notes/contracts/recording';
 
 export class LocalError extends Error {
   constructor(
@@ -172,7 +179,7 @@ export class LocalStore {
           const version = inspect
             .prepare('PRAGMA user_version')
             .get()?.user_version;
-          if (version !== 1 && version !== 2)
+          if (version !== 1 && version !== 2 && version !== 3)
             throw new LocalError(
               'local_version_unsupported',
               'This local database needs a compatible application version.',
@@ -182,7 +189,7 @@ export class LocalStore {
               'vault',
               'drafts',
               'outbox',
-              ...(version === 2 ? ['snapshot_candidates'] : []),
+              ...(version !== 1 ? ['snapshot_candidates'] : []),
             ].every((name) => tables.some((row) => row.name === name))
           )
             throw new LocalError(
@@ -191,7 +198,7 @@ export class LocalStore {
             );
           const verifier = inspect
             .prepare(
-              `SELECT payload FROM vault WHERE profile='root' AND id='key-check'${version === 2 ? ' AND document_id IS NULL' : ''}`,
+              `SELECT payload FROM vault WHERE profile='root' AND id='key-check'${version !== 1 ? ' AND document_id IS NULL' : ''}`,
             )
             .get();
           if (!verifier)
@@ -273,7 +280,7 @@ export class LocalStore {
             .get()
         )
           this.putValue('root', 'key-check', 'windows-ai-notes-local-v1');
-        this.database.exec('PRAGMA user_version=2');
+        this.database.exec('PRAGMA user_version=3');
       });
     } catch (error) {
       try {
@@ -462,6 +469,212 @@ export class LocalStore {
       )
       .run(except, except);
   }
+  activeRecordingOwner(): RecordingOwner | null {
+    return this.getValue('root', 'recording:active', recordingOwnerSchema);
+  }
+  private recordingDocument(profile: string, document: string): void {
+    const row = this.row(profile, document);
+    if (!row || row.deleted || this.payload(row).recovery)
+      throw new LocalError(
+        'local_document_missing',
+        'This recording document is no longer available.',
+      );
+  }
+  private recordingValue(
+    profile: string,
+    document: string,
+    id: string,
+  ): LocalRecording {
+    resourceId.parse(id);
+    const value = this.getValue(
+      profile,
+      `recording:${id}`,
+      localRecordingSchema,
+    );
+    if (!value || value.id !== id || value.document_id !== document)
+      throw new LocalError(
+        'local_recording_missing',
+        'This recording is not available in this document and workspace.',
+      );
+    return value;
+  }
+  getRecording(profile: string, document: string, id: string): LocalRecording {
+    this.recordingDocument(profile, document);
+    return this.recordingValue(profile, document, id);
+  }
+  recordings(
+    profile: string,
+    document: string,
+    offset = 0,
+  ): { recordings: LocalRecording[]; has_more: boolean } {
+    this.recordingDocument(profile, document);
+    if (!Number.isSafeInteger(offset) || offset < 0 || offset > 1_000_000)
+      throw new LocalError(
+        'invalid_recording_page',
+        'Use a supported recording page offset.',
+      );
+    const rows = this.database
+      .prepare(
+        "SELECT id FROM vault WHERE profile=? AND document_id=? AND id LIKE 'recording:%' ORDER BY rowid DESC LIMIT 51 OFFSET ?",
+      )
+      .all(profile, document, offset);
+    return {
+      recordings: rows
+        .slice(0, 50)
+        .map((row) =>
+          this.recordingValue(
+            profile,
+            document,
+            z.string().parse(row.id).slice('recording:'.length),
+          ),
+        ),
+      has_more: rows.length > 50,
+    };
+  }
+  private writeRecording(profile: string, recording: LocalRecording): void {
+    const name = `recording:${recording.id}`;
+    this.database
+      .prepare(
+        'INSERT INTO vault(profile,id,document_id,payload) VALUES (?,?,?,?) ON CONFLICT(profile,id) DO UPDATE SET document_id=excluded.document_id,payload=excluded.payload',
+      )
+      .run(
+        profile,
+        name,
+        recording.document_id,
+        this.seal(
+          recording,
+          aad('vault2', profile, name, recording.document_id),
+        ),
+      );
+  }
+  beginRecording(
+    profile: string,
+    document: string,
+    tracks: Track[],
+  ): LocalRecording {
+    return this.transaction(() => {
+      this.recordingDocument(profile, document);
+      if (this.activeRecordingOwner())
+        throw new LocalError(
+          'recording_in_progress',
+          'Stop the current recording before starting another.',
+        );
+      const recording = localRecordingSchema.parse({
+        id: randomUUID(),
+        document_id: document,
+        created_at: new Date().toISOString(),
+        state: 'starting',
+        tracks: tracks.map((spec) => ({
+          spec,
+          actual_device_id: null,
+          saved_samples: 0,
+        })),
+        error: null,
+        inspection: null,
+      });
+      this.writeRecording(profile, recording);
+      this.putValue(
+        'root',
+        'recording:active',
+        recordingOwnerSchema.parse({
+          profile,
+          document_id: document,
+          recording_id: recording.id,
+        }),
+      );
+      return recording;
+    });
+  }
+  updateRecording(
+    profile: string,
+    document: string,
+    id: string,
+    patch: Partial<
+      Pick<LocalRecording, 'state' | 'tracks' | 'error' | 'inspection'>
+    >,
+  ): LocalRecording {
+    return this.transaction(() => {
+      const previous = this.getRecording(profile, document, id);
+      const next = localRecordingSchema.parse({ ...previous, ...patch });
+      const active = this.activeRecordingOwner();
+      const ongoing = ['starting', 'recording', 'paused'].includes(next.state);
+      if (
+        canonicalJson(next.tracks.map((track) => track.spec)) !==
+          canonicalJson(previous.tracks.map((track) => track.spec)) ||
+        next.tracks.some(
+          (track, index) =>
+            track.saved_samples < previous.tracks[index]!.saved_samples,
+        ) ||
+        (ongoing &&
+          (active?.profile !== profile ||
+            active.document_id !== document ||
+            active.recording_id !== id ||
+            !['starting', 'recording', 'paused'].includes(previous.state)))
+      )
+        throw new LocalError(
+          'invalid_recording_update',
+          'The recording identity, saved samples or active state changed unexpectedly.',
+        );
+      this.writeRecording(profile, next);
+      if (!ongoing && active?.profile === profile && active.recording_id === id)
+        this.deleteValue('root', 'recording:active');
+      return next;
+    });
+  }
+  pendingRecordingDeletions(): string[] {
+    return (
+      this.getValue(
+        'root',
+        'recording:deletions',
+        z.array(resourceId).max(10_000),
+      ) ?? []
+    );
+  }
+  acknowledgeRecordingDeletion(id: string): void {
+    resourceId.parse(id);
+    this.transaction(() => {
+      const remaining = this.pendingRecordingDeletions().filter(
+        (item) => item !== id,
+      );
+      if (remaining.length)
+        this.putValue('root', 'recording:deletions', remaining);
+      else this.deleteValue('root', 'recording:deletions');
+    });
+  }
+  private queueRecordingDeletions(profile: string, document?: string): void {
+    const rows = this.database
+      .prepare(
+        "SELECT id,document_id FROM vault WHERE profile=? AND document_id IS NOT NULL AND id LIKE 'recording:%' AND (? IS NULL OR document_id=?)",
+      )
+      .all(profile, document ?? null, document ?? null);
+    if (!rows.length) return;
+    const ids = rows.map(
+      (row) =>
+        this.recordingValue(
+          profile,
+          resourceId.parse(row.document_id),
+          z.string().parse(row.id).slice('recording:'.length),
+        ).id,
+    );
+    this.queueRecordingIds(profile, ids);
+  }
+  private queueRecordingIds(profile: string, ids: string[]): void {
+    const pending = z
+      .array(resourceId)
+      .max(10_000)
+      .parse([...new Set([...this.pendingRecordingDeletions(), ...ids])]);
+    this.putValue('root', 'recording:deletions', pending);
+    const active = this.activeRecordingOwner();
+    if (active?.profile === profile && ids.includes(active.recording_id))
+      this.deleteValue('root', 'recording:active');
+  }
+  removeRecording(profile: string, document: string, id: string): void {
+    this.transaction(() => {
+      this.getRecording(profile, document, id);
+      this.queueRecordingIds(profile, [id]);
+      this.deleteValue(profile, `recording:${id}`);
+    });
+  }
   private row(profile: string, id: string): Row | null {
     const value = this.database
       .prepare('SELECT * FROM drafts WHERE profile=? AND id=?')
@@ -529,6 +742,7 @@ export class LocalStore {
     }
   }
   private forget(profile: string, id: string) {
+    this.queueRecordingDeletions(profile, id);
     this.invalidate(profile, id);
     this.database
       .prepare('DELETE FROM drafts WHERE profile=? AND id=?')
@@ -753,6 +967,12 @@ export class LocalStore {
     this.transaction(() => {
       const row = this.row(profile, id);
       if (!row) return;
+      this.queueRecordingDeletions(profile, id);
+      this.database
+        .prepare(
+          "DELETE FROM vault WHERE profile=? AND document_id=? AND id LIKE 'recording:%'",
+        )
+        .run(profile, id);
       const queued = this.database
         .prepare('SELECT 1 FROM outbox WHERE profile=? AND document_id=?')
         .get(profile, id);
@@ -767,6 +987,17 @@ export class LocalStore {
   bindOffline(profile: string): void {
     if (profile === 'offline') return;
     this.transaction(() => {
+      if (
+        this.database
+          .prepare(
+            "SELECT 1 FROM vault WHERE profile='offline' AND document_id IS NOT NULL AND id LIKE 'recording:%' LIMIT 1",
+          )
+          .get()
+      )
+        throw new LocalError(
+          'recording_transfer_requires_consent',
+          'Copy notes explicitly instead of moving a profile with local recordings. Its audio was preserved.',
+        );
       const rows = this.database
         .prepare("SELECT * FROM drafts WHERE profile='offline'")
         .all()
@@ -1011,6 +1242,7 @@ export class LocalStore {
   }
   remoteDeleted(profile: string, id: string): void {
     this.transaction(() => {
+      this.queueRecordingDeletions(profile, id);
       this.database
         .prepare('DELETE FROM vault WHERE profile=? AND document_id=?')
         .run(profile, id);
@@ -1244,6 +1476,7 @@ export class LocalStore {
   purgeProfile(profile: string): void {
     this.invalidate(profile);
     this.transaction(() => {
+      this.queueRecordingDeletions(profile);
       this.database.prepare('DELETE FROM drafts WHERE profile=?').run(profile);
       this.database.prepare('DELETE FROM vault WHERE profile=?').run(profile);
     });

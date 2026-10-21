@@ -20,11 +20,13 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { LocalError, LocalStore } from '@windows-ai-notes/local';
 import { ClientError } from '@windows-ai-notes/client/http';
 import { WorkspaceController } from '@windows-ai-notes/client/workspace';
+import { RecordingController } from '@windows-ai-notes/client/recording';
 import {
   AudioHostClient,
   AudioHostError,
 } from '@windows-ai-notes/client/audio';
 import type { AudioEvent } from '@windows-ai-notes/contracts';
+import { resourceId } from '@windows-ai-notes/contracts/server';
 import {
   exportMeeting,
   richTextToPlainText,
@@ -43,53 +45,51 @@ let failure: { code: string; message: string } | null = null;
 let closeNonce: string | null = null;
 let allowClose = false;
 let dataDirectory = '';
-let deviceRequest: Promise<
-  Extract<AudioEvent, { event_type: 'devices' }>['payload']['devices']
-> | null = null;
+let recordings: RecordingController | null = null;
 
-function listAudioDevices() {
-  if (deviceRequest) return deviceRequest;
-  const operation = (async () => {
-    if (process.platform !== 'win32')
-      throw new LocalError(
-        'platform_unsupported',
-        'The audio helper requires Windows.',
-      );
-    const executable = app.isPackaged
-      ? join(process.resourcesPath, 'audio-host', 'AudioHost.exe')
-      : join(
-          app.getAppPath(),
-          '../../artifacts/audio-host/win-x64/AudioHost.exe',
-        );
-    if (!existsSync(executable))
-      throw new LocalError(
-        'audio_host_missing',
-        app.isPackaged
-          ? 'The bundled audio helper is missing. Reinstall a complete application package; no external helper was used.'
-          : 'Build the audio helper with pnpm audio:publish before checking audio devices.',
-      );
-    const client = new AudioHostClient(
-      executable,
-      ['--data-dir', join(dataDirectory, 'recordings')],
-      () => {},
+function createAudioHost(observe: (event: AudioEvent) => void) {
+  if (process.platform !== 'win32')
+    throw new LocalError(
+      'platform_unsupported',
+      'The audio helper requires Windows.',
     );
-    try {
-      const event = await client.request({ command: 'list_devices' });
-      if (event.event_type !== 'devices')
-        throw new AudioHostError(
-          'audio_protocol_error',
-          'The audio helper did not return a device list.',
-          false,
-        );
-      return event.payload.devices;
-    } finally {
-      await client.close();
-    }
-  })().finally(() => {
-    deviceRequest = null;
+  const executable = app.isPackaged
+    ? join(process.resourcesPath, 'audio-host', 'AudioHost.exe')
+    : join(
+        app.getAppPath(),
+        '../../artifacts/audio-host/win-x64/AudioHost.exe',
+      );
+  if (!existsSync(executable))
+    throw new LocalError(
+      'audio_host_missing',
+      app.isPackaged
+        ? 'The bundled audio helper is missing. Reinstall a complete application package; no external helper was used.'
+        : 'Build the audio helper with pnpm audio:publish before checking audio devices.',
+    );
+  return new AudioHostClient(
+    executable,
+    ['--data-dir', join(dataDirectory, 'recordings')],
+    observe,
+  );
+}
+function audio(): RecordingController {
+  if (!recordings)
+    throw new LocalError(
+      'audio_unavailable',
+      'The audio coordinator is unavailable.',
+    );
+  return recordings;
+}
+function audioMaintenance() {
+  if (!recordings || !controller) return;
+  void recordings.reconcile(controller.profile).catch((error: unknown) => {
+    console.error(
+      JSON.stringify({
+        code: 'recording_cleanup_pending',
+        kind: error instanceof Error ? error.name : 'unknown',
+      }),
+    );
   });
-  deviceRequest = operation;
-  return operation;
 }
 
 function localKey(directory: string): Buffer {
@@ -189,6 +189,7 @@ async function start() {
         store,
         (url) => shell.openExternal(url),
         (change) => {
+          if (change.kind !== 'audio') audioMaintenance();
           if (window && !window.isDestroyed())
             window.webContents.send('notes:changed', change);
         },
@@ -199,11 +200,30 @@ async function start() {
             process.env.WINDOWS_NOTES_ALLOW_LOOPBACK === '1',
         },
       );
+      recordings = new RecordingController(
+        store,
+        createAudioHost,
+        () => controller?.audioChanged(),
+        async (id) => {
+          resourceId.parse(id);
+          await rm(join(dataDirectory, 'recordings', id), {
+            recursive: true,
+            force: true,
+            maxRetries: 3,
+            retryDelay: 100,
+          });
+        },
+      );
     } finally {
       key.fill(0);
     }
   } catch (error) {
     failure = safeError(error);
+    controller?.dispose();
+    controller = null;
+    store?.close();
+    store = null;
+    recordings = null;
     console.error(JSON.stringify({ code: failure.code }));
   }
   const directory = dirname(fileURLToPath(import.meta.url));
@@ -262,6 +282,7 @@ async function start() {
               'invalid_close_request',
               'No matching close operation is pending.',
             );
+          await recordings?.stop(() => {});
           allowClose = true;
           current.close();
           return { ok: true, closing: true };
@@ -280,11 +301,66 @@ async function start() {
         if (command.operation === 'listAudioDevices') {
           const active = workspace();
           active.assertScope(command.scope);
-          const devices = await listAudioDevices();
+          const devices = await audio().listDevices();
           active.assertScope(command.scope);
           return desktopResponseSchema.parse({
             ok: true,
             audio_devices: { scope: command.scope, devices },
+          });
+        }
+        if (
+          command.operation === 'getRecordingState' ||
+          command.operation === 'startRecording' ||
+          command.operation === 'controlRecording' ||
+          command.operation === 'inspectRecording' ||
+          command.operation === 'removeRecording' ||
+          command.operation === 'retryRecordingCleanup'
+        ) {
+          const active = workspace();
+          const profile = active.profile;
+          const authorize = () => active.assertScope(command.scope);
+          authorize();
+          const capture = audio();
+          if (command.operation === 'startRecording')
+            await capture.start(profile, command.id, command.tracks, authorize);
+          else if (command.operation === 'controlRecording')
+            await capture.control(
+              profile,
+              command.id,
+              command.recording_id,
+              command.action,
+              authorize,
+            );
+          else if (command.operation === 'inspectRecording')
+            await capture.inspect(
+              profile,
+              command.id,
+              command.recording_id,
+              authorize,
+            );
+          else if (command.operation === 'removeRecording') {
+            db.getRecording(profile, command.id, command.recording_id);
+            db.removeRecording(profile, command.id, command.recording_id);
+            await capture.reconcile(profile);
+          } else if (command.operation === 'retryRecordingCleanup')
+            await capture.cleanup();
+          authorize();
+          const document =
+            command.operation === 'getRecordingState'
+              ? command.document_id
+              : 'id' in command
+                ? command.id
+                : null;
+          return desktopResponseSchema.parse({
+            ok: true,
+            audio_state: {
+              scope: command.scope,
+              state: capture.snapshot(
+                profile,
+                document,
+                command.operation === 'getRecordingState' ? command.offset : 0,
+              ),
+            },
           });
         }
         if (command.operation === 'export') {
@@ -340,9 +416,36 @@ async function start() {
           }
           return { ok: true, state: state(), notice: 'exported' };
         }
+        if (
+          recordings?.capturing &&
+          [
+            'connect',
+            'activateWorkspace',
+            'workOffline',
+            'disconnect',
+          ].includes(command.operation)
+        )
+          throw new LocalError(
+            'recording_in_progress',
+            'Stop recording before changing accounts or workspaces.',
+          );
+        if (command.operation === 'delete' && recordings?.capturing) {
+          workspace().assertScope(command.scope);
+          const active = recordings.snapshot(workspace().profile, null).active;
+          if (active?.document_id === command.id)
+            await recordings.control(
+              workspace().profile,
+              command.id,
+              active.id,
+              'stop',
+              () => workspace().assertScope(command.scope),
+            );
+        }
+        const result = await workspace().execute(command);
+        audioMaintenance();
         return desktopResponseSchema.parse({
           ok: true,
-          state: await workspace().execute(command),
+          state: result,
         });
       } catch (error) {
         return { ok: false, error: safeError(error) };
@@ -363,6 +466,7 @@ async function start() {
     window = null;
   });
   await current.loadURL(page);
+  audioMaintenance();
   controller?.start();
 }
 if (!app.requestSingleInstanceLock()) app.quit();
