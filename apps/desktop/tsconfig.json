@@ -1,0 +1,10 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": { "rootDir": "src", "outDir": "dist" },
+  "include": ["src/main/**/*.ts", "src/preload.ts"],
+  "references": [
+    { "path": "../../packages/contracts" },
+    { "path": "../../packages/local" },
+    { "path": "./tsconfig.renderer.json" }
+  ]
+}

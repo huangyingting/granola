@@ -13,3 +13,5 @@ artifacts/
 *.chunk
 *.partial
 .probe-data/
+test-results/
+playwright-report/

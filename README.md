@@ -1,14 +1,15 @@
 # Windows AI Notes
 
 An independent, self-hostable Windows meeting-notes project. The implementation
-includes the **P0 audio/recovery probe and an initial server-side AI slice**, following the
+includes a **secure offline desktop editor, P0 audio/recovery probe and initial server-side AI slice**, following the
 [implementation plan](WINDOWS-AI-NOTES-IMPLEMENTATION-PLAN.md). It does not use
 Granola code, branding, credentials, or private services.
 
-**This is a developer milestone, not a finished notes app or a completed P0 gate.**
+**This is a developer preview, not production-ready software or a completed P0 gate.**
 The server can transcribe short WAV clips with Azure Speech and produce cited,
 structured meeting summaries with Azure OpenAI. The Windows helper is not yet
-wired to that server, and there is no Electron editor or desktop login.
+wired to that server. The Electron editor currently works offline; desktop login,
+the network synchronization engine, recording controls and AI panels remain in progress.
 Real Windows audio behavior still requires the hardware checks below.
 
 ## Implemented
@@ -34,6 +35,12 @@ Real Windows audio behavior still requires the hardware checks below.
 - Structured basic rich-text notes, tags, Markdown/plain-text export, stable
   offline document IDs, idempotent saves, and owner-scoped snapshot/incremental
   synchronization with deletion tombstones and expired-cursor handling.
+- Sandboxed Electron/React editor with local search, basic formatting, tags,
+  inline deletion confirmation and native exports. SQLite draft bodies,
+  credentials-ready vault values and frozen outbox requests use AES-256-GCM;
+  Windows DPAPI protects the content key. Wrong or missing keys fail closed,
+  without resetting existing notes. Conflicts and deleted-document recovery
+  are implemented in the local store but are not yet connected to cloud UI.
 - A Fastify API and separate worker, backed by PostgreSQL: provisioned OIDC
   identities, workspace membership, private owner-only documents, optimistic
   revisions, immutable note/transcript history, idempotent AI jobs, leases/fences,
@@ -41,6 +48,41 @@ Real Windows audio behavior still requires the hardware checks below.
 - Azure Speech Fast Transcription and Azure OpenAI structured summaries. Inputs
   freeze their revisions; generated summaries never overwrite notes. Citations
   must resolve to the supplied immutable evidence. Provider errors are explicit.
+
+## Desktop preview
+
+On Windows 11 x64, with Node.js 24 and Corepack/pnpm:
+
+```sh
+corepack enable
+pnpm install --frozen-lockfile
+pnpm desktop
+```
+
+No API credentials are needed for the offline editor. Edits display **Saved locally**
+only after SQLite acknowledges the save. Document changes, exports and window
+close wait for queued edits; invalid or failed saves keep the editor open.
+Search covers local titles, tags and note text. Markdown and plain-text exports
+are explicitly **unencrypted**. Keep the local data directory and protected
+content key together; files copied to a different Windows account cannot
+necessarily be unlocked. Do not delete the key to resolve a startup error.
+
+The renderer has no Node.js, filesystem, token or network access. A bundled,
+sandbox-compatible preload exposes a strictly validated, narrow IPC interface.
+The application refuses Linux plaintext key-storage backends rather than silently
+downgrading encryption; Windows is the supported desktop target.
+
+```sh
+pnpm desktop:build
+pnpm desktop:test
+pnpm desktop:package:unsigned
+```
+
+Windows CI exercises the actual Electron renderer and DPAPI, local restart
+persistence, invalid-save close protection, renderer isolation, key-loss recovery,
+and the packaged executable. It publishes an **unsigned developer-preview**
+NSIS installer under the workflow artifacts; this is not a signed release or
+evidence of clean-machine install/upgrade/rollback compatibility.
 
 ## Server setup
 

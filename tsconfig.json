@@ -5,8 +5,10 @@
     { "path": "./tools/audio-probe" },
     { "path": "./packages/ai" },
     { "path": "./packages/db" },
+    { "path": "./packages/local" },
     { "path": "./apps/api" },
     { "path": "./apps/worker" },
+    { "path": "./apps/desktop" },
     { "path": "./tools/azure-probe" }
   ]
 }

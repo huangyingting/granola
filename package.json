@@ -21,7 +21,11 @@
     "db:migrate": "node --env-file-if-exists=.env packages/db/dist/cli.js migrate",
     "user:provision": "node --env-file-if-exists=.env packages/db/dist/cli.js provision",
     "azure:probe": "node tools/azure-probe/dist/index.js",
-    "test:server": "vitest run apps/api/src/server.test.ts"
+    "test:server": "vitest run apps/api/src/server.test.ts",
+    "desktop:build": "pnpm --filter @windows-ai-notes/desktop build",
+    "desktop": "pnpm desktop:build && pnpm --filter @windows-ai-notes/desktop start",
+    "desktop:test": "pnpm --filter @windows-ai-notes/desktop test:ui",
+    "desktop:package:unsigned": "pnpm desktop:build && pnpm --filter @windows-ai-notes/desktop package:unsigned"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

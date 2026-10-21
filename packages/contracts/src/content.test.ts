@@ -119,6 +119,32 @@ describe('meeting content', () => {
       updateNotesSchema.safeParse({ base_revision: 1, notes: 'Nul\0' }).success,
     ).toBe(false);
   });
+  it('accepts editor-generated empty blocks and marked hard breaks', () => {
+    const content = richTextSchema.parse({
+      type: 'doc',
+      content: [
+        { type: 'paragraph' },
+        { type: 'heading', attrs: { level: 2 } },
+        { type: 'codeBlock', attrs: { language: null } },
+        {
+          type: 'paragraph',
+          content: [
+            { type: 'text', text: 'One', marks: [{ type: 'bold' }] },
+            { type: 'hardBreak', marks: [{ type: 'bold' }] },
+            { type: 'text', text: 'Two', marks: [{ type: 'bold' }] },
+          ],
+        },
+      ],
+    });
+    expect(richTextToPlainText(content)).toBe('\n\n\n\n\n\nOne\nTwo');
+    expect(richTextSchema.safeParse({ type: 'doc' }).success).toBe(false);
+    expect(
+      richTextSchema.safeParse({
+        type: 'doc',
+        content: [{ type: 'bulletList' }],
+      }).success,
+    ).toBe(false);
+  });
   it('rejects deeply nested content without recursive parser exhaustion', () => {
     let nested: unknown = { type: 'paragraph', content: [] };
     for (let depth = 0; depth < 2000; depth++)

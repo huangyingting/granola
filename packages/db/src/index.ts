@@ -17,6 +17,7 @@ import {
 import type { z } from 'zod';
 import type { summaryRequestSchema } from '@windows-ai-notes/contracts/server';
 import {
+  canonicalJson,
   richTextToPlainText,
   type RichTextDocument,
 } from '@windows-ai-notes/contracts/content';
@@ -112,21 +113,7 @@ export function requireDatabaseUrl(
 }
 export const digest = (value: unknown, canonical = false): string =>
   createHash('sha256')
-    .update(
-      JSON.stringify(
-        value,
-        canonical
-          ? (_key, item: unknown) =>
-              item && typeof item === 'object' && !Array.isArray(item)
-                ? Object.fromEntries(
-                    Object.entries(item).sort(([a], [b]) =>
-                      a < b ? -1 : a > b ? 1 : 0,
-                    ),
-                  )
-                : item
-          : undefined,
-      ),
-    )
+    .update(canonical ? canonicalJson(value) : JSON.stringify(value))
     .digest('hex');
 
 export class Database {

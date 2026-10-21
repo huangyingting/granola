@@ -30,6 +30,17 @@ export interface RichTextDocument {
   type: 'doc';
   content: RichTextNode[];
 }
+export function canonicalJson(value: unknown): string {
+  const json = JSON.stringify(value, (_key, item: unknown) =>
+    item && typeof item === 'object' && !Array.isArray(item)
+      ? Object.fromEntries(
+          Object.entries(item).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+        )
+      : item,
+  );
+  if (json === undefined) throw new Error('A JSON value is required.');
+  return json;
+}
 const plainText = z
   .string()
   .max(40_000)
@@ -103,11 +114,15 @@ function isRichText(value: unknown): value is RichTextDocument {
     )
       return false;
     const leaf = ['text', 'hardBreak', 'horizontalRule'].includes(node.type);
-    if (leaf ? node.content !== undefined : !node.content) return false;
+    if (
+      (leaf && node.content !== undefined) ||
+      (node.type === 'doc' && !node.content)
+    )
+      return false;
     if ((node.type === 'text') !== (node.text !== undefined)) return false;
     if (
       node.marks &&
-      (node.type !== 'text' ||
+      (!['text', 'hardBreak'].includes(node.type) ||
         new Set(node.marks.map((mark) => mark.type)).size !== node.marks.length)
     )
       return false;

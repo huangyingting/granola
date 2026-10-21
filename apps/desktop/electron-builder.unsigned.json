@@ -1,0 +1,23 @@
+{
+  "appId": "io.github.windowsainotes.desktop",
+  "productName": "Windows AI Notes Preview",
+  "artifactName": "windows-ai-notes-${version}-${arch}-unsigned.${ext}",
+  "directories": { "output": "../../artifacts/desktop" },
+  "files": [
+    "dist/main/**/*.js",
+    "!dist/main/**/*.test.js",
+    "dist/preload.cjs",
+    "dist/renderer/**/*",
+    "package.json"
+  ],
+  "asar": true,
+  "forceCodeSigning": false,
+  "npmRebuild": false,
+  "win": { "target": ["nsis"] },
+  "nsis": {
+    "oneClick": false,
+    "perMachine": false,
+    "allowToChangeInstallationDirectory": true,
+    "deleteAppDataOnUninstall": false
+  }
+}

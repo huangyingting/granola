@@ -6,7 +6,8 @@
   "exports": {
     ".": "./dist/index.js",
     "./server": "./dist/server.js",
-    "./content": "./dist/content.js"
+    "./content": "./dist/content.js",
+    "./desktop": "./dist/desktop.js"
   },
   "dependencies": {
     "zod": "^4.1.0"

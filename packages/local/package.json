@@ -1,0 +1,13 @@
+{
+  "name": "@windows-ai-notes/local",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "dependencies": {
+    "@windows-ai-notes/contracts": "workspace:*",
+    "zod": "^4.1.0"
+  }
+}

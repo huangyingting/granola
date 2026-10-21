@@ -1,0 +1,563 @@
+import React, { useEffect, useRef, useState } from 'react';
+import { createRoot } from 'react-dom/client';
+import { EditorContent, useEditor } from '@tiptap/react';
+import StarterKit from '@tiptap/starter-kit';
+import {
+  richTextSchema,
+  richTextToPlainText,
+  tagsSchema,
+} from '@windows-ai-notes/contracts/content';
+import type {
+  DesktopBridge,
+  DesktopCommand,
+  DesktopState,
+  Draft,
+  EditableDraft,
+} from '@windows-ai-notes/contracts/desktop';
+import './style.css';
+
+declare global {
+  interface Window {
+    notes: DesktopBridge;
+  }
+}
+const labels = {
+  local: 'Saved locally',
+  pending: 'Sync pending',
+  synced: 'Synced',
+  conflict: 'Needs a decision',
+  deleted_remote: 'Local recovery',
+};
+
+function App() {
+  const [state, setState] = useState<DesktopState | null>(null);
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  const [query, setQuery] = useState('');
+  const [page, setPage] = useState<'notes' | 'storage'>('notes');
+  const flush = useRef<() => Promise<boolean>>(async () => true);
+  async function invoke(command: DesktopCommand) {
+    try {
+      const response = await window.notes.invoke(command);
+      if (!response.ok) {
+        setError(response.error.message);
+        return null;
+      }
+      setState(response.state);
+      if (command.operation !== 'save') setError('');
+      if (response.notice === 'exported')
+        setNotice('Unencrypted export saved.');
+      return response.state;
+    } catch {
+      setError(
+        'The desktop connection failed. Your editor text is still here.',
+      );
+      return null;
+    }
+  }
+  useEffect(() => {
+    void invoke({ operation: 'bootstrap' });
+    return window.notes.onFlush((nonce) => {
+      void flush
+        .current()
+        .then((saved) => {
+          if (saved)
+            return window.notes.invoke({ operation: 'closeReady', nonce });
+          return undefined;
+        })
+        .catch(() =>
+          setError('Notes could not be saved. The window was kept open.'),
+        );
+    });
+  }, []);
+  const selected =
+    state?.documents.find((document) => document.id === state.selected_id) ??
+    null;
+  const documents =
+    state?.documents.filter((document) =>
+      `${document.title} ${document.tags.join(' ')} ${richTextToPlainText(document.content)}`
+        .toLowerCase()
+        .includes(query.toLowerCase()),
+    ) ?? [];
+  async function create() {
+    if (!(await flush.current())) return;
+    setPage('notes');
+    await invoke({ operation: 'create' });
+  }
+  return (
+    <div className="shell">
+      <aside className="sidebar">
+        <div className="brand">
+          <span className="brand-mark">n</span>
+          <div>
+            Notes<span className="subtle">A little more clarity</span>
+          </div>
+        </div>
+        <button
+          className="primary new-note"
+          onClick={() => void create()}
+          disabled={!state}
+        >
+          + New meeting
+        </button>
+        <label className="search">
+          <span aria-hidden="true">&#x2315;</span>
+          <input
+            aria-label="Search meetings"
+            placeholder="Find a thought..."
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+          />
+        </label>
+        <div className="list-label">
+          YOUR MEETINGS <span>{documents.length}</span>
+        </div>
+        <nav className="meeting-list" aria-label="Meetings">
+          {documents.map((document) => (
+            <button
+              key={document.id}
+              className={`meeting-card ${selected?.id === document.id ? 'selected' : ''}`}
+              onClick={() => {
+                void (async () => {
+                  if (!(await flush.current())) return;
+                  setPage('notes');
+                  await invoke({ operation: 'select', id: document.id });
+                })();
+              }}
+            >
+              <span className="meeting-title">
+                {document.title || 'Untitled meeting'}
+              </span>
+              <span className="meeting-preview">
+                {richTextToPlainText(document.content).slice(0, 64) ||
+                  'A clean page for your next conversation'}
+              </span>
+              <span className="meeting-meta">
+                {new Date(document.updated_at).toLocaleDateString(undefined, {
+                  month: 'short',
+                  day: 'numeric',
+                })}
+                <span
+                  className={`status-dot ${document.status === 'conflict' ? 'attention' : ''}`}
+                />
+                {labels[document.status]}
+              </span>
+            </button>
+          ))}
+        </nav>
+        <button
+          className="storage-button"
+          onClick={() => {
+            void flush.current().then((saved) => {
+              if (saved) setPage('storage');
+            });
+          }}
+        >
+          Local data & privacy <span aria-hidden="true">&#x2197;</span>
+        </button>
+        <div className="preview-label">Developer preview</div>
+      </aside>
+      <main>
+        <header className="topbar">
+          <span>
+            {page === 'storage'
+              ? 'Your space, your control'
+              : 'MEETING WORKSPACE'}
+          </span>
+          <span className={`privacy-chip ${state ? '' : 'locked'}`}>
+            {state ? 'Encrypted on this device' : 'Storage unavailable'}
+          </span>
+        </header>
+        {error && (
+          <div className="error-banner" role="alert">
+            {error}
+            {state && (
+              <button onClick={() => void flush.current()}>Retry save</button>
+            )}
+            <button
+              onClick={() => void invoke({ operation: 'openRecoveryFolder' })}
+            >
+              Open recovery folder
+            </button>
+          </div>
+        )}
+        {notice && (
+          <div className="notice" role="status">
+            {notice}
+            <button
+              aria-label="Dismiss notification"
+              onClick={() => setNotice('')}
+            >
+              &#xd7;
+            </button>
+          </div>
+        )}
+        {page === 'storage' ? (
+          <section className="privacy-page">
+            <span className="eyebrow">LOCAL FIRST</span>
+            <h1>
+              Room for your thoughts.
+              <br />
+              Not your worries.
+            </h1>
+            <div className="privacy-grid">
+              <article>
+                <span className="tile-icon">01</span>
+                <h2>Private by default</h2>
+                <p>
+                  Notes and saved operations are encrypted before they reach the
+                  local database.
+                </p>
+              </article>
+              <article>
+                <span className="tile-icon teal">02</span>
+                <h2>Yours, even offline</h2>
+                <p>
+                  This preview saves on your device. Cloud connection and
+                  recording are not enabled in this checkpoint.
+                </p>
+              </article>
+              <article>
+                <span className="tile-icon rose">03</span>
+                <h2>Keep your recovery files</h2>
+                <p>
+                  Your Windows account protects the content key. Moving
+                  encrypted files alone is not a backup you can unlock on
+                  another PC.
+                </p>
+                <button
+                  className="secondary"
+                  onClick={() =>
+                    void invoke({ operation: 'openRecoveryFolder' })
+                  }
+                >
+                  Open local data folder
+                </button>
+              </article>
+            </div>
+            <p className="quiet-note">
+              Exports are unencrypted files. Save them only where you intend to
+              share or retain readable notes.
+            </p>
+          </section>
+        ) : selected ? (
+          <Note
+            key={selected.id}
+            draft={selected}
+            flush={flush}
+            invoke={invoke}
+            setError={setError}
+          />
+        ) : (
+          <section className="empty">
+            <div className="empty-orbit">
+              <span>n</span>
+            </div>
+            <span className="eyebrow">LESS TO MANAGE. MORE TO REMEMBER.</span>
+            <h1>
+              Make room for
+              <br />
+              your next great thought.
+            </h1>
+            <p>
+              Start with a clean page. Your notes save privately,
+              <br />
+              even when the rest of the world is offline.
+            </p>
+            <button
+              className="primary"
+              onClick={() => void create()}
+              disabled={!state}
+            >
+              Create your first meeting <span aria-hidden="true">&#x2192;</span>
+            </button>
+          </section>
+        )}
+      </main>
+    </div>
+  );
+}
+
+type Invoke = (command: DesktopCommand) => Promise<DesktopState | null>;
+function Note({
+  draft,
+  flush,
+  invoke,
+  setError,
+}: {
+  draft: Draft;
+  flush: React.RefObject<() => Promise<boolean>>;
+  invoke: Invoke;
+  setError: (message: string) => void;
+}) {
+  const [title, setTitle] = useState(draft.title);
+  const [tagText, setTagText] = useState(draft.tags.join(', '));
+  const [saving, setSaving] = useState(false);
+  const [unsaved, setUnsaved] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const current = useRef(draft);
+  const value = useRef<EditableDraft>({
+    title: draft.title,
+    content: draft.content,
+    tags: draft.tags,
+  });
+  const pending = useRef(false);
+  const running = useRef<Promise<boolean> | null>(null);
+  const invalid = useRef(new Set<'content' | 'tags'>());
+  const editor = useEditor({
+    extensions: [StarterKit.configure({ link: false })],
+    content: draft.content,
+    injectCSS: false,
+    editorProps: {
+      attributes: {
+        'aria-label': 'Meeting notes',
+        role: 'textbox',
+        'aria-multiline': 'true',
+      },
+    },
+    onUpdate: ({ editor }) => {
+      const parsed = richTextSchema.safeParse(editor.getJSON());
+      if (!parsed.success) {
+        invalid.current.add('content');
+        pending.current = true;
+        setUnsaved(true);
+        setError(
+          'These notes exceed the supported format or size. Undo or shorten them before closing; this text has not been saved.',
+        );
+        return;
+      }
+      invalid.current.delete('content');
+      value.current = { ...value.current, content: parsed.data };
+      pending.current = true;
+      setUnsaved(true);
+      void save();
+    },
+  });
+  async function save(): Promise<boolean> {
+    if (running.current) return running.current;
+    const operation = (async () => {
+      setSaving(true);
+      try {
+        while (pending.current) {
+          if (invalid.current.size) return false;
+          setError('');
+          pending.current = false;
+          const snapshot = value.current;
+          const result = await invoke({
+            operation: 'save',
+            id: draft.id,
+            local_revision: current.current.local_revision,
+            value: snapshot,
+          });
+          if (!result) {
+            pending.current = true;
+            return false;
+          }
+          const updated = result.documents.find(
+            (document) => document.id === draft.id,
+          );
+          if (!updated) {
+            pending.current = true;
+            setError(
+              'This draft is no longer available. Keep the editor open to preserve your text.',
+            );
+            return false;
+          }
+          current.current = updated;
+        }
+        return true;
+      } finally {
+        setUnsaved(pending.current || invalid.current.size > 0);
+        setSaving(false);
+      }
+    })();
+    running.current = operation;
+    try {
+      return await operation;
+    } finally {
+      running.current = null;
+    }
+  }
+  useEffect(() => {
+    flush.current = save;
+    return () => {
+      flush.current = async () => true;
+    };
+  }, []);
+  function changeTitle(text: string) {
+    setTitle(text);
+    value.current = { ...value.current, title: text };
+    pending.current = true;
+    setUnsaved(true);
+    void save();
+  }
+  function changeTags(text: string) {
+    setTagText(text);
+    const tags = text
+      .split(',')
+      .map((tag) => tag.trim())
+      .filter(Boolean);
+    const parsed = tagsSchema.safeParse(tags);
+    if (!parsed.success) {
+      invalid.current.add('tags');
+      pending.current = true;
+      setUnsaved(true);
+      setError(
+        'Use up to 16 unique tags, with at most 40 characters each and no control characters.',
+      );
+      return;
+    }
+    invalid.current.delete('tags');
+    value.current = { ...value.current, tags: parsed.data };
+    pending.current = true;
+    setUnsaved(true);
+    void save();
+  }
+  const format = (name: string, active: boolean, action: () => void) => (
+    <button
+      className={active ? 'active' : ''}
+      aria-label={name}
+      aria-pressed={active}
+      onClick={action}
+    >
+      {name}
+    </button>
+  );
+  return (
+    <section className="note-page">
+      <div className="document-actions">
+        <span className="eyebrow" role="status">
+          {saving ? 'SAVING...' : unsaved ? 'NOT SAVED' : 'SAVED LOCALLY'}
+        </span>
+        <div>
+          <button
+            className="secondary"
+            onClick={() => {
+              void save().then((saved) => {
+                if (saved)
+                  return invoke({
+                    operation: 'export',
+                    id: draft.id,
+                    format: 'markdown',
+                  });
+                return null;
+              });
+            }}
+          >
+            Export Markdown
+          </button>
+          <button
+            className="quiet-button"
+            onClick={() => {
+              void save().then((saved) => {
+                if (saved)
+                  return invoke({
+                    operation: 'export',
+                    id: draft.id,
+                    format: 'text',
+                  });
+                return null;
+              });
+            }}
+          >
+            Plain text
+          </button>
+          <button
+            className="quiet-button danger"
+            onClick={() => setConfirmDelete(!confirmDelete)}
+          >
+            Delete
+          </button>
+        </div>
+      </div>
+      {confirmDelete && (
+        <div className="delete-confirm">
+          <div>
+            <strong>Delete this local meeting?</strong>
+            <p>This removes the saved notes from this device.</p>
+          </div>
+          <button className="secondary" onClick={() => setConfirmDelete(false)}>
+            Keep notes
+          </button>
+          <button
+            className="danger-button"
+            onClick={() => {
+              void save().then((saved) => {
+                if (saved)
+                  return invoke({
+                    operation: 'delete',
+                    id: draft.id,
+                    confirmed: true,
+                  });
+                return null;
+              });
+            }}
+          >
+            Delete meeting
+          </button>
+        </div>
+      )}
+      <input
+        className="title-input"
+        aria-label="Meeting title"
+        placeholder="Untitled meeting"
+        maxLength={200}
+        value={title}
+        onChange={(event) => changeTitle(event.target.value)}
+      />
+      <div className="note-caption">
+        {new Date(draft.created_at).toLocaleDateString(undefined, {
+          weekday: 'long',
+          month: 'long',
+          day: 'numeric',
+        })}
+        <span>&#x2022;</span>
+        <input
+          aria-label="Meeting tags"
+          placeholder="Add tags, separated by commas"
+          value={tagText}
+          onChange={(event) => changeTags(event.target.value)}
+        />
+      </div>
+      <div
+        className="editor-toolbar"
+        role="toolbar"
+        aria-label="Text formatting"
+      >
+        {format('Bold', editor?.isActive('bold') ?? false, () => {
+          editor?.chain().focus().toggleBold().run();
+        })}
+        {format('Italic', editor?.isActive('italic') ?? false, () => {
+          editor?.chain().focus().toggleItalic().run();
+        })}
+        {format('Heading', editor?.isActive('heading') ?? false, () => {
+          editor?.chain().focus().toggleHeading({ level: 2 }).run();
+        })}
+        {format('Bullet list', editor?.isActive('bulletList') ?? false, () => {
+          editor?.chain().focus().toggleBulletList().run();
+        })}
+        {format('Quote', editor?.isActive('blockquote') ?? false, () => {
+          editor?.chain().focus().toggleBlockquote().run();
+        })}
+      </div>
+      <EditorContent editor={editor} className="editor" />
+      <footer className="editor-footer">
+        <span>
+          {
+            richTextToPlainText(value.current.content)
+              .trim()
+              .split(/\s+/u)
+              .filter(Boolean).length
+          }{' '}
+          words
+        </span>
+        <span>
+          Exports are unencrypted. Cloud and audio integration are coming next.
+        </span>
+      </footer>
+    </section>
+  );
+}
+const root = document.getElementById('root');
+if (!root) throw new Error('The application root is missing.');
+createRoot(root).render(<App />);
