@@ -282,10 +282,16 @@ export class Database {
     id: string,
     tx?: Transaction,
   ): Promise<Document> {
-    const result = await (tx ?? this.pool).query<Document>(
-      documentQuery + (tx ? ' FOR UPDATE OF d' : ''),
-      [id, userId],
-    );
+    // A locking revision join can recheck a new document against an old note row after waiting.
+    if (tx)
+      await tx.query(
+        'SELECT id FROM documents WHERE id=$1 AND owner_id=$2 AND deleted_at IS NULL FOR UPDATE',
+        [id, userId],
+      );
+    const result = await (tx ?? this.pool).query<Document>(documentQuery, [
+      id,
+      userId,
+    ]);
     if (!result.rows[0])
       throw new ServiceError(
         'document_not_found',
@@ -901,12 +907,15 @@ export class Database {
     transcript?: Segment[],
   ): Promise<boolean> {
     return this.transaction(async (tx) => {
+      await tx.query('SELECT id FROM documents WHERE id=$1 FOR UPDATE', [
+        job.documentId,
+      ]);
       const doc = (
         await tx.query<{ transcript_revision: number; allowed: boolean }>(
           `
         SELECT d.transcript_revision,(d.deleted_at IS NULL AND m.active AND u.active) allowed FROM documents d
         JOIN memberships m ON m.workspace_id=d.workspace_id AND m.user_id=d.owner_id JOIN users u ON u.id=d.owner_id
-        WHERE d.id=$1 FOR UPDATE OF d`,
+        WHERE d.id=$1`,
           [job.documentId],
         )
       ).rows[0];

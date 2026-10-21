@@ -1066,6 +1066,116 @@ describe.skipIf(!databaseUrl)('PostgreSQL API and durable AI worker', () => {
       ).changes.map((change) => change.document_id),
     ).toEqual([a.id, b.id]);
   });
+  it('returns a revision conflict after waiting for another committed document version', async () => {
+    const owner = await actor();
+    const doc = await document(owner);
+    const name = `revision_lock_${randomUUID()}`;
+    const url = new URL(scopedUrl);
+    url.searchParams.set('application_name', name);
+    const competing = new Database(url.href);
+    const server = await createServer(competing, {
+      mode: 'development',
+      host: '127.0.0.1',
+    });
+    const lock = await db.pool.connect();
+    try {
+      await lock.query('BEGIN');
+      await lock.query('SELECT id FROM documents WHERE id=$1 FOR UPDATE', [
+        doc.id,
+      ]);
+      await lock.query('UPDATE documents SET revision=2 WHERE id=$1', [doc.id]);
+      await lock.query(
+        'INSERT INTO note_versions (document_id,revision,notes) VALUES ($1,2,$2)',
+        [doc.id, 'Committed first.'],
+      );
+      await recordChange(lock, doc.id, 'document');
+      const response = server
+        .inject({
+          method: 'PUT',
+          url: `/v1/documents/${doc.id}/notes`,
+          headers: owner.headers,
+          payload: { base_revision: 1, notes: 'Stale competing save.' },
+        })
+        .then((result) => result);
+      await vi.waitFor(
+        async () => {
+          const activity = await db.pool.query<{
+            wait_event_type: string | null;
+          }>(
+            'SELECT wait_event_type FROM pg_stat_activity WHERE application_name=$1',
+            [name],
+          );
+          expect(
+            activity.rows.some((row) => row.wait_event_type === 'Lock'),
+          ).toBe(true);
+        },
+        { timeout: 2000, interval: 10 },
+      );
+      await lock.query('COMMIT');
+      const result = await response;
+      expect(result.statusCode).toBe(409);
+      expect(result.json()).toMatchObject({
+        code: 'revision_conflict',
+        current_revision: 2,
+      });
+    } finally {
+      await lock.query('ROLLBACK');
+      lock.release();
+      await server.close();
+      await competing.close();
+    }
+  });
+  it('rechecks membership after waiting for a document lock during worker completion', async () => {
+    const owner = await actor();
+    const doc = await document(owner);
+    const job = await enqueue(owner, doc.id);
+    const claimed = (await db.claim())!;
+    const name = `completion_lock_${randomUUID()}`;
+    const url = new URL(scopedUrl);
+    url.searchParams.set('application_name', name);
+    const competing = new Database(url.href);
+    const lock = await db.pool.connect();
+    try {
+      await lock.query('BEGIN');
+      await lock.query('SELECT id FROM documents WHERE id=$1 FOR UPDATE', [
+        doc.id,
+      ]);
+      const completed = competing.finish(claimed, null, {
+        code: 'late',
+        message: 'Late failure.',
+        retryable: false,
+      });
+      await vi.waitFor(
+        async () => {
+          const activity = await db.pool.query<{
+            wait_event_type: string | null;
+          }>(
+            'SELECT wait_event_type FROM pg_stat_activity WHERE application_name=$1',
+            [name],
+          );
+          expect(
+            activity.rows.some((row) => row.wait_event_type === 'Lock'),
+          ).toBe(true);
+        },
+        { timeout: 2000, interval: 10 },
+      );
+      await db.pool.query(
+        'UPDATE memberships SET active=false WHERE workspace_id=$1 AND user_id=$2',
+        [owner.workspace_id, owner.user_id],
+      );
+      await lock.query('COMMIT');
+      expect(await completed).toBe(false);
+      await db.pool.query(
+        'UPDATE memberships SET active=true WHERE workspace_id=$1 AND user_id=$2',
+        [owner.workspace_id, owner.user_id],
+      );
+      expect((await db.job(owner.user_id, job.id)).state).toBe('cancelled');
+    } finally {
+      await lock.query('ROLLBACK');
+      lock.release();
+      await competing.close();
+    }
+  });
   it('makes durable job history and lifecycle changes discoverable without exposing inputs', async () => {
     const owner = await actor();
     const other = await actor(owner.workspace_id);
