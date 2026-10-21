@@ -6,6 +6,7 @@
     { "path": "../contracts" },
     { "path": "../local" },
     { "path": "../db" },
+    { "path": "../storage" },
     { "path": "../../apps/api" }
   ]
 }

@@ -13,6 +13,7 @@ import {
   registerChunkSchema,
   recordingSealSchema,
   uploadAuthorizationSchema,
+  recordingCapabilitiesSchema,
 } from '@windows-ai-notes/contracts/uploads';
 import { validateWav } from '@windows-ai-notes/ai/wav';
 import { principal } from './auth.js';
@@ -92,15 +93,17 @@ export function registerRecordingRoutes(
     });
     app.addHook('onClose', async () => configured.close());
   }
-  app.get('/v1/recording-capabilities', async () => ({
-    enabled: configured !== null,
-    max_chunk_bytes: 960_044,
-    max_chunks: 10_000,
-    upload_origin: configured
-      ? new URL(configured.config.endpoint).origin
-      : null,
-    multipart: false,
-  }));
+  app.get('/v1/recording-capabilities', async () =>
+    recordingCapabilitiesSchema.parse({
+      enabled: configured !== null,
+      max_chunk_bytes: 960_044,
+      max_chunks: 10_000,
+      upload_origin: configured
+        ? new URL(configured.config.endpoint).origin
+        : null,
+      multipart: false,
+    }),
+  );
   app.post('/v1/documents/:id/recordings', async (request, reply) => {
     const { id } = parse(idParams, request.params);
     const input = parse(createRecordingSchema, request.body);

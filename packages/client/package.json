@@ -4,6 +4,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./uploads": {
+      "types": "./dist/uploads.d.ts",
+      "import": "./dist/uploads.js"
+    },
     "./recording": {
       "types": "./dist/recording.d.ts",
       "import": "./dist/recording.js"
@@ -36,6 +40,8 @@
     "zod": "^4.1.0"
   },
   "devDependencies": {
+    "@aws-sdk/client-s3": "^3.900.0",
+    "@windows-ai-notes/storage": "workspace:*",
     "@windows-ai-notes/api": "workspace:*",
     "@windows-ai-notes/db": "workspace:*"
   }

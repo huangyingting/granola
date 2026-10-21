@@ -14,14 +14,14 @@ Buffer.from(
 ).copy(wav);
 wav.writeUInt32LE(wav.length - 8, 4);
 wav.writeUInt32LE(wav.length - 44, 40);
-const recording = '75048e79-2b45-440f-8609-b80a37635b4a';
-const track = 'ece5191a-347b-40a2-8d09-82565aa396a1';
+const recording = process.argv[4] ?? '75048e79-2b45-440f-8609-b80a37635b4a';
+const track = process.argv[5] ?? 'ece5191a-347b-40a2-8d09-82565aa396a1';
 const upload = {
   chunk: {
     format_version: 1,
     recording_id: recording,
     track_id: track,
-    chunk_id: '9c73575e-426d-4f72-98ed-7b4479f890ab',
+    chunk_id: process.argv[6] ?? '9c73575e-426d-4f72-98ed-7b4479f890ab',
     capture_epoch: 'e9393508-f494-417d-b968-9ebc3a5fd4c1',
     sequence: 0,
     sample_start: 0,

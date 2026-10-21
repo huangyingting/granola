@@ -4,6 +4,15 @@ import { resourceId } from './server.js';
 
 export const MAX_RECORDING_CHUNKS = 10_000;
 export const MAX_RECORDING_SAMPLES = 4 * 60 * 60 * 16_000;
+export const recordingCapabilitiesSchema = z
+  .strictObject({
+    enabled: z.boolean(),
+    max_chunk_bytes: z.literal(960_044),
+    max_chunks: z.literal(MAX_RECORDING_CHUNKS),
+    upload_origin: z.url().nullable(),
+    multipart: z.literal(false),
+  })
+  .refine((value) => value.enabled === (value.upload_origin !== null));
 export const recordingTrackSchema = z.strictObject({
   spec: trackSchema,
   actual_device_id: z.string().min(1).max(1024),

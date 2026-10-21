@@ -300,7 +300,12 @@ authorizations/in-flight checks, retries failures and resweeps tombstones for
 late PUTs. `cleanup_confirmed` describes the last successful sweep, not an
 instantaneous erasure guarantee. Independent backup deletion-ledger replay,
 retention policies and production storage drills remain release work.
-The desktop uploader and complete-meeting transcription are not connected yet.
+The main-process transfer core reads authenticated native ranges, checks the
+approved object origin/staging path and immutable checksum, excludes API
+credentials, rejects redirects, and reconciles already-verified chunks after a
+lost response without rereading local media. Durable desktop upload
+intent/progress/retry and consent UI, plus complete-meeting transcription, are
+not connected yet. Local recordings are never removed by the transfer core.
 
 ### Server API
 
