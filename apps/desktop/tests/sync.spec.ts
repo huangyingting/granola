@@ -7,7 +7,7 @@ import {
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { desktopFixture } from '../../../../packages/client/src/desktop.fixture.js';
+import { desktopFixture } from '../../../packages/client/src/desktop.fixture.js';
 
 test.skip(
   process.platform !== 'win32',
