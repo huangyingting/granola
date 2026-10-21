@@ -79,10 +79,14 @@ test('connects through real OIDC, requires offline-copy consent, syncs edits and
       .getByRole('button', { name: 'Sign in with browser', exact: true })
       .click();
     await expect(
-      page.getByRole('button', { name: /Synthetic cloud workspace/ }),
+      page.getByRole('button', {
+        name: /^Synthetic cloud workspace (Open workspace|Current workspace)$/,
+      }),
     ).toBeVisible();
     await page
-      .getByRole('button', { name: /Synthetic cloud workspace/ })
+      .getByRole('button', {
+        name: /^Synthetic cloud workspace (Open workspace|Current workspace)$/,
+      })
       .click();
     await expect(
       page.getByRole('textbox', { name: 'Meeting notes', exact: true }),
@@ -93,7 +97,9 @@ test('connects through real OIDC, requires offline-copy consent, syncs edits and
       .getByRole('checkbox', { name: /Copy my device-only drafts/ })
       .check();
     await page
-      .getByRole('button', { name: /Synthetic cloud workspace/ })
+      .getByRole('button', {
+        name: /^Synthetic cloud workspace (Open workspace|Current workspace)$/,
+      })
       .click();
     await expect
       .poll(() =>
@@ -184,7 +190,9 @@ test('preserves stale-editor text as a new copy and clears even invalid editor c
       .getByRole('button', { name: 'Sign in with browser', exact: true })
       .click();
     await page
-      .getByRole('button', { name: /Synthetic cloud workspace/ })
+      .getByRole('button', {
+        name: /^Synthetic cloud workspace (Open workspace|Current workspace)$/,
+      })
       .click();
     const editor = page.getByRole('textbox', {
       name: 'Meeting notes',
