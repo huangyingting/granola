@@ -123,7 +123,7 @@ try
                     var state = session.Store.Status().State;
                     if (request.Command == "start_live_preview")
                     {
-                        await Emit("recording.live_started", session.StartLive(), request.RequestId, request.RecordingId);
+                        await Emit("recording.live_started", session.StartLive(request.MaxBufferedMs ?? 5000), request.RequestId, request.RecordingId);
                     }
                     else if (request.Command is "read_live_audio" or "stop_live_preview")
                     {

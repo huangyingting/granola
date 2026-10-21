@@ -37,9 +37,11 @@
     "@windows-ai-notes/contracts": "workspace:*",
     "@windows-ai-notes/local": "workspace:*",
     "jose": "^6.1.0",
+    "ws": "8.22.0",
     "zod": "^4.1.0"
   },
   "devDependencies": {
+    "@types/ws": "8.18.2",
     "@windows-ai-notes/worker": "workspace:*",
     "@aws-sdk/client-s3": "^3.900.0",
     "@windows-ai-notes/storage": "workspace:*",

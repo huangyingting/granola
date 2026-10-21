@@ -124,6 +124,57 @@ public sealed class LivePcmTests
     }
 
     [Theory]
+    [InlineData(50)]
+    [InlineData(2500)]
+    [InlineData(5000)]
+    public void SmallerPreviewBudgetBoundsBothSamplesAndAgeWithoutChangingTheReadBatch(int milliseconds)
+    {
+        using var buffer = new PcmLiveBuffer(recording, epoch, [microphone, system], milliseconds);
+        foreach (var track in new[] { microphone, system })
+            buffer.Append(track, epoch, 0, new byte[milliseconds * 32], 0, milliseconds);
+        var snapshot = buffer.Snapshot();
+        Assert.Equal("active", snapshot.State);
+        Assert.All(snapshot.Tracks, track => Assert.Equal(milliseconds * 16, track.BufferedSamples));
+        var batch = buffer.Read(milliseconds);
+        Assert.Equal(Math.Min(milliseconds / 50 * 2, PcmLiveBuffer.MaxFramesPerRead), batch.Frames.Length);
+        buffer.Read(milliseconds + 1);
+        if (milliseconds > 50)
+        {
+            Assert.Equal("live_overrun", buffer.Snapshot().Code);
+            Assert.All(buffer.Snapshot().Tracks, track => Assert.Equal(0, track.BufferedSamples));
+        }
+    }
+
+    [Fact]
+    public void DesktopBudgetFailsAtTwoAndAHalfSecondsNotAtTheLegacyFiveSecondLimit()
+    {
+        using var buffer = new PcmLiveBuffer(recording, epoch, [microphone, system], 2500);
+        buffer.Append(system, epoch, 0, new byte[400], 0, 12.5);
+        buffer.Append(microphone, epoch, 0, new byte[80_000], 0, 2500);
+        Assert.Equal("active", buffer.Snapshot().State);
+        buffer.Append(microphone, epoch, 40_000, new byte[2], 2500, 2500.0625);
+        Assert.Equal("live_overrun", buffer.Snapshot().Code);
+        Assert.Empty(buffer.Read(2501).Frames);
+        Assert.All(buffer.Snapshot().Tracks, track => Assert.Equal(0, track.BufferedSamples));
+        using var partial = new PcmLiveBuffer(recording, epoch, [microphone], 2500);
+        partial.Append(microphone, epoch, 0, new byte[400], 0, 12.5);
+        Assert.Empty(partial.Read(2501).Frames);
+        Assert.Equal("live_overrun", partial.Snapshot().Code);
+    }
+
+    [Theory]
+    [InlineData(-50)]
+    [InlineData(0)]
+    [InlineData(25)]
+    [InlineData(51)]
+    [InlineData(5001)]
+    [InlineData(int.MaxValue)]
+    public void RejectsInvalidPreviewBudget(int milliseconds)
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() => new PcmLiveBuffer(recording, epoch, [microphone], milliseconds));
+    }
+
+    [Theory]
     [InlineData("source", "invalid_live_pcm")]
     [InlineData("epoch", "invalid_live_pcm")]
     [InlineData("odd", "invalid_live_pcm")]
@@ -167,8 +218,10 @@ public sealed class LivePcmTests
         Assert.Empty(buffer.Read(0).Frames);
     }
 
-    [Fact]
-    public void LiveFailureDoesNotInterruptEncryptedChunkPersistenceOrClaimSavedSamplesEarly()
+    [Theory]
+    [InlineData(5000)]
+    [InlineData(2500)]
+    public void LiveFailureDoesNotInterruptEncryptedChunkPersistenceOrClaimSavedSamplesEarly(int milliseconds)
     {
         var root = Path.Combine(Path.GetTempPath(), "windows-ai-notes-tests", Guid.NewGuid().ToString("D"));
         try
@@ -178,7 +231,7 @@ public sealed class LivePcmTests
             var store = new RecordingStore(root, recording, [spec], protector);
             var writer = new PcmChunkWriter(store, microphone);
             writer.BeginEpoch(epoch);
-            using var buffer = new PcmLiveBuffer(recording, epoch, [microphone]);
+            using var buffer = new PcmLiveBuffer(recording, epoch, [microphone], milliseconds);
             var pcm = RandomNumberGenerator.GetBytes(32_000);
             for (var second = 0; second < 31; second++)
             {

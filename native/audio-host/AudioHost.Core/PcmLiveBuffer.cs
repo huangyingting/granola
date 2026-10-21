@@ -14,6 +14,8 @@ public sealed class PcmLiveBuffer : IDisposable
     public const int FrameSamples = 800;
     public const int MaxBufferedSamples = 16_000 * 5;
     public const int MaxFramesPerRead = 10;
+    private readonly int maxBufferedMs;
+    private readonly int maxBufferedSamples;
     private sealed class Track
     {
         public readonly byte[] Pending = new byte[FrameSamples * 2];
@@ -36,13 +38,17 @@ public sealed class PcmLiveBuffer : IDisposable
     public Guid PreviewId { get; } = Guid.NewGuid();
     public bool IsActive { get { lock (gate) return state == "active"; } }
 
-    public PcmLiveBuffer(Guid recordingId, Guid epoch, Guid[] trackIds)
+    public PcmLiveBuffer(Guid recordingId, Guid epoch, Guid[] trackIds, int maxBufferedMs = 5000)
     {
         if (recordingId == Guid.Empty || epoch == Guid.Empty || trackIds.Length is < 1 or > 2
             || trackIds.Any(id => id == Guid.Empty) || trackIds.Distinct().Count() != trackIds.Length)
             throw new ArgumentException("A live buffer requires one recording, epoch and distinct capture tracks.");
+        if (maxBufferedMs is < 50 or > 5000 || maxBufferedMs % 50 != 0)
+            throw new ArgumentOutOfRangeException(nameof(maxBufferedMs), "Live buffering must be 50 to 5000 milliseconds in complete frames.");
         this.recordingId = recordingId;
         this.epoch = epoch;
+        this.maxBufferedMs = maxBufferedMs;
+        maxBufferedSamples = maxBufferedMs * 16;
         tracks = trackIds.ToDictionary(id => id, _ => new Track());
     }
 
@@ -64,7 +70,7 @@ public sealed class PcmLiveBuffer : IDisposable
                 return;
             }
             if (pcm.Length == 0) return;
-            if (track.QueuedSamples + track.Length / 2 + pcm.Length / 2 > MaxBufferedSamples || Expired(endMs))
+            if (track.QueuedSamples + track.Length / 2 + pcm.Length / 2 > maxBufferedSamples || Expired(endMs))
             {
                 Fail("live_overrun");
                 return;
@@ -133,8 +139,8 @@ public sealed class PcmLiveBuffer : IDisposable
         tracks.Select(pair => new LiveTrackCursor(pair.Key, pair.Value.SampleEnd,
             pair.Value.QueuedSamples + pair.Value.Length / 2)).ToArray(), result);
 
-    private bool Expired(double clockMs) => frames.Any(frame => clockMs - frame.ClockStart > 5000)
-        || tracks.Values.Any(track => track.Length != 0 && clockMs - track.ClockStart > 5000);
+    private bool Expired(double clockMs) => frames.Any(frame => clockMs - frame.ClockStart > maxBufferedMs)
+        || tracks.Values.Any(track => track.Length != 0 && clockMs - track.ClockStart > maxBufferedMs);
 
     private void Fail(string reason)
     {

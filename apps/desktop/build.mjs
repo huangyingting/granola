@@ -3,17 +3,9 @@ import { build } from 'vite';
 import { fileURLToPath } from 'node:url';
 import { readFile, writeFile } from 'node:fs/promises';
 import { bundledNotices } from './licenses.mjs';
+import { bundleMain } from './bundle.mjs';
 
-const main = await bundle({
-  entryPoints: ['src/main/main.ts'],
-  outfile: 'dist/main/main.js',
-  platform: 'node',
-  format: 'esm',
-  bundle: true,
-  external: ['electron', 'node:*'],
-  target: 'node24',
-  metafile: true,
-});
+const main = await bundleMain('src/main/main.ts', 'dist/main/main.js');
 const preload = await bundle({
   entryPoints: ['src/preload.ts'],
   outfile: 'dist/preload.cjs',

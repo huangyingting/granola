@@ -257,5 +257,76 @@
       "recording_id": "75048e79-2b45-440f-8609-b80a37635b4a",
       "tracks": [null]
     }
+  },
+  {
+    "valid": true,
+    "request": {
+      "protocol_version": 1,
+      "request_id": "9c73575e-426d-4f72-98ed-7b4479f890ab",
+      "command": "start_live_preview",
+      "recording_id": "75048e79-2b45-440f-8609-b80a37635b4a",
+      "max_buffered_ms": 2500
+    }
+  },
+  {
+    "valid": true,
+    "request": {
+      "protocol_version": 1,
+      "request_id": "9c73575e-426d-4f72-98ed-7b4479f890ab",
+      "command": "start_live_preview",
+      "recording_id": "75048e79-2b45-440f-8609-b80a37635b4a",
+      "max_buffered_ms": 50
+    }
+  },
+  {
+    "valid": false,
+    "request": {
+      "protocol_version": 1,
+      "request_id": "9c73575e-426d-4f72-98ed-7b4479f890ab",
+      "command": "stop_live_preview",
+      "recording_id": "75048e79-2b45-440f-8609-b80a37635b4a",
+      "preview_id": "ece5191a-347b-40a2-8d09-82565aa396a1",
+      "max_buffered_ms": 2500
+    }
+  },
+  {
+    "valid": false,
+    "request": {
+      "protocol_version": 1,
+      "request_id": "9c73575e-426d-4f72-98ed-7b4479f890ab",
+      "command": "start_live_preview",
+      "recording_id": "75048e79-2b45-440f-8609-b80a37635b4a",
+      "max_buffered_ms": 0
+    }
+  },
+  {
+    "valid": false,
+    "request": {
+      "protocol_version": 1,
+      "request_id": "9c73575e-426d-4f72-98ed-7b4479f890ab",
+      "command": "start_live_preview",
+      "recording_id": "75048e79-2b45-440f-8609-b80a37635b4a",
+      "max_buffered_ms": 5001
+    }
+  },
+  {
+    "valid": false,
+    "request": {
+      "protocol_version": 1,
+      "request_id": "9c73575e-426d-4f72-98ed-7b4479f890ab",
+      "command": "start_live_preview",
+      "recording_id": "75048e79-2b45-440f-8609-b80a37635b4a",
+      "max_buffered_ms": 75
+    }
+  },
+  {
+    "valid": false,
+    "request": {
+      "protocol_version": 1,
+      "request_id": "9c73575e-426d-4f72-98ed-7b4479f890ab",
+      "command": "start_live_preview",
+      "recording_id": "75048e79-2b45-440f-8609-b80a37635b4a",
+      "max_buffered_ms": "2500"
+    }
   }
 ]

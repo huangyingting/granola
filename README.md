@@ -654,8 +654,49 @@ Real PostgreSQL/WebSocket tests cover fixed reservations, duplicate dispatch,
 real signed-token expiry, revocation/regrant, cursor replay/gaps, slow/broken
 consumers, late receipts/deletion, finish ordering and shutdown. A synthetic
 loopback test crosses the actual isolated Speech SDK, API WebSocket, durable
-cursor authorization and settlement without contacting Azure. Desktop transport,
-explicit consent and physical/semantic quality gates remain incomplete.
+cursor authorization and settlement without contacting Azure. Desktop capture
+orchestration, explicit consent and physical/semantic quality gates remain incomplete.
+
+### Main-owned live client transport
+
+`ApiClient.openLiveSource` provides the internal Node/Main transport; it is not
+yet exposed in the desktop UI. It uses the existing private credential factory
+for header-only authenticated WSS, with WS allowed only for explicitly configured
+development loopback origins. It never follows redirects, reconnects or replays
+audio. Starting requires separate literal live consent and a synchronous scope
+guard; scope is checked again after credential retrieval, before audio and
+before publishing each result. Native PCM and access tokens stay out of renderer
+IPC. The caller must abort the connection when changing account/document context.
+
+There are at most **two seconds of submitted but unfinalized PCM**, including
+transport and provider queues, and **one additional pending native read of at
+most 500 ms**. Only validated final/NoMatch credit releases that window; partials,
+socket callbacks and authorization acknowledgments do not. Credit merges
+monotonically within the matching provider epoch. Source identity, native
+sample/sequence/clock continuity and reply cursors are checked. Result consumers
+must be synchronous and bounded; the transport does not retain transcript text.
+Input/output messages are capped at 32 KiB, with bounded startup, pending-write,
+finish, wall-lifetime and forced-close deadlines.
+
+The native `start_live_preview` command now accepts optional `max_buffered_ms`
+from 50 to 5000, in complete 50 ms frames. It bounds both buffered samples and
+their native-clock age; omission preserves the existing five-second default.
+The upcoming desktop controller must explicitly choose **2500 ms** and hold only
+one 500 ms read, so native + Main + submitted/unfinalized media total at most
+five seconds per source. These primitives alone do **not** establish that
+end-to-end budget: using the legacy native default would exceed it. This is a
+media-buffer bound, not a latency or recognition-quality guarantee.
+
+Cancellation and transport/protocol/scope faults reject pending work, close only
+the live connection and retain uncertain-usage semantics. They never command the
+independent encrypted recorder or claim successful final transcription.
+Real-socket tests cover bounded flow, malformed responses, owner changes,
+redirects, cancellation and deadlines. PostgreSQL gateway integration also
+crosses the framed helper client, verifies final-only credit/known settlement
+without uploads or note changes, and keeps capture controllable after cloud
+revocation. Native budget regressions independently verify that overrun does not
+interrupt encrypted chunk persistence. Capture orchestration, inline consent,
+attempt-boundary UX and Windows UI coverage remain to be connected.
 
 ### Internal Azure streaming adapter
 

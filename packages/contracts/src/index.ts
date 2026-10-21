@@ -68,6 +68,13 @@ export const audioRequestSchema = z.discriminatedUnion('command', [
     ...baseRequest,
     command: z.literal('start_live_preview'),
     recording_id: uuid,
+    max_buffered_ms: z
+      .number()
+      .int()
+      .min(50)
+      .max(5000)
+      .multipleOf(50)
+      .optional(),
   }),
   ...(['read_live_audio', 'stop_live_preview'] as const).map((command) =>
     z.strictObject({

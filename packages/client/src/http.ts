@@ -12,19 +12,9 @@ import {
   syncSnapshotSchema,
 } from '@windows-ai-notes/contracts/server';
 import type { Mutation } from '@windows-ai-notes/local';
-
-export class ClientError extends Error {
-  constructor(
-    readonly code: string,
-    message: string,
-    readonly status = 0,
-    readonly retryable = false,
-    readonly retryAfterSeconds = 0,
-    readonly purgeWorkspaceId?: string,
-  ) {
-    super(message);
-  }
-}
+import { ClientError } from './errors.js';
+import { openLiveConnection, type LiveConnectionOptions } from './live.js';
+export { ClientError } from './errors.js';
 export function serverUrl(value: string, allowLoopback = false): string {
   let url: URL;
   try {
@@ -228,6 +218,14 @@ export class ApiClient {
       '/v1/me',
       z.strictObject({ id: resourceId }),
       signal ? { signal } : {},
+    );
+  }
+  openLiveSource(id: string, options: LiveConnectionOptions) {
+    return openLiveConnection(
+      this.base,
+      resourceId.parse(id),
+      this.headers,
+      options,
     );
   }
   workspaces(signal?: AbortSignal) {

@@ -60,13 +60,13 @@ internal sealed class CaptureSession
         return new CaptureLevels(captureEpoch, clock.Elapsed.TotalMilliseconds, tracks);
     }
 
-    public LiveAudioBatch StartLive()
+    public LiveAudioBatch StartLive(int maxBufferedMs = 5000)
     {
         if (Store.Status().State != "recording")
             throw new AudioException("invalid_state", "Live preview requires an active recording.");
         if (live?.IsActive == true)
             throw new AudioException("live_preview_active", "Stop the existing live preview before starting another.");
-        var preview = new PcmLiveBuffer(Store.RecordingId, captureEpoch, specs.Select(spec => spec.TrackId).ToArray());
+        var preview = new PcmLiveBuffer(Store.RecordingId, captureEpoch, specs.Select(spec => spec.TrackId).ToArray(), maxBufferedMs);
         Interlocked.Exchange(ref live, preview)?.Dispose();
         return preview.Snapshot();
     }

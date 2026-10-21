@@ -5,7 +5,7 @@ namespace WindowsAiNotes.Audio;
 
 public sealed record AudioRequest(int ProtocolVersion, Guid RequestId, string Command, Guid? RecordingId = null, TrackSpec[]? Tracks = null,
     Guid? TrackId = null, Guid? ChunkId = null, int? SequenceStart = null, int? Offset = null, int? Length = null,
-    bool? AcceptIncomplete = null, Guid? PreviewId = null)
+    bool? AcceptIncomplete = null, Guid? PreviewId = null, int? MaxBufferedMs = null)
 {
     public void Validate()
     {
@@ -15,6 +15,9 @@ public sealed record AudioRequest(int ProtocolVersion, Guid RequestId, string Co
             throw new AudioException("invalid_request", "Only recovery accepts, and requires, explicit acceptance of a possibly missing audio tail.");
         if (Command is "read_live_audio" or "stop_live_preview" ? PreviewId is null || PreviewId == Guid.Empty : PreviewId is not null)
             throw new AudioException("invalid_request", "Only live reads and stops accept, and require, a preview ID.");
+        if (MaxBufferedMs is not null && (Command != "start_live_preview"
+            || MaxBufferedMs is < 50 or > 5000 || MaxBufferedMs % 50 != 0))
+            throw new AudioException("invalid_request", "Only live start accepts a 50 to 5000 millisecond buffer budget in complete frames.");
         if (Command == "list_devices")
         {
             if (RecordingId is not null || Tracks is not null || TrackId is not null || ChunkId is not null
