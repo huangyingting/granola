@@ -90,6 +90,12 @@ jobs:
       - name: Package unsigned developer-preview installer
         if: runner.os == 'Windows'
         run: pnpm desktop:package:unsigned
+      - uses: actions/upload-artifact@v4
+        if: failure() && runner.os == 'Windows'
+        with:
+          name: desktop-test-diagnostics
+          path: apps/desktop/test-results/
+          retention-days: 3
       - name: Open the packaged application
         if: runner.os == 'Windows'
         env:

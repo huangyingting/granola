@@ -78,7 +78,7 @@ test('persists rich text across restart, isolates the renderer and keeps local f
       .getByRole('button', { name: 'Export Markdown', exact: true })
       .click();
     await expect(
-      page.getByText('Unencrypted export saved.', { exact: true }),
+      page.getByRole('status').filter({ hasText: 'Unencrypted export saved.' }),
     ).toBeVisible();
     const exported = await readFile(exportPath, 'utf8');
     expect(exported).toContain('# Synthetic design review');
