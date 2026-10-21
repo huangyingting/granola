@@ -5,6 +5,7 @@ import type {
   Draft,
 } from '@windows-ai-notes/contracts/desktop';
 import type { Summary } from '@windows-ai-notes/contracts/server';
+import type { SummaryProgress } from '@windows-ai-notes/contracts/evidence';
 import {
   DEFAULT_SUMMARY_TEMPLATE,
   SUMMARY_TEMPLATES,
@@ -57,6 +58,8 @@ export function SummaryPanel(props: Props) {
     SummaryTemplateCatalog['templates'] | null
   >(null);
   const [consent, setConsent] = useState(false);
+  const [resume, setResume] = useState<SummaryProgress | null>(null);
+  const [resumeConsent, setResumeConsent] = useState(false);
   const consentId = useRef(crypto.randomUUID());
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -81,6 +84,8 @@ export function SummaryPanel(props: Props) {
       setSource(null);
       setEditing(false);
       setConfirmation(null);
+      setResume(null);
+      setResumeConsent(false);
       setUnavailable(true);
     }
     const stop = window.notes.onChanged((change) => {
@@ -165,10 +170,14 @@ export function SummaryPanel(props: Props) {
     setSelected(id);
     setSource(null);
     setEditing(false);
+    setResume(null);
+    setResumeConsent(false);
     setError('');
     setBusy(false);
   }
   function prepare(kind: 'new' | 'recover') {
+    setResume(null);
+    setResumeConsent(false);
     setConfirmation(kind);
     setConsent(false);
     consentId.current = crypto.randomUUID();
@@ -207,6 +216,33 @@ export function SummaryPanel(props: Props) {
       setTemplate(summaryTemplateIdSchema.parse(selected.id));
       setTemplates(supported);
     });
+  }
+  async function prepareResume() {
+    if (!job) return;
+    const version = view.current;
+    const response = await window.notes.invoke({
+      operation: 'getSummaryProgress',
+      scope: state.scope,
+      id: draft.id,
+      job_id: job.id,
+    });
+    if (version !== view.current) return;
+    if (!response.ok) throw new Error(response.error.message);
+    if (
+      !('summary_progress' in response) ||
+      response.summary_progress.scope !== state.scope ||
+      response.summary_progress.progress.document_id !== draft.id ||
+      response.summary_progress.progress.job_id !== job.id
+    )
+      throw new Error('The service returned progress for another summary.');
+    const progress = response.summary_progress.progress;
+    if (!progress.resume_available)
+      throw new Error(
+        'Saved work cannot be resumed for this job. Refresh its status or confirm a new summary request.',
+      );
+    setConfirmation(null);
+    setResume(progress);
+    setResumeConsent(false);
   }
   async function start() {
     if (!consent || !(await beforeStart()) || !(await reviewFlush.current()))
@@ -523,6 +559,77 @@ export function SummaryPanel(props: Props) {
             </p>
           )}
           {job.error && <p className="account-alert">{job.error.message}</p>}
+          {job.state === 'failed' && !resume && (
+            <button
+              disabled={busy || !connected}
+              onClick={() => void action(prepareResume)}
+            >
+              Resume summary
+            </button>
+          )}
+          {resume?.job_id === job.id && (
+            <div className="summary-consent">
+              <strong>Resume frozen summary</strong>
+              <p className="quiet-note">
+                {resume.completed_stages} of {resume.total_stages} stages saved.{' '}
+                {resume.provider_requests} provider requests,{' '}
+                {resume.uncertain_requests} with uncertain usage. Completed work
+                is kept. Requests without saved output may be sent again;
+                previous charges and reservations are not undone.
+              </p>
+              <label className="summary-check">
+                <input
+                  type="checkbox"
+                  checked={resumeConsent}
+                  disabled={busy}
+                  onChange={(event) => setResumeConsent(event.target.checked)}
+                />
+                I authorize additional Azure requests for the original frozen
+                input.
+              </label>
+              <div className="summary-actions">
+                <button
+                  className="primary"
+                  disabled={busy || !connected || !resumeConsent}
+                  onClick={() =>
+                    void action(async () => {
+                      if (!resume.resume_token)
+                        throw new Error(
+                          'Refresh summary progress before resuming.',
+                        );
+                      if (
+                        !(await invoke({
+                          operation: 'controlSummary',
+                          scope: state.scope,
+                          id: draft.id,
+                          job_id: resume.job_id,
+                          action: 'resume',
+                          confirmed: true,
+                          resume_token: resume.resume_token,
+                        }))
+                      )
+                        throw new Error(
+                          'Resume was not confirmed. Retry this same confirmation to reconcile without authorizing a second attempt.',
+                        );
+                      setResume(null);
+                      setResumeConsent(false);
+                    })
+                  }
+                >
+                  Confirm resume
+                </button>
+                <button
+                  disabled={busy}
+                  onClick={() => {
+                    setResume(null);
+                    setResumeConsent(false);
+                  }}
+                >
+                  Keep paused
+                </button>
+              </div>
+            </div>
+          )}
           {summary && (
             <>
               {fact(summary.overview, 0)}

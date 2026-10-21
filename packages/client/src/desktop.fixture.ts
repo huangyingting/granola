@@ -32,6 +32,7 @@ import {
   DEFAULT_SUMMARY_TEMPLATE,
   SUMMARY_TEMPLATES,
 } from '@windows-ai-notes/contracts/templates';
+import { summaryProgressSchema } from '@windows-ai-notes/contracts/evidence';
 
 type Document = z.infer<typeof documentSchema>;
 type Change = {
@@ -64,6 +65,16 @@ export async function desktopFixture() {
   >();
   const jobs = new Map<string, Job>();
   const summarySnapshots = new Map<string, SummarySnapshot>();
+  const summaryStages = new Map<
+    string,
+    {
+      token: string;
+      requests: number;
+      uncertain: number;
+      completed: number;
+      resumes: Set<string>;
+    }
+  >();
   const recordings = new Map<
     string,
     {
@@ -108,6 +119,8 @@ export async function desktopFixture() {
     jobs,
     lose_finalization_response: false,
     lose_summary_response: false,
+    lose_summary_resume_response: false,
+    summary_resume_tokens: [] as string[],
     summary_online: true,
     workspaces: [{ id: workspace, name: 'Synthetic cloud workspace' }],
     failures: [] as unknown[],
@@ -310,6 +323,9 @@ export async function desktopFixture() {
     const document = job ? documents.get(job.document_id) : null;
     if (!job || !snapshot || !document)
       throw new Error('Missing synthetic summary.');
+    const stages = summaryStages.get(id)!;
+    stages.requests++;
+    stages.completed = 1;
     const note = {
       source: 'note' as const,
       id: snapshot.document_id,
@@ -365,6 +381,31 @@ export async function desktopFixture() {
       },
     });
     jobs.set(id, next);
+    record(document, 'job', id);
+  }
+  function failSummary(id: string) {
+    const job = jobs.get(id),
+      stages = summaryStages.get(id);
+    const document = job ? documents.get(job.document_id) : null;
+    if (
+      !job ||
+      !stages ||
+      !document ||
+      !['queued', 'running'].includes(job.state)
+    )
+      throw new Error('Missing active synthetic summary.');
+    stages.requests++;
+    stages.uncertain++;
+    jobs.set(id, {
+      ...job,
+      state: 'failed',
+      attempt: job.attempt + 1,
+      error: {
+        code: 'summary_dispatch_unconfirmed',
+        message: 'Synthetic summary response loss.',
+        retryable: false,
+      },
+    });
     record(document, 'job', id);
   }
   function send(response: ServerResponse, value: unknown, status = 200) {
@@ -446,6 +487,27 @@ export async function desktopFixture() {
       const existing = documents.get(id);
       if (request.method === 'GET' && parts[2] === 'jobs') {
         const job = jobs.get(id);
+        if (parts[4] === 'summary-progress') {
+          const stages = summaryStages.get(id);
+          if (!job || !documents.has(job.document_id))
+            return error(response, 'job_not_found', 404);
+          if (!stages) return error(response, 'unsupported_summary_job', 409);
+          const resume = job.state === 'failed';
+          return send(
+            response,
+            summaryProgressSchema.parse({
+              document_id: job.document_id,
+              job_id: id,
+              state: job.state,
+              total_stages: 1,
+              completed_stages: stages.completed,
+              provider_requests: stages.requests,
+              uncertain_requests: stages.uncertain,
+              resume_available: resume,
+              resume_token: resume ? stages.token : null,
+            }),
+          );
+        }
         return job
           ? send(response, job)
           : error(response, 'job_not_found', 404);
@@ -599,6 +661,13 @@ export async function desktopFixture() {
         });
         jobs.set(job.id, job);
         summarySnapshots.set(job.id, snapshot);
+        summaryStages.set(job.id, {
+          token: randomUUID(),
+          requests: 0,
+          uncertain: 0,
+          completed: 0,
+          resumes: new Set(),
+        });
         replays.set(key, { hash, value: job });
         record(existing, 'job', job.id);
         if (state.lose_summary_response) {
@@ -657,12 +726,41 @@ export async function desktopFixture() {
           return send(response, { already_terminal: terminal, job: next });
         }
         if (parts[4] === 'retry') {
-          z.strictObject({ confirmed: z.literal(true) }).parse(body);
+          const value = z
+            .strictObject({
+              confirmed: z.literal(true),
+              resume_token: z.uuid().optional(),
+            })
+            .parse(body);
+          if (job.kind === 'summary') {
+            const stages = summaryStages.get(id)!;
+            if (!value.resume_token)
+              return error(response, 'summary_resume_required', 400);
+            state.summary_resume_tokens.push(value.resume_token);
+            if (stages.resumes.has(value.resume_token))
+              return send(response, job);
+            if (stages.token !== value.resume_token)
+              return error(response, 'summary_resume_changed', 409);
+            if (job.state !== 'failed')
+              return error(response, 'job_not_retryable', 409);
+            stages.resumes.add(value.resume_token);
+            stages.token = randomUUID();
+          }
           if (job.state !== 'failed')
             return error(response, 'job_not_retryable', 409);
-          const next = { ...job, state: 'queued' as const, error: null };
+          const next = {
+            ...job,
+            state: 'queued' as const,
+            attempt: 0,
+            error: null,
+          };
           jobs.set(id, next);
           record(document, 'job', id);
+          if (job.kind === 'summary' && state.lose_summary_resume_response) {
+            state.lose_summary_resume_response = false;
+            response.destroy();
+            return;
+          }
           return send(response, next);
         }
       }
@@ -778,6 +876,7 @@ export async function desktopFixture() {
     transcript,
     publishCandidate,
     publishSummary,
+    failSummary,
     registerRecording(
       document_id: string,
       value: {

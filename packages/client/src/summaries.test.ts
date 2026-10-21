@@ -23,7 +23,10 @@ import {
   summaryReviewSchema,
   summarySourceSchema,
 } from '@windows-ai-notes/contracts/generation';
-import type { SummarySnapshot } from '@windows-ai-notes/contracts/server';
+import {
+  ServiceError,
+  type SummarySnapshot,
+} from '@windows-ai-notes/contracts/server';
 import { runOnce } from '@windows-ai-notes/worker';
 import { WorkspaceController } from './workspace.js';
 import { oidcFixture } from './oidc.fixture.js';
@@ -208,6 +211,86 @@ describe.skipIf(!databaseUrl)(
       await db?.close();
       await admin.pool.query(`DROP SCHEMA "${schema}" CASCADE`);
       await admin.close();
+    });
+    it('reconciles lost resume replies with their original consent token instead of authorizing another failed attempt', async () => {
+      const document = await connect();
+      const job = await start(document.id);
+      const fail = async () =>
+        runOnce(db, {
+          provider: 'fixture',
+          configurationVersion: 'desktop-summary-fixture-v1',
+          transcribe: async () => {
+            throw new Error('Unexpected audio dispatch.');
+          },
+          summarize: async () => {
+            throw new ServiceError(
+              'provider_unavailable',
+              'Synthetic response loss.',
+              503,
+              true,
+            );
+          },
+        });
+      await fail();
+      const lookup = {
+        operation: 'getSummaryProgress' as const,
+        scope: controller.scope,
+        id: document.id,
+        job_id: job.id,
+      };
+      const first = await controller.summaries.progress(lookup);
+      expect(first).toMatchObject({
+        resume_available: true,
+        uncertain_requests: 1,
+        completed_stages: 0,
+      });
+      const resume = {
+        operation: 'controlSummary' as const,
+        scope: controller.scope,
+        id: document.id,
+        job_id: job.id,
+        action: 'resume' as const,
+        resume_token: first.resume_token!,
+        confirmed: true as const,
+      };
+      const original = db.summaries.resume.bind(db.summaries);
+      const lost = vi
+        .spyOn(db.summaries, 'resume')
+        .mockImplementationOnce(async (...args) => {
+          await original(...args);
+          throw new ServiceError(
+            'synthetic_reply_lost',
+            'Synthetic lost resume receipt.',
+            503,
+            true,
+          );
+        });
+      await expect(controller.summaries.control(resume)).rejects.toMatchObject({
+        code: 'synthetic_reply_lost',
+      });
+      lost.mockRestore();
+      await fail();
+      await controller.summaries.control(resume);
+      expect(controller.snapshot().jobs[0]?.state).toBe('failed');
+      expect(await db.claim()).toBeNull();
+      const second = await controller.summaries.progress(lookup);
+      expect(second.resume_token).not.toBe(first.resume_token);
+      await controller.summaries.control({
+        ...resume,
+        resume_token: second.resume_token!,
+      });
+      await finish(document.id);
+      expect(await db.jobs(actor.user_id, document.id)).toHaveLength(1);
+      expect(await db.usage.snapshot(actor.user_id)).toMatchObject({
+        settled_requests: '1',
+        uncertain_requests: '2',
+      });
+      await expect(
+        controller.summaries.progress({
+          ...lookup,
+          scope: controller.scope + 1,
+        }),
+      ).rejects.toThrow();
     });
     it('persists a private frozen request before dispatch and recovers a lost receipt across restart without a duplicate job', async () => {
       const document = await connect();

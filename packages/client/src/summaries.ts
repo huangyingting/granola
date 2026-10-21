@@ -24,6 +24,7 @@ import {
   summaryTemplateCatalogSchema,
 } from '@windows-ai-notes/contracts/templates';
 import { ApiClient, ClientError } from './http.js';
+import { summaryProgressSchema } from '@windows-ai-notes/contracts/evidence';
 
 export const summaryIntentSchema = z.strictObject({
   body: summaryRequestSchema,
@@ -344,6 +345,18 @@ export class DesktopSummaries {
         command.job_id,
       );
       context.authorize();
+      if (command.action === 'resume') {
+        if (!command.resume_token)
+          throw problem(
+            'summary_resume_required',
+            'Refresh and confirm the failed summary before resuming it.',
+          );
+        job = await context.api.request(`/v1/jobs/${job.id}/retry`, jobSchema, {
+          method: 'POST',
+          body: { confirmed: true, resume_token: command.resume_token },
+          signal,
+        });
+      }
       if (command.action === 'cancel' && active(job))
         job = (
           await context.api.request(
@@ -361,6 +374,24 @@ export class DesktopSummaries {
         command.id,
         summaryJob(job, command.id, command.job_id),
       );
+    });
+  }
+  async progress(command: Command<'getSummaryProgress'>) {
+    return this.remote(command.scope, command.id, async (context, signal) => {
+      const progress = await context.api.request(
+        `/v1/jobs/${command.job_id}/summary-progress`,
+        summaryProgressSchema,
+        { signal },
+      );
+      if (
+        progress.job_id !== command.job_id ||
+        progress.document_id !== command.id
+      )
+        throw problem(
+          'invalid_server_response',
+          'The service returned summary progress for another meeting or job.',
+        );
+      return progress;
     });
   }
   private async result(scope: number, id: string, jobId: string) {

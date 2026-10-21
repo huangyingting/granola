@@ -1,5 +1,15 @@
 import { z } from 'zod';
-import { citationSchema, summarySnapshotSchema } from './server.js';
+import {
+  citationSchema,
+  citationKey,
+  summarySnapshotSchema,
+  summaryResultSchema,
+  usageSchema,
+  resourceId,
+  jobStateSchema,
+  ServiceError,
+  type Citation,
+} from './server.js';
 
 const utf8 = new TextEncoder();
 export const SUMMARY_EVIDENCE_VERSION = 'meeting-evidence-v1';
@@ -62,3 +72,105 @@ export const summaryEvidenceChunkSchema = frozenMeetingSchema
     'The complete serialized extraction input exceeds its byte budget.',
   );
 export type SummaryEvidenceChunk = z.infer<typeof summaryEvidenceChunkSchema>;
+
+export const MAX_SUMMARY_STEPS = 40_000;
+export const SUMMARY_FACT_BYTES = 32_768;
+export const evidenceFactsSchema = z.strictObject({
+  facts: z
+    .array(
+      z.strictObject({
+        category: z.enum(['fact', 'topic', 'decision', 'action', 'question']),
+        text: z.string().min(1).max(2000),
+        citations: z.array(citationSchema).min(1).max(16),
+        owner: z.string().max(200).nullable(),
+        due_date: z.string().max(200).nullable(),
+      }),
+    )
+    .max(64),
+});
+export function validateEvidenceFacts(
+  value: unknown,
+  citations: readonly Citation[],
+) {
+  const parsed = evidenceFactsSchema.safeParse(value);
+  if (
+    !parsed.success ||
+    utf8.encode(JSON.stringify(parsed.data)).length > SUMMARY_FACT_BYTES
+  )
+    throw new ServiceError(
+      'invalid_model_output',
+      'The model did not return bounded structured evidence facts.',
+      502,
+    );
+  const allowed = new Set(citations.map(citationKey));
+  for (const fact of parsed.data.facts) {
+    if (
+      fact.category !== 'action' &&
+      (fact.owner !== null || fact.due_date !== null)
+    )
+      throw new ServiceError(
+        'invalid_model_output',
+        'Only explicit action items may carry an owner or due date.',
+        502,
+      );
+    if (fact.citations.some((citation) => !allowed.has(citationKey(citation))))
+      throw new ServiceError(
+        'invalid_citation',
+        'The model cited material outside its supplied evidence stage.',
+        502,
+      );
+  }
+  return parsed.data;
+}
+export const summaryStageKeySchema = z
+  .strictObject({
+    phase: z.enum(['extract', 'merge', 'generate']),
+    round: z.number().int().min(0).max(8),
+    index: z
+      .number()
+      .int()
+      .min(0)
+      .max(MAX_SUMMARY_CHUNKS - 1),
+  })
+  .refine((key) => (key.phase === 'merge' ? key.round > 0 : key.round === 0))
+  .refine((key) => key.phase !== 'generate' || key.index === 0);
+export type SummaryStageKey = z.infer<typeof summaryStageKeySchema>;
+export const summaryStageSpecSchema = summaryStageKeySchema.safeExtend({
+  input_hash: z.string().regex(/^[a-f0-9]{64}$/),
+  prompt_version: z.string().min(1).max(80),
+  citations: z
+    .array(citationSchema)
+    .min(1)
+    .max(4096)
+    .refine((items) => new Set(items.map(citationKey)).size === items.length),
+});
+export type SummaryStageSpec = z.infer<typeof summaryStageSpecSchema>;
+export const summaryStageOutputSchema = z.discriminatedUnion('kind', [
+  z.strictObject({
+    kind: z.literal('facts'),
+    facts: evidenceFactsSchema.shape.facts,
+    usage: usageSchema,
+  }),
+  z.strictObject({ kind: z.literal('summary'), result: summaryResultSchema }),
+]);
+export type SummaryStageOutput = z.infer<typeof summaryStageOutputSchema>;
+export const summaryProgressSchema = z
+  .strictObject({
+    document_id: resourceId,
+    job_id: resourceId,
+    state: jobStateSchema,
+    total_stages: z.number().int().min(0).max(MAX_SUMMARY_STEPS),
+    completed_stages: z.number().int().min(0).max(MAX_SUMMARY_STEPS),
+    provider_requests: z.number().int().nonnegative(),
+    uncertain_requests: z.number().int().nonnegative(),
+    resume_available: z.boolean(),
+    resume_token: resourceId.nullable(),
+  })
+  .refine(
+    (progress) =>
+      progress.completed_stages <= progress.total_stages &&
+      progress.uncertain_requests <= progress.provider_requests &&
+      (!progress.resume_available || progress.state === 'failed') &&
+      progress.resume_available === (progress.resume_token !== null),
+  );
+export type SummaryProgress = z.infer<typeof summaryProgressSchema>;

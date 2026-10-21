@@ -373,6 +373,13 @@ async function start() {
             },
           });
         }
+        if (command.operation === 'getSummaryProgress') {
+          const progress = await workspace().summaries.progress(command);
+          return desktopResponseSchema.parse({
+            ok: true,
+            summary_progress: { scope: command.scope, progress },
+          });
+        }
         if (
           command.operation === 'startSummary' ||
           command.operation === 'controlSummary' ||

@@ -56,8 +56,8 @@ async function synchronize(application: ElectronApplication) {
     });
   });
 }
-test('recovers one consented summary, inspects frozen evidence, persists review edits and explicitly appends and exports without replacing notes', async () => {
-  test.setTimeout(90_000);
+test('recovers one summary and resume receipt, inspects frozen evidence, persists review edits and explicitly appends and exports without replacing notes', async () => {
+  test.setTimeout(120_000);
   const directory = await mkdtemp(join(tmpdir(), 'windows-notes-summary-ui-'));
   const fixture = await desktopFixture();
   const remote = fixture.seed(
@@ -146,6 +146,43 @@ test('recovers one consented summary, inspects frozen evidence, persists review 
     ).toHaveCount(0);
     expect(fixture.state.jobs.size).toBe(1);
     const job = [...fixture.state.jobs.values()][0]!;
+    fixture.failSummary(job.id);
+    await page
+      .getByRole('button', { name: 'Refresh summary', exact: true })
+      .click();
+    await page
+      .getByRole('button', { name: 'Resume summary', exact: true })
+      .click();
+    await expect(
+      page.getByRole('button', { name: 'Confirm resume', exact: true }),
+    ).toBeDisabled();
+    await expect(
+      page.getByText(/1 provider requests, 1 with uncertain usage/),
+    ).toBeVisible();
+    await page
+      .getByRole('checkbox', {
+        name: 'I authorize additional Azure requests for the original frozen input.',
+      })
+      .check();
+    fixture.state.lose_summary_resume_response = true;
+    await page
+      .getByRole('button', { name: 'Confirm resume', exact: true })
+      .click();
+    await expect(
+      page.getByText(/Resume was not confirmed\. Retry this same confirmation/),
+    ).toBeVisible();
+    await page
+      .getByRole('button', { name: 'Confirm resume', exact: true })
+      .click();
+    await expect(
+      page.getByRole('button', { name: 'Confirm resume', exact: true }),
+    ).toHaveCount(0);
+    expect(fixture.state.summary_resume_tokens).toHaveLength(2);
+    expect(fixture.state.summary_resume_tokens[0]).toBe(
+      fixture.state.summary_resume_tokens[1],
+    );
+    expect(fixture.state.jobs.size).toBe(1);
+    expect(fixture.state.jobs.get(job.id)?.state).toBe('queued');
     fixture.change(remote.id, 'Newer human cloud notes remain authoritative.');
     fixture.publishSummary(job.id);
     expect(fixture.state.jobs.get(job.id)?.result).toMatchObject({

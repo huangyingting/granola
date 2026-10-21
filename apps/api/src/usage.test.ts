@@ -228,7 +228,7 @@ describe.skipIf(!databaseUrl)(
       ).rejects.toHaveProperty('code', 1);
       expect((await snapshot()).limits.output_tokens).toBe('5');
     });
-    it('retains uncertain failed attempts across worker replacement and accounts a retry separately', async () => {
+    it('retains uncertain failed attempts and accounts only an explicitly confirmed resume separately', async () => {
       const job = await queued();
       await runOnce(db, {
         ...providers,
@@ -245,11 +245,26 @@ describe.skipIf(!databaseUrl)(
         uncertain: { input_tokens: '64000', output_tokens: '4096' },
         uncertain_requests: '1',
       });
+      expect(await db.job(actor.user_id, job.id)).toMatchObject({
+        state: 'failed',
+        error: { retryable: false },
+      });
       await db.pool.query('UPDATE jobs SET available_at=now() WHERE id=$1', [
         job.id,
       ]);
       const replacement = new Database(url);
       try {
+        expect(await runOnce(replacement, providers)).toBe(false);
+        const progress = await replacement.summaries.progress(
+          actor.user_id,
+          job.id,
+        );
+        expect(progress.resume_token).not.toBeNull();
+        await replacement.summaries.resume(
+          actor.user_id,
+          job.id,
+          progress.resume_token!,
+        );
         await runOnce(replacement, providers);
         expect(await replacement.usage.snapshot(actor.user_id)).toMatchObject({
           settled: { input_tokens: '7', output_tokens: '3' },

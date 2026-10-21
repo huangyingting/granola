@@ -422,6 +422,10 @@ export async function createServer(
     const { id } = parse(idParams, request.params);
     return db.job(principal(request).userId, id);
   });
+  app.get('/v1/jobs/:id/summary-progress', async (request) => {
+    const { id } = parse(idParams, request.params);
+    return db.summaries.progress(principal(request).userId, id);
+  });
   app.post('/v1/jobs/:id/citation', async (request) => {
     const { id } = parse(idParams, request.params);
     return db.summarySource(
@@ -436,8 +440,31 @@ export async function createServer(
   });
   app.post('/v1/jobs/:id/retry', async (request) => {
     const { id } = parse(idParams, request.params);
-    parse(z.strictObject({ confirmed: z.literal(true) }), request.body);
-    return db.retryRecordingTranscription(principal(request).userId, id);
+    const body = parse(
+      z.strictObject({
+        confirmed: z.literal(true),
+        resume_token: z.uuid().optional(),
+      }),
+      request.body,
+    );
+    const user = principal(request).userId;
+    const job = await db.job(user, id);
+    if (job.kind === 'summary') {
+      if (!body.resume_token)
+        throw new ServiceError(
+          'summary_resume_required',
+          'Refresh summary progress and confirm its resume token before retrying.',
+          400,
+        );
+      return db.summaries.resume(user, id, body.resume_token);
+    }
+    if (body.resume_token)
+      throw new ServiceError(
+        'unsupported_retry',
+        'Summary resume consent cannot be used for an audio job.',
+        409,
+      );
+    return db.retryRecordingTranscription(user, id);
   });
   app.get('/v1/jobs/:id/events', async (request, reply) => {
     const { id } = parse(idParams, request.params);

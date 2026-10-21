@@ -433,15 +433,16 @@ export const jobStateSchema = z.enum([
   'failed',
   'cancelled',
 ]);
+export const summaryResultSchema = z.strictObject({
+  kind: z.literal('summary'),
+  summary: summarySchema,
+  provider: z.enum(['azure', 'fixture']),
+  configuration_version: z.string(),
+  prompt_version: z.string(),
+  usage: usageSchema,
+});
 export const resultSchema = z.discriminatedUnion('kind', [
-  z.strictObject({
-    kind: z.literal('summary'),
-    summary: summarySchema,
-    provider: z.enum(['azure', 'fixture']),
-    configuration_version: z.string(),
-    prompt_version: z.string(),
-    usage: usageSchema,
-  }),
+  summaryResultSchema,
   z.strictObject({
     kind: z.literal('transcription'),
     transcript_revision: revision.min(1),
@@ -572,6 +573,34 @@ export function validateSummary(
   value: unknown,
   snapshot: SummarySnapshot,
 ): Summary {
+  return validateSummaryCitations(value, summarySnapshotCitations(snapshot));
+}
+export function summarySnapshotCitations(
+  snapshot: SummarySnapshot,
+): Citation[] {
+  return [
+    ...(snapshot.notes.trim()
+      ? [
+          {
+            source: 'note' as const,
+            id: snapshot.document_id,
+            revision: snapshot.note_revision,
+          },
+        ]
+      : []),
+    ...snapshot.segments.map((segment) => ({
+      source: 'transcript' as const,
+      id: segment.id,
+      revision: snapshot.transcript_revision,
+    })),
+  ];
+}
+export const citationKey = (citation: Citation) =>
+  `${citation.source}:${citation.id}:${citation.revision}`;
+export function validateSummaryCitations(
+  value: unknown,
+  citations: readonly Citation[],
+): Summary {
   const parsed = summarySchema.safeParse(value);
   if (!parsed.success) {
     throw new ServiceError(
@@ -581,12 +610,7 @@ export function validateSummary(
     );
   }
   const summary = parsed.data;
-  const allowed = new Set<string>();
-  if (snapshot.notes.trim())
-    allowed.add(`note:${snapshot.document_id}:${snapshot.note_revision}`);
-  for (const segment of snapshot.segments) {
-    allowed.add(`transcript:${segment.id}:${snapshot.transcript_revision}`);
-  }
+  const allowed = new Set(citations.map(citationKey));
   for (const fact of [
     summary.overview,
     ...summary.topics,
@@ -595,9 +619,7 @@ export function validateSummary(
     ...summary.open_questions,
   ]) {
     for (const citation of fact.citations) {
-      if (
-        !allowed.has(`${citation.source}:${citation.id}:${citation.revision}`)
-      ) {
+      if (!allowed.has(citationKey(citation))) {
         throw new ServiceError(
           'invalid_citation',
           'The model cited material outside the frozen input revisions.',

@@ -20,7 +20,7 @@ const zero = (): Totals => ({
   output_tokens: '0',
   audio_ms: '0',
 });
-function totals(value: Usage): Totals {
+export function usageTotals(value: Usage): Totals {
   const parsed = usageSchema.parse(value);
   if (units.some((unit) => !Number.isSafeInteger(Math.ceil(parsed[unit]))))
     throw new ServiceError(
@@ -78,7 +78,7 @@ export class UsageStore {
       )
     ).rows[0];
     if (!row) throw new Error('The usage account is missing.');
-    return totals(aiLimitsSchema.parse(row.limits));
+    return usageTotals(aiLimitsSchema.parse(row.limits));
   }
   private async current(tx: Transaction) {
     return (
@@ -167,7 +167,7 @@ export class UsageStore {
     request: UsageReservation,
     origin: { kind: 'job'; job: ClaimedJob } | { kind: 'live'; id: string },
   ): Promise<string> {
-    const budget = totals(request.budget);
+    const budget = usageTotals(request.budget);
     if (
       units.every((unit) => budget[unit] === '0') ||
       !/^[A-Za-z0-9:_-]{1,80}$/.test(request.operation) ||
@@ -237,7 +237,7 @@ export class UsageStore {
     usage: Usage,
     transaction?: Transaction,
   ): Promise<void> {
-    const actual = totals(usage);
+    const actual = usageTotals(usage);
     const settle = async (tx: Transaction) => {
       const selected = (
         await tx.query<Call>(

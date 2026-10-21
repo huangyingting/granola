@@ -1256,6 +1256,6 @@ describe.skipIf(!databaseUrl)('PostgreSQL API and durable AI worker', () => {
         (change) => change.kind === 'job' && change.job_id === job.id,
       ),
     ).toBe(true);
-    expect(changes.changes).toHaveLength(3);
+    expect(changes.changes).toHaveLength(4);
   });
 });

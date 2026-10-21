@@ -11,6 +11,7 @@ import {
 } from './server.js';
 import { deviceSchema, trackSchema } from './index.js';
 import { audioStateSchema } from './recording.js';
+import { summaryProgressSchema } from './evidence.js';
 import {
   summaryTemplateIdSchema,
   summaryTemplateCatalogSchema,
@@ -62,11 +63,22 @@ export const desktopCommandSchema = z.discriminatedUnion('operation', [
     new_attempt: z.boolean(),
     consent_id: resourceId,
   }),
+  z
+    .strictObject({
+      operation: z.literal('controlSummary'),
+      ...summaryScoped,
+      action: z.enum(['refresh', 'cancel', 'resume']),
+      resume_token: resourceId.optional(),
+      confirmed: z.literal(true),
+    })
+    .refine((command) =>
+      command.action === 'resume'
+        ? command.resume_token !== undefined
+        : command.resume_token === undefined,
+    ),
   z.strictObject({
-    operation: z.literal('controlSummary'),
+    operation: z.literal('getSummaryProgress'),
     ...summaryScoped,
-    action: z.enum(['refresh', 'cancel']),
-    confirmed: z.literal(true),
   }),
   z.strictObject({
     operation: z.literal('openSummaryReview'),
@@ -324,6 +336,13 @@ export const desktopChangeSchema = z.strictObject({
   kind: z.enum(['data', 'scope', 'revoked', 'status', 'audio']),
 });
 export const desktopResponseSchema = z.union([
+  z.strictObject({
+    ok: z.literal(true),
+    summary_progress: z.strictObject({
+      ...scoped,
+      progress: summaryProgressSchema,
+    }),
+  }),
   z.strictObject({
     ok: z.literal(true),
     summary_templates: z.strictObject({

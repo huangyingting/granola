@@ -11,10 +11,11 @@ import {
   resultSchema,
   segmentsSchema,
   validateSummary,
+  summarySnapshotCitations,
   type JobResult,
   type Segment,
 } from '@windows-ai-notes/contracts/server';
-import type { Database } from '@windows-ai-notes/db';
+import { digest, type Database } from '@windows-ai-notes/db';
 import type { RecordingBlobs } from '@windows-ai-notes/storage';
 import { transcribeRecording } from './recording.js';
 import { withUsage } from './usage.js';
@@ -62,26 +63,50 @@ export async function runOnce(
       let result: JobResult;
       let transcript: Segment[] | undefined;
       if (job.input.kind === 'summary') {
-        summaryEvidence(job.input.snapshot);
-        signal.throwIfAborted();
-        const call = await db.usage.start(job, {
-          operation: 'summary',
-          provider: providers.provider,
-          configurationVersion: providers.configurationVersion,
-          budget: SUMMARY_USAGE_RESERVATION,
-        });
         const snapshot = job.input.snapshot;
-        const generated = await withUsage(db, call, (report) =>
-          providers.summarize(snapshot, signal, report),
-        );
-        result = {
-          kind: 'summary',
-          summary: validateSummary(generated.summary, job.input.snapshot),
-          provider: providers.provider,
-          configuration_version: providers.configurationVersion,
-          prompt_version: summaryPromptVersion(snapshot),
-          usage: generated.usage,
-        };
+        const cached = await db.summaries.completed(job);
+        if (cached) result = cached;
+        else {
+          const evidence = summaryEvidence(snapshot);
+          signal.throwIfAborted();
+          await db.summaries.begin(job, {
+            provider: providers.provider,
+            configurationVersion: providers.configurationVersion,
+            pipelineVersion: 'direct-summary-v1',
+          });
+          const stage = {
+            phase: 'generate' as const,
+            round: 0,
+            index: 0,
+            input_hash: digest(evidence),
+            prompt_version: summaryPromptVersion(snapshot),
+            citations: summarySnapshotCitations(snapshot),
+          };
+          const prepared = await db.summaries.prepare(job, stage);
+          if (prepared.state !== 'pending')
+            throw new ServiceError(
+              'summary_dispatch_unconfirmed',
+              'The previous summary provider call has no saved output. Its usage is retained; explicitly confirm a resume before another request.',
+              409,
+            );
+          const call = await db.summaries.sending(
+            job,
+            stage,
+            SUMMARY_USAGE_RESERVATION,
+          );
+          const generated = await withUsage(db, call, (report) =>
+            providers.summarize(snapshot, signal, report),
+          );
+          result = {
+            kind: 'summary',
+            summary: validateSummary(generated.summary, snapshot),
+            provider: providers.provider,
+            configuration_version: providers.configurationVersion,
+            prompt_version: stage.prompt_version,
+            usage: generated.usage,
+          };
+          await db.summaries.save(job, stage, { kind: 'summary', result });
+        }
       } else {
         if (!job.audio)
           throw new ServiceError(
@@ -143,7 +168,7 @@ export async function runOnce(
     await db.finish(job, null, {
       code: failure.code,
       message: failure.message,
-      retryable: failure.retryable,
+      retryable: job.input.kind !== 'summary' && failure.retryable,
     });
   } finally {
     monitorStop.abort();

@@ -29,6 +29,7 @@ import { TranscriptStore } from './transcripts.js';
 import { RecordingTranscriptions } from './recording-transcriptions.js';
 import { UsageStore } from './usage.js';
 import { LiveSourceStore } from './live.js';
+import { SummaryStages } from './summaries.js';
 import {
   summaryCitations,
   summarySourceSchema,
@@ -46,6 +47,7 @@ const migrationFiles = [
   '005_recording_transcription.sql',
   '006_ai_usage.sql',
   '007_live_sources.sql',
+  '008_summary_stages.sql',
 ];
 
 export type Transaction = pg.PoolClient;
@@ -149,6 +151,7 @@ export class Database {
   readonly recordingTranscriptions: RecordingTranscriptions;
   readonly usage: UsageStore;
   readonly live: LiveSourceStore;
+  readonly summaries: SummaryStages;
   constructor(url: string) {
     this.pool = new pg.Pool({
       connectionString: url,
@@ -162,6 +165,7 @@ export class Database {
     this.recordingTranscriptions = new RecordingTranscriptions(this);
     this.usage = new UsageStore(this);
     this.live = new LiveSourceStore(this);
+    this.summaries = new SummaryStages(this);
     this.pool.on('error', () =>
       console.error(
         'database_connection_failed: idle PostgreSQL connection closed.',
@@ -1012,6 +1016,7 @@ export class Database {
         'DELETE FROM recording_transcription_runs WHERE job_id=$1',
         [id],
       );
+      await tx.query('DELETE FROM summary_runs WHERE job_id=$1', [id]);
       await this.event(tx, id, 'job.cancelled', { state: 'cancelled' });
       return false;
     });
@@ -1022,6 +1027,7 @@ export class Database {
   }
   async deleteDocument(userId: string, id: string) {
     await this.transaction(async (tx) => {
+      await tx.query('SELECT id FROM documents WHERE id=$1 FOR UPDATE', [id]);
       await this.document(userId, id, tx);
       await this.recordings.removeDocument(tx, id);
       await tx.query('DELETE FROM live_sources WHERE document_id=$1', [id]);
@@ -1036,6 +1042,10 @@ export class Database {
       await tx.query(
         `UPDATE jobs SET state=CASE WHEN state IN ('queued','running','retry_wait') THEN 'cancelled' ELSE state END,
         input='{}'::jsonb,result=NULL,error=NULL,audio=NULL,lease_token=lease_token+1,lease_until=NULL WHERE document_id=$1`,
+        [id],
+      );
+      await tx.query(
+        'DELETE FROM summary_runs WHERE job_id IN (SELECT id FROM jobs WHERE document_id=$1)',
         [id],
       );
       await tx.query(
@@ -1162,6 +1172,7 @@ export class Database {
           'DELETE FROM recording_transcription_runs WHERE job_id=$1',
           [job.id],
         );
+        await tx.query('DELETE FROM summary_runs WHERE job_id=$1', [job.id]);
         await tx.query(
           "UPDATE jobs SET state='cancelled',audio=NULL,result=NULL,error=NULL,lease_token=lease_token+1,lease_until=NULL WHERE id=$1",
           [job.id],
@@ -1293,6 +1304,14 @@ export class Database {
          AND m.user_id=j.owner_id AND u.id=j.owner_id
          AND (d.deleted_at IS NOT NULL OR NOT m.active OR NOT u.active OR j.state IN ('cancelled','succeeded')
            OR (j.state='failed' AND j.updated_at<now()-interval '24 hours'))`,
+      );
+      await tx.query(
+        `DELETE FROM summary_runs p USING jobs j,documents d,memberships m,users u
+         WHERE p.job_id=j.id AND d.id=j.document_id AND m.workspace_id=d.workspace_id
+         AND m.user_id=j.owner_id AND u.id=j.owner_id
+         AND (d.deleted_at IS NOT NULL OR NOT m.active OR NOT u.active OR j.state='cancelled'
+           OR (j.state='failed' AND j.updated_at<now()-interval '24 hours')
+           OR (j.state='succeeded' AND j.updated_at<now()-interval '7 days'))`,
       );
       await this.sync.prune(tx);
       await this.live.prune(tx);

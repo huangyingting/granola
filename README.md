@@ -295,6 +295,22 @@ pre-enqueue input rejection instead permits a newly confirmed request after the
 meeting is corrected. Refresh/cancel controls reconcile durable server jobs;
 closing the app does not stop an accepted job or erase uncertain provider usage.
 
+Direct summaries now save their validated final stage before publishing the job.
+A replacement worker publishes a saved result without another Azure request,
+even if the current deployment configuration changed. Dispatch markers and usage
+reservations commit together. An interrupted dispatch without saved output is
+never resent automatically. **Resume summary** shows saved-stage and request counts
+and asks for additional Azure consent; it keeps the original input, completed work
+and previous known/uncertain usage. Its server-issued confirmation token is
+single-use with a durable receipt, so retrying a lost resume reply cannot authorize
+another attempt, even if the resumed job already failed again. Failed-stage
+progress expires after 24 hours; cached successful stages expire after seven days
+without deleting the published result or its frozen citation sources. Cancellation,
+document deletion and observed access revocation purge stage artifacts. Expired or
+legacy untracked dispatches require a newly consented summary instead of silently
+recreating missing work. Stop old API/worker processes, apply migration 008, then
+start the matching upgraded services; mixed worker versions are not supported.
+
 Results expose overview, topics, decisions, action items and open questions.
 Source buttons retrieve only citations actually present in the completed result,
 from the job's frozen input rather than the currently edited meeting. Inspected
@@ -317,8 +333,9 @@ revision. Exported files are **unencrypted**.
 Completed results record their exact immutable prompt version. Summary context
 is still bounded to 48,000 bytes. Long-meeting extraction, current-meeting chat
 and token-streamed generation are not implemented yet.
-The lazy, provenance-preserving long-meeting chunker is tested groundwork only;
-durable extraction/merge/resume orchestration is not wired into generation.
+The lazy, provenance-preserving long-meeting chunker and durable stage store are
+tested groundwork; long-meeting extraction/merge orchestration is not wired into
+generation.
 
 ## Server setup
 
