@@ -17,8 +17,9 @@ import {
 import { rename, rm, writeFile } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { z } from 'zod';
 import { LocalError, LocalStore } from '@windows-ai-notes/local';
+import { ClientError } from '@windows-ai-notes/client/http';
+import { WorkspaceController } from '@windows-ai-notes/client/workspace';
 import {
   exportMeeting,
   richTextToPlainText,
@@ -31,12 +32,12 @@ import {
 } from '@windows-ai-notes/contracts/desktop';
 
 let store: LocalStore | null = null;
+let controller: WorkspaceController | null = null;
 let window: BrowserWindow | null = null;
 let failure: { code: string; message: string } | null = null;
 let closeNonce: string | null = null;
 let allowClose = false;
 let dataDirectory = '';
-const profile = 'offline';
 
 function localKey(directory: string): Buffer {
   if (
@@ -88,18 +89,19 @@ function database(): LocalStore {
     );
   return store;
 }
+function workspace(): WorkspaceController {
+  if (!controller)
+    throw new LocalError(
+      failure?.code ?? 'workspace_unavailable',
+      failure?.message ?? 'The workspace is unavailable.',
+    );
+  return controller;
+}
 function state(): DesktopState {
-  const db = database();
-  const documents = db.list(profile);
-  const requested = db.getValue(profile, 'selected-document', z.uuidv4());
-  const selected =
-    documents.find((document) => document.id === requested)?.id ??
-    documents[0]?.id ??
-    null;
-  return { documents, selected_id: selected, storage: 'encrypted' };
+  return workspace().snapshot();
 }
 function safeError(error: unknown) {
-  if (error instanceof LocalError)
+  if (error instanceof LocalError || error instanceof ClientError)
     return { code: error.code, message: error.message };
   console.error(
     JSON.stringify({
@@ -126,6 +128,20 @@ async function start() {
     const key = localKey(dataDirectory);
     try {
       store = new LocalStore(join(dataDirectory, 'notes.sqlite'), key);
+      controller = new WorkspaceController(
+        store,
+        (url) => shell.openExternal(url),
+        (change) => {
+          if (window && !window.isDestroyed())
+            window.webContents.send('notes:changed', change);
+        },
+        {
+          allowLoopback:
+            !app.isPackaged &&
+            ['test', 'development'].includes(process.env.NODE_ENV ?? '') &&
+            process.env.WINDOWS_NOTES_ALLOW_LOOPBACK === '1',
+        },
+      );
     } finally {
       key.fill(0);
     }
@@ -191,10 +207,7 @@ async function start() {
             );
           allowClose = true;
           current.close();
-          return {
-            ok: true,
-            state: { documents: [], selected_id: null, storage: 'encrypted' },
-          };
+          return { ok: true, closing: true };
         }
         if (command.operation === 'openRecoveryFolder') {
           if (await shell.openPath(dataDirectory))
@@ -207,25 +220,23 @@ async function start() {
             : { ok: true, state: state() };
         }
         const db = database();
-        if (command.operation === 'create') {
-          const draft = db.create(profile, command.value);
-          db.putValue(profile, 'selected-document', draft.id);
-        } else if (command.operation === 'select') {
-          db.get(profile, command.id);
-          db.putValue(profile, 'selected-document', command.id);
-        } else if (command.operation === 'save') {
-          db.save(profile, command.id, command.local_revision, command.value);
-        } else if (command.operation === 'delete') {
-          db.remove(profile, command.id);
-        } else if (command.operation === 'export') {
+        if (command.operation === 'export') {
+          const active = workspace();
+          active.assertScope(command.scope);
+          const profile = active.profile;
           const draft = db.get(profile, command.id);
           const suffix = command.format === 'markdown' ? 'md' : 'txt';
-          const name =
-            draft.title
-              .replace(/[<>:"/\\|?*\u0000-\u001f]/g, '')
-              .trim()
-              .replace(/[. ]+$/g, '')
-              .slice(0, 100) || 'Meeting';
+          let name =
+            Array.from(
+              draft.title
+                .replace(/[<>:"/\\|?*\u0000-\u001f]/g, '')
+                .trim()
+                .replace(/[. ]+$/g, ''),
+            )
+              .slice(0, 100)
+              .join('') || 'Meeting';
+          if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu.test(name))
+            name = `_${name}`;
           const result = await dialog.showSaveDialog(current, {
             title: 'Export unencrypted notes',
             defaultPath: join(app.getPath('documents'), `${name}.${suffix}`),
@@ -239,6 +250,8 @@ async function start() {
           });
           if (result.canceled || !result.filePath)
             return { ok: true, state: state(), notice: 'export_cancelled' };
+          active.assertScope(command.scope);
+          db.get(profile, command.id);
           const temporary = `${result.filePath}.${randomUUID()}.tmp`;
           try {
             await writeFile(
@@ -252,13 +265,18 @@ async function start() {
               ),
               { flag: 'wx', mode: 0o600, flush: true },
             );
+            active.assertScope(command.scope);
+            db.get(profile, command.id);
             await rename(temporary, result.filePath);
           } finally {
             await rm(temporary, { force: true });
           }
           return { ok: true, state: state(), notice: 'exported' };
         }
-        return desktopResponseSchema.parse({ ok: true, state: state() });
+        return desktopResponseSchema.parse({
+          ok: true,
+          state: await workspace().execute(command),
+        });
       } catch (error) {
         return { ok: false, error: safeError(error) };
       }
@@ -271,11 +289,14 @@ async function start() {
     current.webContents.send('notes:flush', closeNonce);
   });
   current.on('closed', () => {
+    controller?.dispose();
+    controller = null;
     store?.close();
     store = null;
     window = null;
   });
   await current.loadURL(page);
+  controller?.start();
 }
 if (!app.requestSingleInstanceLock()) app.quit();
 else {

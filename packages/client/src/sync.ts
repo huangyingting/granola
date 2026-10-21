@@ -270,8 +270,26 @@ export class SyncEngine {
         ((error.code === 'workspace_access_revoked' &&
           error.purgeWorkspaceId === this.workspace) ||
           (error.code === 'identity_not_provisioned' && error.status === 403))
-      )
-        this.local.purgeProfile(this.profile);
+      ) {
+        try {
+          this.local.purgeProfile(this.profile);
+        } catch (purgeError) {
+          console.error(
+            JSON.stringify({
+              code: 'revoked_cache_removal_failed',
+              kind: purgeError instanceof Error ? purgeError.name : 'unknown',
+            }),
+          );
+          throw new ClientError(
+            error.code,
+            'Access was revoked. Its encrypted cache could not be removed.',
+            403,
+            false,
+            0,
+            error.purgeWorkspaceId,
+          );
+        }
+      }
       throw error;
     }
   }

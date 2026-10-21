@@ -290,6 +290,9 @@ export class LocalStore {
     this.database.close();
     this.key.fill(0);
   }
+  atomic(run: () => undefined): void {
+    this.transaction(run);
+  }
   private seal(value: unknown, aad: string): Buffer {
     const nonce = randomBytes(12);
     const cipher = createCipheriv('aes-256-gcm', this.key, nonce);
@@ -432,6 +435,13 @@ export class LocalStore {
       .prepare('DELETE FROM vault WHERE profile=? AND id=?')
       .run(profile, id);
   }
+  purgeCredentials(except: string | null = null): void {
+    this.database
+      .prepare(
+        "DELETE FROM vault WHERE profile LIKE 'credentials:%' AND (? IS NULL OR profile<>?)",
+      )
+      .run(except, except);
+  }
   private row(profile: string, id: string): Row | null {
     const value = this.database
       .prepare('SELECT * FROM drafts WHERE profile=? AND id=?')
@@ -495,6 +505,61 @@ export class LocalStore {
         'This local document is unavailable.',
       );
     return this.public(row);
+  }
+  details(profile: string, id: string) {
+    const row = this.row(profile, id);
+    if (!row || row.deleted)
+      throw new LocalError(
+        'local_document_missing',
+        'This local document is unavailable.',
+      );
+    const value = this.payload(row);
+    const latest = value.conflict ?? value.server;
+    return {
+      transcript_revision: latest?.transcript_revision ?? 0,
+      conflict: row.conflict
+        ? {
+            remote: value.conflict ? editable(value.conflict) : null,
+            remote_revision: value.conflict?.revision ?? row.remote_revision,
+            deleted_remote: value.recovery !== null,
+          }
+        : null,
+    };
+  }
+  copyDrafts(
+    source: string,
+    destination: string,
+    mode: 'all' | 'unsent',
+  ): number {
+    if (source === destination)
+      throw new LocalError(
+        'invalid_copy_scope',
+        'Choose a different workspace for the copies.',
+      );
+    return this.transaction(() => {
+      let count = 0;
+      const rows = this.database
+        .prepare('SELECT * FROM drafts WHERE profile=? AND deleted=0')
+        .all(source);
+      for (const input of rows) {
+        const row = rowSchema.parse(input);
+        if (mode === 'unsent' && !row.dirty) continue;
+        const marker = `imported:${source}:${row.id}:${row.revision}`;
+        if (this.getValue(destination, marker, resourceId)) continue;
+        const copy = this.create(destination, pickEditable(this.payload(row)));
+        this.putValue(destination, marker, copy.id);
+        count++;
+      }
+      return count;
+    });
+  }
+  unsentCount(profile: string): number {
+    const row = this.database
+      .prepare(
+        'SELECT count(*) count FROM drafts WHERE profile=? AND deleted=0 AND dirty=1',
+      )
+      .get(profile);
+    return z.number().int().nonnegative().parse(row?.count);
   }
   create(
     profile: string,

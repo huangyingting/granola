@@ -5,6 +5,7 @@
   "references": [
     { "path": "../../packages/contracts" },
     { "path": "../../packages/local" },
+    { "path": "../../packages/client" },
     { "path": "./tsconfig.renderer.json" }
   ]
 }

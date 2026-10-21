@@ -1,15 +1,16 @@
 # Windows AI Notes
 
 An independent, self-hostable Windows meeting-notes project. The implementation
-includes a **secure offline desktop editor, P0 audio/recovery probe and initial server-side AI slice**, following the
+includes a **secure offline-first desktop editor with account synchronization, P0 audio/recovery probe and initial server-side AI slice**, following the
 [implementation plan](WINDOWS-AI-NOTES-IMPLEMENTATION-PLAN.md). It does not use
 Granola code, branding, credentials, or private services.
 
 **This is a developer preview, not production-ready software or a completed P0 gate.**
 The server can transcribe short WAV clips with Azure Speech and produce cited,
 structured meeting summaries with Azure OpenAI. The Windows helper is not yet
-wired to that server. The Electron editor currently works offline; desktop login,
-the network synchronization engine, recording controls and AI panels remain in progress.
+wired to that server. The Electron editor supports browser login, isolated cloud
+workspaces, background synchronization and explicit conflict recovery. Recording
+controls, live transcription and interactive AI workflows remain in progress.
 Real Windows audio behavior still requires the hardware checks below.
 
 ## Implemented
@@ -37,10 +38,11 @@ Real Windows audio behavior still requires the hardware checks below.
   synchronization with deletion tombstones and expired-cursor handling.
 - Sandboxed Electron/React editor with local search, basic formatting, tags,
   inline deletion confirmation and native exports. SQLite draft bodies,
-  credentials-ready vault values and frozen outbox requests use AES-256-GCM;
+  main-only credentials and frozen outbox requests use AES-256-GCM;
   Windows DPAPI protects the content key. Wrong or missing keys fail closed,
-  without resetting existing notes. Conflicts and deleted-document recovery
-  are implemented in the local store but are not yet connected to cloud UI.
+  without resetting existing notes. Browser-based OIDC login, workspace switching,
+  bounded background sync, two-version conflict decisions, deleted-document
+  recovery and cached transcript/job views are connected to the desktop.
 - A Fastify API and separate worker, backed by PostgreSQL: provisioned OIDC
   identities, workspace membership, private owner-only documents, optimistic
   revisions, immutable note/transcript history, idempotent AI jobs, leases/fences,
@@ -79,14 +81,35 @@ workspace revocation purges only the affected cache. Cursors, changed documents
 and encrypted transcript/job artifacts commit together. The v1 local vault is
 migrated transactionally without resetting keys, drafts or retries. Real
 HTTP/PostgreSQL/SQLite tests cover lost responses, two-device conflicts, expiry,
-deletion and revocation. This core is not yet wired to the offline preview UI.
+deletion and revocation.
 The OIDC client core uses a system-browser code/S256 flow and a loopback-only
 callback, validates signed ID/access tokens and state/nonce/audience/scope, and
 stores rotating refresh credentials only in the encrypted main-process vault.
 Refresh requests are durably fenced before sending; an uncertain rotation requires
 sign-in again rather than replaying a possibly consumed refresh token. Real
-synthetic-issuer tests cover rollover, cancellation and logout races; production
-identity-provider registration and the desktop account UI are still required.
+synthetic-issuer tests cover rollover, cancellation and logout races; a production
+identity-provider registration is still required.
+
+Open **Account & sync**, enter your administrator's HTTPS service origin and
+choose **Sign in with browser**. Select a provisioned workspace after signing in.
+Device-only drafts are **not uploaded automatically**: explicitly check the copy
+option when opening a workspace. Copies get new IDs; originals remain on the
+device, and repeated imports of an unchanged draft do not duplicate it.
+Switching back to **On this device** pauses cloud sync without signing out.
+
+Disconnecting clears all cached workspaces and local credentials transactionally.
+You can explicitly keep unsynced drafts as new device-only copies; pending
+deletions are not sent. Known access revocation removes the affected cache rather
+than copying forbidden content into an offline profile. If storage prevents its
+removal, the workspace is blocked and the failure is reported. Stale renderer
+writes cannot cross workspace boundaries, and failed editor saves offer new-copy
+or explicit discard/reload recovery. Provider revocation and browser-session
+logout are different: the app reports unsupported/unconfirmed token revocation
+and does not claim to sign out your browser.
+
+Only unpackaged builds with `NODE_ENV=test` or `development` and
+`WINDOWS_NOTES_ALLOW_LOOPBACK=1` permit HTTP loopback service/issuer fixtures.
+Packaged builds always require HTTPS.
 
 ```sh
 pnpm desktop:build
@@ -96,7 +119,8 @@ pnpm desktop:package:unsigned
 
 Windows CI exercises the actual Electron renderer and DPAPI, local restart
 persistence, invalid-save close protection, renderer isolation, key-loss recovery,
-and the packaged executable. It publishes an **unsigned developer-preview**
+real loopback OIDC, consent-gated synchronization, stale-editor recovery,
+revocation-driven UI clearing and the packaged executable. It publishes an **unsigned developer-preview**
 NSIS installer under the workflow artifacts; this is not a signed release or
 evidence of clean-machine install/upgrade/rollback compatibility.
 
@@ -245,7 +269,7 @@ idempotency key.
 This first slice uses PostgreSQL polling/leases as the durable scheduler rather
 than introducing unused Redis/BullMQ infrastructure. Full S3/resumable uploads,
 recording manifests/sealing, complete-meeting finalization, realtime STT, chat,
-the desktop account/sync UI, budget reservation/settlement and token streaming remain later
+interactive desktop AI, budget reservation/settlement and token streaming remain later
 implementation work. Successful jobs expose provider usage, but this is not a
 billing ledger; retries can incur duplicate provider charges.
 

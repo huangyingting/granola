@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { richTextSchema, tagsSchema } from './content.js';
-import { resourceId } from './server.js';
+import { resourceId, jobSchema, transcriptSchema } from './server.js';
 
 export const editableSchema = z.strictObject({
   title: z
@@ -20,38 +20,113 @@ export const draftSchema = editableSchema.extend({
 });
 export type EditableDraft = z.infer<typeof editableSchema>;
 export type Draft = z.infer<typeof draftSchema>;
+const scoped = { scope: z.number().int().positive() };
 export const desktopCommandSchema = z.discriminatedUnion('operation', [
   z.strictObject({ operation: z.literal('bootstrap') }),
   z.strictObject({
     operation: z.literal('create'),
+    ...scoped,
     value: editableSchema.optional(),
   }),
-  z.strictObject({ operation: z.literal('select'), id: resourceId }),
+  z.strictObject({ operation: z.literal('select'), ...scoped, id: resourceId }),
   z.strictObject({
     operation: z.literal('save'),
+    ...scoped,
     id: resourceId,
     local_revision: z.number().int().positive(),
     value: editableSchema,
   }),
   z.strictObject({
     operation: z.literal('delete'),
+    ...scoped,
     id: resourceId,
     confirmed: z.literal(true),
   }),
   z.strictObject({
     operation: z.literal('export'),
+    ...scoped,
     id: resourceId,
     format: z.enum(['markdown', 'text']),
   }),
   z.strictObject({ operation: z.literal('openRecoveryFolder') }),
   z.strictObject({ operation: z.literal('closeReady'), nonce: resourceId }),
+  z.strictObject({
+    operation: z.literal('connect'),
+    ...scoped,
+    service_url: z.url().max(2048),
+  }),
+  z.strictObject({ operation: z.literal('cancelConnect') }),
+  z.strictObject({
+    operation: z.literal('activateWorkspace'),
+    ...scoped,
+    workspace_id: resourceId,
+    copy_offline: z.boolean(),
+  }),
+  z.strictObject({ operation: z.literal('workOffline'), ...scoped }),
+  z.strictObject({ operation: z.literal('sync'), ...scoped }),
+  z.strictObject({
+    operation: z.literal('disconnect'),
+    ...scoped,
+    preserve_unsent: z.boolean(),
+  }),
+  z.strictObject({
+    operation: z.literal('resolve'),
+    ...scoped,
+    id: resourceId,
+    choice: z.enum(['local', 'remote', 'copy']),
+  }),
 ]);
+export const desktopConnectionSchema = z.strictObject({
+  status: z.enum([
+    'offline',
+    'connecting',
+    'switching',
+    'ready',
+    'syncing',
+    'attention',
+    'reauth_required',
+    'disconnecting',
+  ]),
+  service_url: z.string().nullable(),
+  user_id: resourceId.nullable(),
+  workspaces: z.array(
+    z.strictObject({ id: resourceId, name: z.string().max(200) }),
+  ),
+  active_workspace: resourceId.nullable(),
+  unsent_count: z.number().int().nonnegative(),
+  offline_count: z.number().int().nonnegative(),
+  next_retry_at: z.number().int().nonnegative(),
+  error: z
+    .strictObject({
+      code: z.string(),
+      message: z.string(),
+      retryable: z.boolean(),
+    })
+    .nullable(),
+});
+export const desktopConflictSchema = z.strictObject({
+  remote: editableSchema.nullable(),
+  remote_revision: z.number().int().nonnegative(),
+  deleted_remote: z.boolean(),
+});
 export const desktopStateSchema = z.strictObject({
+  version: z.number().int().positive(),
+  scope: z.number().int().positive(),
   documents: z.array(draftSchema),
   selected_id: resourceId.nullable(),
   storage: z.literal('encrypted'),
+  connection: desktopConnectionSchema,
+  conflict: desktopConflictSchema.nullable(),
+  transcript_revision: z.number().int().nonnegative(),
+  transcript: transcriptSchema.nullable(),
+  jobs: z.array(jobSchema).max(20),
 });
-export const desktopResponseSchema = z.discriminatedUnion('ok', [
+export const desktopChangeSchema = z.strictObject({
+  version: z.number().int().positive(),
+  scope: z.number().int().positive(),
+  kind: z.enum(['data', 'scope', 'revoked', 'status']),
+});
+export const desktopResponseSchema = z.union([
   z.strictObject({
     ok: z.literal(true),
     state: desktopStateSchema,
@@ -61,11 +136,15 @@ export const desktopResponseSchema = z.discriminatedUnion('ok', [
     ok: z.literal(false),
     error: z.strictObject({ code: z.string(), message: z.string() }),
   }),
+  z.strictObject({ ok: z.literal(true), closing: z.literal(true) }),
 ]);
 export type DesktopCommand = z.infer<typeof desktopCommandSchema>;
 export type DesktopState = z.infer<typeof desktopStateSchema>;
 export type DesktopResponse = z.infer<typeof desktopResponseSchema>;
+export type DesktopChange = z.infer<typeof desktopChangeSchema>;
+export type DesktopConnection = z.infer<typeof desktopConnectionSchema>;
 export interface DesktopBridge {
   invoke(command: DesktopCommand): Promise<DesktopResponse>;
   onFlush(callback: (nonce: string) => void): () => void;
+  onChanged(callback: (change: DesktopChange) => void): () => void;
 }

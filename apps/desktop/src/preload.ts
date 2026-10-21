@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from 'electron';
 import {
   desktopCommandSchema,
   desktopResponseSchema,
+  desktopChangeSchema,
   type DesktopBridge,
 } from '@windows-ai-notes/contracts/desktop';
 
@@ -19,6 +20,12 @@ const bridge: DesktopBridge = {
     };
     ipcRenderer.on('notes:flush', listener);
     return () => ipcRenderer.removeListener('notes:flush', listener);
+  },
+  onChanged(callback) {
+    const listener = (_event: Electron.IpcRendererEvent, value: unknown) =>
+      callback(desktopChangeSchema.parse(value));
+    ipcRenderer.on('notes:changed', listener);
+    return () => ipcRenderer.removeListener('notes:changed', listener);
   },
 };
 contextBridge.exposeInMainWorld('notes', bridge);

@@ -551,6 +551,217 @@ h1 {
   font-size: 11px;
   padding: 10px 13px;
 }
+.connection-button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 10px;
+  border-radius: 9px;
+  background: #e8edf5;
+  color: #64718b;
+  font-size: 11px;
+  text-align: left;
+}
+.connection-button > span:last-child {
+  margin-left: auto;
+  color: #8a96aa;
+  font-size: 10px;
+}
+.account-page {
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 48px;
+}
+.account-page h1 {
+  margin: 16px 0;
+}
+.account-intro,
+.conflict-panel > p,
+.recovery-panel p {
+  color: #8c97a9;
+  font-size: 12px;
+  line-height: 1.8;
+}
+.account-card {
+  border: 1px solid #e9edf5;
+  border-radius: 15px;
+  padding: 24px;
+  margin-top: 20px;
+  background: #fbfcfe;
+}
+.account-card h2,
+.conflict-panel h2 {
+  font-size: 17px;
+  font-weight: 600;
+  margin: 0 0 16px;
+}
+.field-label {
+  display: block;
+  color: #8c97a9;
+  font-size: 11px;
+  margin-bottom: 8px;
+}
+.service-input {
+  width: 100%;
+  padding: 12px 14px;
+  color: #4b5870;
+  background: white;
+  border: 1px solid #e1e7f1;
+  border-radius: 9px;
+}
+.inline-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 16px;
+  font-size: 12px;
+}
+.account-alert,
+.recovery-panel,
+.connection-warning {
+  color: #a17c53;
+  background: #fcf6ed;
+  border: 1px solid #f0e6d7;
+  border-radius: 10px;
+  font-size: 12px;
+  line-height: 1.7;
+  padding: 14px 16px;
+}
+.connection-warning {
+  margin: 18px 30px 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.checkbox-label {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  font-size: 12px;
+  color: #8390a6;
+  line-height: 1.8;
+  margin: 16px 0;
+}
+.checkbox-label input {
+  margin-top: 5px;
+  accent-color: #5962e8;
+}
+.workspace-list {
+  display: grid;
+  gap: 8px;
+}
+.workspace-option {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 16px;
+  background: white;
+  border: 1px solid #e6ebf3;
+  border-radius: 10px;
+  color: #62718b;
+  text-align: left;
+  font-size: 12px;
+}
+.workspace-option[aria-pressed='true'] {
+  background: #f1f0ff;
+  border-color: #dcdaf9;
+}
+.workspace-option > span:last-child {
+  color: #98a2b5;
+  font-size: 10px;
+}
+.logout-confirm > p {
+  color: #9b7d76;
+  font-size: 12px;
+  line-height: 1.8;
+}
+.conflict-panel {
+  background: #faf9ff;
+  border: 1px solid #e6e2f5;
+  border-radius: 12px;
+  padding: 20px;
+  margin-bottom: 24px;
+}
+.conflict-panel h2 {
+  margin-top: 10px;
+}
+.version-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.version-card {
+  background: white;
+  border: 1px solid #eceaf5;
+  border-radius: 9px;
+  padding: 16px;
+  min-width: 0;
+}
+.version-card h3 {
+  font-size: 13px;
+}
+.version-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 360px;
+  overflow-y: auto;
+  color: #8290a6;
+  font-size: 12px;
+  line-height: 1.8;
+}
+.meeting-artifacts {
+  border: 1px solid #e9edf5;
+  border-radius: 10px;
+  padding: 4px 16px;
+  margin-bottom: 24px;
+  color: #8491a6;
+  font-size: 12px;
+}
+.meeting-artifacts details {
+  padding: 14px 0;
+}
+.meeting-artifacts details + details {
+  border-top: 1px solid #edf0f5;
+}
+.meeting-artifacts summary {
+  cursor: pointer;
+  color: #64728c;
+}
+.meeting-artifacts summary span {
+  font-size: 10px;
+  color: #a0a9b8;
+  margin-left: 10px;
+}
+.transcript-segment {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  line-height: 1.8;
+  white-space: pre-wrap;
+}
+.transcript-segment > span {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: #a4aebc;
+}
+.job-card {
+  border-top: 1px solid #edf0f5;
+  padding-top: 14px;
+  margin-top: 16px;
+  line-height: 1.8;
+}
+.job-card > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.job-card > div > span {
+  text-transform: capitalize;
+  font-size: 10px;
+}
 @media (max-width: 1000px) {
   .shell {
     grid-template-columns: 235px minmax(0, 1fr);

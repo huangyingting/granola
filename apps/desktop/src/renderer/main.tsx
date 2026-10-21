@@ -15,6 +15,8 @@ import type {
   EditableDraft,
 } from '@windows-ai-notes/contracts/desktop';
 import './style.css';
+import { Account } from './Account.js';
+import { NoteExtras } from './NoteExtras.js';
 
 declare global {
   interface Window {
@@ -34,16 +36,47 @@ function App() {
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [query, setQuery] = useState('');
-  const [page, setPage] = useState<'notes' | 'storage'>('notes');
+  const [page, setPage] = useState<'notes' | 'storage' | 'account'>('notes');
+  const [switching, setSwitching] = useState(false);
   const flush = useRef<() => Promise<boolean>>(async () => true);
+  const latest = useRef<DesktopState | null>(null);
+  const minimumVersion = useRef(0);
+  const scope = useRef(1);
+  const authAttempt = useRef(0);
   async function invoke(command: DesktopCommand) {
+    const attempt =
+      command.operation === 'connect' || command.operation === 'cancelConnect'
+        ? ++authAttempt.current
+        : authAttempt.current;
     try {
       const response = await window.notes.invoke(command);
       if (!response.ok) {
+        if (
+          (command.operation === 'connect' &&
+            attempt !== authAttempt.current) ||
+          ('scope' in command &&
+            command.scope !== scope.current &&
+            ![
+              'connect',
+              'activateWorkspace',
+              'disconnect',
+              'workOffline',
+            ].includes(command.operation))
+        )
+          return null;
         setError(response.error.message);
         return null;
       }
-      setState(response.state);
+      if ('closing' in response) return null;
+      if (
+        response.state.version >= minimumVersion.current &&
+        response.state.version >= (latest.current?.version ?? 0)
+      ) {
+        latest.current = response.state;
+        scope.current = response.state.scope;
+        setState(response.state);
+      }
+      if (response.state.scope !== scope.current) return null;
       if (command.operation !== 'save') setError('');
       if (response.notice === 'exported')
         setNotice('Unencrypted export saved.');
@@ -56,8 +89,7 @@ function App() {
     }
   }
   useEffect(() => {
-    void invoke({ operation: 'bootstrap' });
-    return window.notes.onFlush((nonce) => {
+    const offFlush = window.notes.onFlush((nonce) => {
       void flush
         .current()
         .then((saved) => {
@@ -69,6 +101,52 @@ function App() {
           setError('Notes could not be saved. The window was kept open.'),
         );
     });
+    let refreshing = false;
+    let requestedVersion = 0;
+    const offChanged = window.notes.onChanged((change) => {
+      requestedVersion = Math.max(requestedVersion, change.version);
+      if (change.kind === 'revoked' || change.scope !== scope.current) {
+        minimumVersion.current = Math.max(
+          minimumVersion.current,
+          change.version,
+        );
+        scope.current = change.scope;
+        if (change.kind === 'revoked') {
+          flush.current = async () => true;
+          latest.current = null;
+          setState(null);
+          setPage('account');
+          setError('');
+          setNotice(
+            'Workspace access changed. The previous workspace is no longer available.',
+          );
+        }
+        void invoke({ operation: 'bootstrap' });
+        return;
+      }
+      if (refreshing) return;
+      refreshing = true;
+      void (async () => {
+        try {
+          while (requestedVersion > (latest.current?.version ?? 0)) {
+            if (!(await flush.current())) return;
+            const result = await invoke({ operation: 'bootstrap' });
+            if (!result || result.version < requestedVersion) return;
+          }
+        } finally {
+          refreshing = false;
+        }
+      })().catch(() =>
+        setError(
+          'Workspace updates could not be loaded. Your editor text is still here.',
+        ),
+      );
+    });
+    void invoke({ operation: 'bootstrap' });
+    return () => {
+      offFlush();
+      offChanged();
+    };
   }, []);
   const selected =
     state?.documents.find((document) => document.id === state.selected_id) ??
@@ -82,8 +160,23 @@ function App() {
   async function create() {
     if (!(await flush.current())) return;
     setPage('notes');
-    await invoke({ operation: 'create' });
+    await invoke({ operation: 'create', scope: scope.current });
   }
+  async function switchScope(command: DesktopCommand) {
+    if (!(await flush.current())) return null;
+    setSwitching(true);
+    try {
+      const result = await invoke(command);
+      if (result && command.operation !== 'disconnect') setPage('notes');
+      return result;
+    } finally {
+      setSwitching(false);
+    }
+  }
+  const blocked =
+    switching ||
+    state?.connection.status === 'disconnecting' ||
+    state?.connection.status === 'switching';
   return (
     <div className="shell">
       <aside className="sidebar">
@@ -96,7 +189,7 @@ function App() {
         <button
           className="primary new-note"
           onClick={() => void create()}
-          disabled={!state}
+          disabled={!state || blocked}
         >
           + New meeting
         </button>
@@ -117,11 +210,16 @@ function App() {
             <button
               key={document.id}
               className={`meeting-card ${selected?.id === document.id ? 'selected' : ''}`}
+              disabled={blocked}
               onClick={() => {
                 void (async () => {
                   if (!(await flush.current())) return;
                   setPage('notes');
-                  await invoke({ operation: 'select', id: document.id });
+                  await invoke({
+                    operation: 'select',
+                    scope: scope.current,
+                    id: document.id,
+                  });
                 })();
               }}
             >
@@ -146,7 +244,32 @@ function App() {
           ))}
         </nav>
         <button
+          className="connection-button"
+          disabled={!state || blocked}
+          onClick={() => {
+            void flush.current().then((saved) => {
+              if (saved) setPage('account');
+            });
+          }}
+        >
+          <span
+            className={`status-dot ${state?.connection.error ? 'attention' : ''}`}
+          />
+          {state?.connection.status === 'syncing'
+            ? 'Syncing workspace...'
+            : state?.connection.status === 'reauth_required'
+              ? 'Sign in again'
+              : state?.connection.active_workspace
+                ? (state.connection.workspaces.find(
+                    (workspace) =>
+                      workspace.id === state.connection.active_workspace,
+                  )?.name ?? 'Cloud workspace')
+                : 'Device only'}
+          <span>Account & sync</span>
+        </button>
+        <button
           className="storage-button"
+          disabled={blocked}
           onClick={() => {
             void flush.current().then((saved) => {
               if (saved) setPage('storage');
@@ -160,9 +283,11 @@ function App() {
       <main>
         <header className="topbar">
           <span>
-            {page === 'storage'
-              ? 'Your space, your control'
-              : 'MEETING WORKSPACE'}
+            {page === 'account'
+              ? 'ACCOUNT & WORKSPACES'
+              : page === 'storage'
+                ? 'Your space, your control'
+                : 'MEETING WORKSPACE'}
           </span>
           <span className={`privacy-chip ${state ? '' : 'locked'}`}>
             {state ? 'Encrypted on this device' : 'Storage unavailable'}
@@ -192,7 +317,29 @@ function App() {
             </button>
           </div>
         )}
-        {page === 'storage' ? (
+        {state?.connection.error && page !== 'account' && (
+          <div className="connection-warning" role="status">
+            {state.connection.error.message}
+            <button
+              className="quiet-button"
+              onClick={() => {
+                void flush.current().then((saved) => {
+                  if (saved) setPage('account');
+                });
+              }}
+            >
+              Account details
+            </button>
+          </div>
+        )}
+        {page === 'account' && state ? (
+          <Account
+            state={state}
+            invoke={invoke}
+            switchScope={switchScope}
+            blocked={blocked}
+          />
+        ) : page === 'storage' ? (
           <section className="privacy-page">
             <span className="eyebrow">LOCAL FIRST</span>
             <h1>
@@ -213,8 +360,8 @@ function App() {
                 <span className="tile-icon teal">02</span>
                 <h2>Yours, even offline</h2>
                 <p>
-                  This preview saves on your device. Cloud connection and
-                  recording are not enabled in this checkpoint.
+                  Device-only drafts stay here until you explicitly copy them to
+                  a connected workspace. Cloud notes remain available offline.
                 </p>
               </article>
               <article>
@@ -240,10 +387,11 @@ function App() {
               share or retain readable notes.
             </p>
           </section>
-        ) : selected ? (
+        ) : selected && state ? (
           <Note
-            key={selected.id}
+            key={`${state.scope}:${selected.id}`}
             draft={selected}
+            state={state}
             flush={flush}
             invoke={invoke}
             setError={setError}
@@ -267,7 +415,7 @@ function App() {
             <button
               className="primary"
               onClick={() => void create()}
-              disabled={!state}
+              disabled={!state || blocked}
             >
               Create your first meeting <span aria-hidden="true">&#x2192;</span>
             </button>
@@ -281,11 +429,13 @@ function App() {
 type Invoke = (command: DesktopCommand) => Promise<DesktopState | null>;
 function Note({
   draft,
+  state,
   flush,
   invoke,
   setError,
 }: {
   draft: Draft;
+  state: DesktopState;
   flush: React.RefObject<() => Promise<boolean>>;
   invoke: Invoke;
   setError: (message: string) => void;
@@ -295,6 +445,7 @@ function Note({
   const [saving, setSaving] = useState(false);
   const [unsaved, setUnsaved] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [confirmDiscard, setConfirmDiscard] = useState(false);
   const current = useRef(draft);
   const value = useRef<EditableDraft>({
     title: draft.title,
@@ -345,6 +496,7 @@ function Note({
           const snapshot = value.current;
           const result = await invoke({
             operation: 'save',
+            scope: state.scope,
             id: draft.id,
             local_revision: current.current.local_revision,
             value: snapshot,
@@ -368,7 +520,6 @@ function Note({
         return true;
       } finally {
         setUnsaved(pending.current || invalid.current.size > 0);
-        setSaving(false);
       }
     })();
     running.current = operation;
@@ -376,6 +527,7 @@ function Note({
       return await operation;
     } finally {
       running.current = null;
+      setSaving(false);
     }
   }
   useEffect(() => {
@@ -384,6 +536,31 @@ function Note({
       flush.current = async () => true;
     };
   }, []);
+  useEffect(() => {
+    if (
+      !editor ||
+      pending.current ||
+      running.current ||
+      draft.local_revision === current.current.local_revision
+    )
+      return;
+    loadDraft(draft);
+  }, [draft.local_revision, editor, saving]);
+  function loadDraft(updated: Draft) {
+    current.current = updated;
+    value.current = {
+      title: updated.title,
+      content: updated.content,
+      tags: updated.tags,
+    };
+    pending.current = false;
+    invalid.current.clear();
+    setTitle(updated.title);
+    setTagText(updated.tags.join(', '));
+    editor?.commands.setContent(updated.content, { emitUpdate: false });
+    setUnsaved(false);
+    setConfirmDiscard(false);
+  }
   function changeTitle(text: string) {
     setTitle(text);
     value.current = { ...value.current, title: text };
@@ -437,6 +614,7 @@ function Note({
                 if (saved)
                   return invoke({
                     operation: 'export',
+                    scope: state.scope,
                     id: draft.id,
                     format: 'markdown',
                   });
@@ -453,6 +631,7 @@ function Note({
                 if (saved)
                   return invoke({
                     operation: 'export',
+                    scope: state.scope,
                     id: draft.id,
                     format: 'text',
                   });
@@ -473,8 +652,12 @@ function Note({
       {confirmDelete && (
         <div className="delete-confirm">
           <div>
-            <strong>Delete this local meeting?</strong>
-            <p>This removes the saved notes from this device.</p>
+            <strong>Delete this meeting?</strong>
+            <p>
+              {state.connection.active_workspace
+                ? 'Deletion will sync to the cloud. Other devices will remove their cached copy.'
+                : 'This removes the saved notes from this device.'}
+            </p>
           </div>
           <button className="secondary" onClick={() => setConfirmDelete(false)}>
             Keep notes
@@ -486,6 +669,7 @@ function Note({
                 if (saved)
                   return invoke({
                     operation: 'delete',
+                    scope: state.scope,
                     id: draft.id,
                     confirmed: true,
                   });
@@ -497,6 +681,73 @@ function Note({
           </button>
         </div>
       )}
+      {unsaved && !saving && (
+        <div className="recovery-panel" role="status">
+          <strong>Your editor has unsaved changes.</strong>
+          <p>
+            If the saved version changed, keep this text as a new meeting or
+            deliberately reload the saved version.
+          </p>
+          <div className="inline-actions">
+            <button
+              className="secondary"
+              disabled={invalid.current.size > 0}
+              onClick={() => {
+                void invoke({
+                  operation: 'create',
+                  scope: state.scope,
+                  value: value.current,
+                });
+              }}
+            >
+              Save editor as a new copy
+            </button>
+            <button
+              className="quiet-button"
+              onClick={() => setConfirmDiscard(true)}
+            >
+              Reload saved version
+            </button>
+          </div>
+          {confirmDiscard && (
+            <div className="inline-actions">
+              <span>This discards the unsaved editor text.</span>
+              <button
+                className="secondary"
+                onClick={() => setConfirmDiscard(false)}
+              >
+                Keep editing
+              </button>
+              <button
+                className="danger-button"
+                onClick={() => {
+                  void invoke({ operation: 'bootstrap' }).then((result) => {
+                    const updated = result?.documents.find(
+                      (document) => document.id === draft.id,
+                    );
+                    if (updated) loadDraft(updated);
+                  });
+                }}
+              >
+                Discard editor changes
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+      <NoteExtras
+        state={state}
+        draft={draft}
+        resolve={async (choice) => {
+          if (await save())
+            await invoke({
+              operation: 'resolve',
+              scope: state.scope,
+              id: draft.id,
+              choice,
+            });
+        }}
+      />
       <input
         className="title-input"
         aria-label="Meeting title"
@@ -552,7 +803,10 @@ function Note({
           words
         </span>
         <span>
-          Exports are unencrypted. Cloud and audio integration are coming next.
+          Exports are unencrypted.{' '}
+          {state.connection.active_workspace
+            ? labels[draft.status]
+            : 'Device-only draft.'}
         </span>
       </footer>
     </section>

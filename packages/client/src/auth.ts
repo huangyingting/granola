@@ -93,10 +93,15 @@ function endpoint(value: string, allowLoopback: boolean): URL {
     );
   return url;
 }
-export function clientConfiguration(service: string, allowLoopback = false) {
+export function clientConfiguration(
+  service: string,
+  allowLoopback = false,
+  signal?: AbortSignal,
+) {
   return new ApiClient(service, async () => ({}), { allowLoopback }).request(
     '/v1/client-config',
     oidcClientConfigurationSchema,
+    signal ? { signal } : {},
   );
 }
 export class OidcClient {
@@ -675,7 +680,10 @@ export class AccountSession {
     this.refreshing = work;
     return work;
   }
-  async logout(): Promise<{
+  async logout(
+    beforeForget: () => undefined = () => undefined,
+    signal: AbortSignal = AbortSignal.timeout(20_000),
+  ): Promise<{
     remote: 'revoked' | 'unsupported' | 'unconfirmed';
   }> {
     let current: Session | null = null;
@@ -687,14 +695,17 @@ export class AccountSession {
       unreadable = true;
     }
     this.cancel();
-    this.local.deleteValue(this.profile, 'session');
+    this.local.atomic(() => {
+      beforeForget();
+      this.local.deleteValue(this.profile, 'session');
+    });
     if (unreadable) return { remote: 'unconfirmed' };
     if (!current || current.status !== 'active')
       return { remote: current ? 'unconfirmed' : 'unsupported' };
     try {
       const revoked = await this.oidc.revoke(
         current.refresh_token,
-        AbortSignal.timeout(20_000),
+        AbortSignal.any([signal, AbortSignal.timeout(20_000)]),
       );
       return { remote: revoked ? 'revoked' : 'unsupported' };
     } catch (error) {

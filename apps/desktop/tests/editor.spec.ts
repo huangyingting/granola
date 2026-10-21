@@ -94,7 +94,7 @@ test('persists rich text across restart, isolates the renderer and keeps local f
     ).toEqual({
       node: 'undefined',
       process: 'undefined',
-      filesystem: ['invoke', 'onFlush'],
+      filesystem: ['invoke', 'onChanged', 'onFlush'],
     });
     expect(
       await application.evaluate(({ BrowserWindow, safeStorage }) => ({
