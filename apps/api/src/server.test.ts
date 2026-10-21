@@ -1,8 +1,9 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 import { setTimeout as delay } from 'node:timers/promises';
 import { beforeAll, afterAll, describe, expect, it, vi } from 'vitest';
 import { generateKeyPair, exportJWK, SignJWT } from 'jose';
-import { Database } from '@windows-ai-notes/db';
+import { Database, digest, recordChange } from '@windows-ai-notes/db';
 import { type AiProviders } from '@windows-ai-notes/ai';
 import { makeSilentWav } from '@windows-ai-notes/ai/wav';
 import {
@@ -12,7 +13,10 @@ import {
   type SummarySnapshot,
   type Summary,
   type JobResult,
+  syncSnapshotSchema,
+  syncChangesSchema,
 } from '@windows-ai-notes/contracts/server';
+import { richTextFromPlainText } from '@windows-ai-notes/contracts/content';
 import { runOnce } from '@windows-ai-notes/worker';
 import { createServer } from './server.js';
 
@@ -739,5 +743,365 @@ describe.skipIf(!databaseUrl)('PostgreSQL API and durable AI worker', () => {
     expect((await db.job(owner.user_id, job.id)).error?.code).toBe(
       'attempts_exhausted',
     );
+  });
+  it('upgrades existing v1 data and preserves legacy creation idempotency', async () => {
+    const legacySchema = `${schema}_legacy`;
+    await admin.pool.query(`CREATE SCHEMA "${legacySchema}"`);
+    const url = new URL(databaseUrl!);
+    url.searchParams.set('options', `-c search_path=${legacySchema}`);
+    const legacy = new Database(url.href);
+    try {
+      const sql = await readFile(
+        new URL(
+          '../../../packages/db/migrations/001_initial.sql',
+          import.meta.url,
+        ),
+        'utf8',
+      );
+      await legacy.pool.query(
+        'CREATE TABLE schema_migrations (version integer PRIMARY KEY, checksum text NOT NULL)',
+      );
+      await legacy.pool.query(sql);
+      await legacy.pool.query('INSERT INTO schema_migrations VALUES (1,$1)', [
+        createHash('sha256').update(sql).digest('hex'),
+      ]);
+      const user = await legacy.provision(
+        'urn:windows-ai-notes:development',
+        randomUUID(),
+      );
+      const id = randomUUID();
+      const input = {
+        workspace_id: user.workspace_id,
+        title: 'Legacy',
+        notes: 'Unchanged\r\nnotes.',
+      };
+      const key = randomUUID();
+      await legacy.pool.query(
+        'INSERT INTO documents (id,workspace_id,owner_id,title,create_key,create_hash) VALUES ($1,$2,$3,$4,$5,$6)',
+        [id, user.workspace_id, user.user_id, input.title, key, digest(input)],
+      );
+      await legacy.pool.query(
+        'INSERT INTO note_versions (document_id,revision,notes) VALUES ($1,1,$2)',
+        [id, input.notes],
+      );
+      await legacy.migrate();
+      await legacy.assertReady();
+      expect(
+        await legacy.createDocument(user.user_id, input, key),
+      ).toMatchObject({ id, notes: input.notes, content: null, tags: [] });
+      await legacy.pool.query(
+        "UPDATE schema_migrations SET checksum='modified' WHERE version=1",
+      );
+      await expect(legacy.migrate()).rejects.toThrow(
+        'Applied migration checksum mismatch.',
+      );
+    } finally {
+      await legacy.close();
+      await admin.pool.query(`DROP SCHEMA "${legacySchema}" CASCADE`);
+    }
+  });
+  it('supports offline document IDs, rich notes, tags and content-safe exports', async () => {
+    const owner = await actor();
+    const id = randomUUID();
+    const content = richTextFromPlainText('Notes with 中文 and <tags>.');
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/documents',
+      headers: { ...owner.headers, 'idempotency-key': randomUUID() },
+      payload: {
+        id,
+        workspace_id: owner.workspace_id,
+        title: 'Offline draft',
+        content,
+        tags: ['Planning'],
+      },
+    });
+    expect(response.statusCode).toBe(201);
+    expect(documentSchema.parse(response.json())).toMatchObject({
+      id,
+      content,
+      notes: 'Notes with 中文 and <tags>.',
+      tags: ['Planning'],
+    });
+    const other = await actor(owner.workspace_id);
+    const collision = await app.inject({
+      method: 'POST',
+      url: '/v1/documents',
+      headers: { ...other.headers, 'idempotency-key': randomUUID() },
+      payload: { id, workspace_id: owner.workspace_id, title: 'Collision' },
+    });
+    expect(collision.statusCode).toBe(409);
+    const markdown = await app.inject({
+      url: `/v1/documents/${id}/export`,
+      headers: owner.headers,
+    });
+    expect(markdown.statusCode).toBe(200);
+    expect(markdown.headers['content-disposition']).toContain('.md');
+    expect(markdown.body).toContain('Notes with 中文 and &lt;tags&gt;\\.');
+    expect(
+      (
+        await app.inject({
+          url: `/v1/documents/${id}/export`,
+          headers: other.headers,
+        })
+      ).statusCode,
+    ).toBe(404);
+    const invalid = await app.inject({
+      method: 'PUT',
+      url: `/v1/documents/${id}/notes`,
+      headers: owner.headers,
+      payload: { base_revision: 1, content, notes: 'Different evidence' },
+    });
+    expect(invalid.statusCode).toBe(400);
+  });
+  it('replays idempotent note mutations without overwriting intervening edits', async () => {
+    const owner = await actor();
+    const doc = await document(owner);
+    const key = randomUUID();
+    const payload = {
+      base_revision: 1,
+      content: richTextFromPlainText('Saved once.'),
+    };
+    const request = {
+      method: 'PUT' as const,
+      url: `/v1/documents/${doc.id}/notes`,
+      headers: { ...owner.headers, 'idempotency-key': key },
+      payload,
+    };
+    expect(
+      documentSchema.parse((await app.inject(request)).json()),
+    ).toMatchObject({ revision: 2, applied_revision: 2 });
+    expect(
+      (
+        await app.inject({
+          method: 'PATCH',
+          url: `/v1/documents/${doc.id}`,
+          headers: request.headers,
+          payload: {
+            base_revision: 2,
+            title: 'Metadata uses its own route scope',
+            tags: ['Edited'],
+          },
+        })
+      ).statusCode,
+    ).toBe(200);
+    await db.edit(owner.user_id, doc.id, 3, { notes: 'Newer edit.' });
+    const replayed = documentSchema.parse((await app.inject(request)).json());
+    expect(replayed).toMatchObject({
+      revision: 4,
+      applied_revision: 2,
+      notes: 'Newer edit.',
+      tags: ['Edited'],
+    });
+    expect(
+      (
+        await app.inject({
+          ...request,
+          payload: { base_revision: 1, notes: 'Changed input' },
+        })
+      ).statusCode,
+    ).toBe(409);
+    const stale = await app.inject({
+      ...request,
+      headers: { ...owner.headers, 'idempotency-key': randomUUID() },
+    });
+    expect(stale.statusCode).toBe(409);
+    expect(stale.json().current_revision).toBe(4);
+    await db.deleteDocument(owner.user_id, doc.id);
+    expect((await app.inject(request)).statusCode).toBe(404);
+  });
+  it('keeps a stable bootstrap watermark across snapshot pages and subsequent mutations', async () => {
+    const owner = await actor();
+    const ids = [1, 2, 4].map(
+      (last) => `00000000-0000-4000-8000-${String(last).padStart(12, '0')}`,
+    );
+    const create = async (id: string) => {
+      const result = await app.inject({
+        method: 'POST',
+        url: '/v1/documents',
+        headers: { ...owner.headers, 'idempotency-key': randomUUID() },
+        payload: { id, workspace_id: owner.workspace_id, title: id },
+      });
+      expect(result.statusCode).toBe(201);
+    };
+    await create(ids[1]!);
+    await create(ids[2]!);
+    const first = syncSnapshotSchema.parse(
+      (
+        await app.inject({
+          url: `/v1/sync/snapshot?workspace_id=${owner.workspace_id}&limit=1`,
+          headers: owner.headers,
+        })
+      ).json(),
+    );
+    expect(first.documents.map((item) => item.id)).toEqual([ids[1]]);
+    await create(ids[0]!);
+    await db.edit(owner.user_id, ids[2]!, 1, {
+      title: 'Changed during snapshot',
+    });
+    await db.deleteDocument(owner.user_id, ids[1]!);
+    const second = syncSnapshotSchema.parse(
+      (
+        await app.inject({
+          url: `/v1/sync/snapshot?workspace_id=${owner.workspace_id}&limit=1&after=${first.next_after}&cursor=${first.cursor}`,
+          headers: owner.headers,
+        })
+      ).json(),
+    );
+    expect(second.cursor).toBe(first.cursor);
+    expect(second.documents.map((item) => item.id)).toEqual([ids[2]]);
+    expect(second.has_more).toBe(false);
+    let cursor = first.cursor;
+    const changes = [];
+    for (let page = 0; page < 3; page++) {
+      const result = syncChangesSchema.parse(
+        (
+          await app.inject({
+            url: `/v1/sync/changes?workspace_id=${owner.workspace_id}&cursor=${cursor}&limit=1`,
+            headers: owner.headers,
+          })
+        ).json(),
+      );
+      changes.push(...result.changes);
+      cursor = result.cursor;
+      expect(result.has_more).toBe(page < 2);
+    }
+    expect(changes.map((change) => [change.document_id, change.kind])).toEqual([
+      [ids[0], 'document'],
+      [ids[2], 'document'],
+      [ids[1], 'deleted'],
+    ]);
+  });
+  it('scopes sync to owners, invalidates revoked membership cursors and reports retention expiry', async () => {
+    const owner = await actor();
+    const colleague = await actor(owner.workspace_id);
+    const first = await db.sync.snapshot(owner.user_id, owner.workspace_id);
+    const privateDoc = await document(
+      colleague,
+      'Must never appear in another owner sync.',
+    );
+    const own = await document(owner);
+    const changed = await db.sync.changes(
+      owner.user_id,
+      owner.workspace_id,
+      first.cursor,
+    );
+    expect(changed.changes.map((item) => item.document_id)).toEqual([own.id]);
+    expect(JSON.stringify(changed)).not.toContain(privateDoc.id);
+    await expect(
+      db.sync.changes(colleague.user_id, owner.workspace_id, first.cursor),
+    ).rejects.toMatchObject({ code: 'invalid_sync_cursor' });
+    await db.pool.query(
+      'UPDATE memberships SET active=false WHERE workspace_id=$1 AND user_id=$2',
+      [owner.workspace_id, owner.user_id],
+    );
+    await expect(
+      db.sync.changes(owner.user_id, owner.workspace_id, changed.cursor),
+    ).rejects.toMatchObject({
+      code: 'workspace_access_revoked',
+      details: { purge_workspace_id: owner.workspace_id },
+    });
+    await db.pool.query(
+      'UPDATE memberships SET active=true WHERE workspace_id=$1 AND user_id=$2',
+      [owner.workspace_id, owner.user_id],
+    );
+    await expect(
+      db.sync.changes(owner.user_id, owner.workspace_id, changed.cursor),
+    ).rejects.toMatchObject({ code: 'sync_cursor_expired' });
+    const reset = await db.sync.snapshot(owner.user_id, owner.workspace_id);
+    await db.edit(owner.user_id, own.id, 1, { notes: 'A later edit' });
+    await db.pool.query(
+      "UPDATE sync_changes SET created_at=now()-interval '8 days' WHERE workspace_id=$1",
+      [owner.workspace_id],
+    );
+    await db.cleanup();
+    await expect(
+      db.sync.changes(owner.user_id, owner.workspace_id, reset.cursor),
+    ).rejects.toMatchObject({ code: 'sync_cursor_expired' });
+    expect(
+      (await db.sync.snapshot(owner.user_id, owner.workspace_id)).documents,
+    ).toHaveLength(1);
+  });
+  it('does not advance sync beyond a transaction that has not committed', async () => {
+    const owner = await actor();
+    const a = await document(owner);
+    const b = await document(owner);
+    const snapshot = await db.sync.snapshot(owner.user_id, owner.workspace_id);
+    let release!: () => void;
+    let entered!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const ready = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const first = db.transaction(async (tx) => {
+      await recordChange(tx, a.id, 'document');
+      entered();
+      await held;
+    });
+    await ready;
+    const second = db.edit(owner.user_id, b.id, 1, { title: 'Second writer' });
+    try {
+      expect(
+        (
+          await db.sync.changes(
+            owner.user_id,
+            owner.workspace_id,
+            snapshot.cursor,
+          )
+        ).changes,
+      ).toHaveLength(0);
+    } finally {
+      release();
+      await Promise.all([first, second]);
+    }
+    expect(
+      (
+        await db.sync.changes(
+          owner.user_id,
+          owner.workspace_id,
+          snapshot.cursor,
+        )
+      ).changes.map((change) => change.document_id),
+    ).toEqual([a.id, b.id]);
+  });
+  it('makes durable job history and lifecycle changes discoverable without exposing inputs', async () => {
+    const owner = await actor();
+    const other = await actor(owner.workspace_id);
+    const doc = await document(owner);
+    const snapshot = await db.sync.snapshot(owner.user_id, owner.workspace_id);
+    const job = await enqueue(owner, doc.id);
+    await runOnce(db, providers);
+    const response = await app.inject({
+      url: `/v1/documents/${doc.id}/jobs`,
+      headers: owner.headers,
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().jobs[0]).toMatchObject({
+      id: job.id,
+      state: 'succeeded',
+    });
+    expect(response.json().jobs[0]).not.toHaveProperty('input');
+    expect(response.json().jobs[0]).not.toHaveProperty('audio');
+    expect(
+      (
+        await app.inject({
+          url: `/v1/documents/${doc.id}/jobs`,
+          headers: other.headers,
+        })
+      ).statusCode,
+    ).toBe(404);
+    const changes = await db.sync.changes(
+      owner.user_id,
+      owner.workspace_id,
+      snapshot.cursor,
+    );
+    expect(
+      changes.changes.every(
+        (change) => change.kind === 'job' && change.job_id === job.id,
+      ),
+    ).toBe(true);
+    expect(changes.changes).toHaveLength(3);
   });
 });

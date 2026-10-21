@@ -1,4 +1,11 @@
 import { z } from 'zod';
+import {
+  notesTextSchema,
+  richTextSchema,
+  richTextToPlainText,
+  tagsSchema,
+  type RichTextDocument,
+} from './content.js';
 
 export const resourceId = z.uuidv4();
 export const revision = z.number().int().nonnegative();
@@ -6,19 +13,81 @@ export const locale = z.enum(['en-US', 'zh-CN']);
 export const idempotencyKey = z.string().regex(/^[A-Za-z0-9_.:-]{8,128}$/);
 export const MAX_AUDIO_BYTES = 60 * 16_000 * 2 + 44;
 
-export const createDocumentSchema = z.strictObject({
-  workspace_id: resourceId,
-  title: z.string().trim().min(1).max(200),
-  notes: z.string().max(40_000).default(''),
-});
-export const updateNotesSchema = z.strictObject({
-  base_revision: revision.min(1),
-  notes: z.string().max(40_000),
-});
-export const updateDocumentSchema = z.strictObject({
-  base_revision: revision.min(1),
-  title: z.string().trim().min(1).max(200),
-});
+const noteFields = {
+  notes: notesTextSchema.optional(),
+  content: richTextSchema.nullish(),
+};
+function validateNoteFields(
+  value: {
+    notes?: string | undefined;
+    content?: RichTextDocument | null | undefined;
+  },
+  ctx: z.RefinementCtx,
+) {
+  if (
+    value.content &&
+    value.notes !== undefined &&
+    value.notes !== richTextToPlainText(value.content)
+  )
+    ctx.addIssue({
+      code: 'custom',
+      message: 'Plain text must agree with the structured notes.',
+      path: ['notes'],
+    });
+}
+function normalizeNotes(value: {
+  notes?: string | undefined;
+  content?: RichTextDocument | null | undefined;
+}) {
+  return {
+    notes: value.content
+      ? richTextToPlainText(value.content)
+      : (value.notes ?? ''),
+    content: value.content ?? null,
+  };
+}
+export const createDocumentSchema = z
+  .strictObject({
+    id: resourceId.optional(),
+    workspace_id: resourceId,
+    title: z
+      .string()
+      .trim()
+      .min(1)
+      .max(200)
+      .refine((text) => !text.includes('\0')),
+    tags: tagsSchema.default([]),
+    ...noteFields,
+  })
+  .superRefine(validateNoteFields)
+  .transform((value) => ({ ...value, ...normalizeNotes(value) }));
+export const updateNotesSchema = z
+  .strictObject({
+    base_revision: revision.min(1),
+    ...noteFields,
+  })
+  .superRefine(validateNoteFields)
+  .refine(
+    (value) => value.notes !== undefined || !!value.content,
+    'Provide notes or structured content.',
+  )
+  .transform((value) => ({ ...value, ...normalizeNotes(value) }));
+export const updateDocumentSchema = z
+  .strictObject({
+    base_revision: revision.min(1),
+    title: z
+      .string()
+      .trim()
+      .min(1)
+      .max(200)
+      .refine((text) => !text.includes('\0'))
+      .optional(),
+    tags: tagsSchema.optional(),
+  })
+  .refine(
+    (value) => value.title !== undefined || value.tags !== undefined,
+    'Provide a title or tags.',
+  );
 export const segmentSchema = z
   .strictObject({
     id: resourceId,
@@ -52,6 +121,9 @@ export const documentSchema = z.strictObject({
   revision: revision.min(1),
   transcript_revision: revision,
   notes: z.string(),
+  content: richTextSchema.nullable(),
+  tags: tagsSchema,
+  applied_revision: revision.min(1).optional(),
   created_at: z.iso.datetime(),
   updated_at: z.iso.datetime(),
 });
@@ -176,6 +248,47 @@ export const jobEventSchema = z.strictObject({
   created_at: z.string(),
   payload: z.unknown(),
 });
+const cursorToken = z
+  .string()
+  .regex(/^[A-Za-z0-9_-]+$/)
+  .max(1024);
+export const syncSnapshotQuerySchema = z
+  .strictObject({
+    workspace_id: resourceId,
+    cursor: cursorToken.optional(),
+    after: resourceId.optional(),
+    limit: z.coerce.number().int().min(1).max(25).default(10),
+  })
+  .refine(
+    (value) => !value.after || !!value.cursor,
+    'Snapshot pagination requires its original cursor.',
+  );
+export const syncChangesQuerySchema = z.strictObject({
+  workspace_id: resourceId,
+  cursor: cursorToken,
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+});
+export const syncSnapshotSchema = z.strictObject({
+  documents: z.array(documentSchema),
+  cursor: cursorToken,
+  next_after: resourceId.nullable(),
+  has_more: z.boolean(),
+});
+export const syncChangesSchema = z.strictObject({
+  changes: z.array(
+    z.strictObject({
+      seq: z.string().regex(/^[1-9]\d*$/),
+      document_id: resourceId,
+      kind: z.enum(['document', 'transcript', 'job', 'deleted']),
+      revision: revision.min(1),
+      transcript_revision: revision,
+      job_id: resourceId.nullable(),
+      created_at: z.iso.datetime(),
+    }),
+  ),
+  cursor: cursorToken,
+  has_more: z.boolean(),
+});
 
 export type Segment = z.infer<typeof segmentSchema>;
 export type Citation = z.infer<typeof citationSchema>;
@@ -193,7 +306,11 @@ export class ServiceError extends Error {
     message: string,
     readonly status = 400,
     readonly retryable = false,
-    readonly details?: { current_revision: number },
+    readonly details?: {
+      current_revision?: number;
+      reset_required?: boolean;
+      purge_workspace_id?: string;
+    },
   ) {
     super(message);
   }

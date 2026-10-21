@@ -31,6 +31,9 @@ Real Windows audio behavior still requires the hardware checks below.
 - Deterministic in-memory PCM-to-WAV reconstruction for subsequent upload work.
   No plaintext audio temporary files are created.
 - A small CLI using inherited, length-prefixed stdio, and Linux/Windows CI.
+- Structured basic rich-text notes, tags, Markdown/plain-text export, stable
+  offline document IDs, idempotent saves, and owner-scoped snapshot/incremental
+  synchronization with deletion tombstones and expired-cursor handling.
 - A Fastify API and separate worker, backed by PostgreSQL: provisioned OIDC
   identities, workspace membership, private owner-only documents, optimistic
   revisions, immutable note/transcript history, idempotent AI jobs, leases/fences,
@@ -101,22 +104,31 @@ Contracts are in `packages/contracts/src/server.ts`. Errors include `code`,
 `current_revision`. Create operations require an `Idempotency-Key` of 8-128
 letters, digits, dots, colons, underscores or hyphens.
 
-| Method               | Path                                                                 | Input / behavior                                                                         |
-| -------------------- | -------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| GET                  | `/health`                                                            | Database readiness; no authentication or meeting content                                 |
-| GET                  | `/v1/me`, `/v1/workspaces`                                           | Current provisioned user and active memberships                                          |
-| POST / GET           | `/v1/documents`                                                      | Create `{workspace_id,title,notes}`; list with `workspace_id`, optional `limit`/`offset` |
-| GET / PATCH / DELETE | `/v1/documents/{id}`                                                 | Read; change `{base_revision,title}`; tombstone and purge online content                 |
-| PUT / GET            | `/v1/documents/{id}/notes`                                           | Save `{base_revision,notes}`; read an immutable `?revision=N`                            |
-| PUT / GET            | `/v1/documents/{id}/transcript`                                      | Save `{base_revision,segments}`; read current or `?revision=N`                           |
-| POST                 | `/v1/documents/{id}/transcription-runs?base_revision=0&locale=en-US` | Raw `audio/wav` body, returns a durable job                                              |
-| POST                 | `/v1/documents/{id}/summary-runs`                                    | `{note_revision,transcript_revision,language:"en"}`; returns a durable job               |
-| GET                  | `/v1/jobs/{id}`                                                      | Status, independent result, failure, and input-staleness flag                            |
-| POST                 | `/v1/jobs/{id}/cancel`                                               | Explicit cancellation, with terminal-state arbitration                                   |
-| GET                  | `/v1/jobs/{id}/events`                                               | SSE; numeric `Last-Event-ID` for replay                                                  |
-| GET                  | `/v1/models`, `/v1/templates`                                        | Fixed deployment capability catalog, never keys or arbitrary provider URLs               |
+| Method               | Path                                                                 | Input / behavior                                                                                                                   |
+| -------------------- | -------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| GET                  | `/health`                                                            | Database readiness; no authentication or meeting content                                                                           |
+| GET                  | `/v1/me`, `/v1/workspaces`                                           | Current provisioned user and active memberships                                                                                    |
+| POST / GET           | `/v1/documents`                                                      | Create `{workspace_id,title,notes}`, optional offline `id`, `content`, `tags`; list with `workspace_id`, optional `limit`/`offset` |
+| GET / PATCH / DELETE | `/v1/documents/{id}`                                                 | Read; change `{base_revision,title?,tags?}`; tombstone and purge online content                                                    |
+| PUT / GET            | `/v1/documents/{id}/notes`                                           | Save `{base_revision,notes? ,content?}`; read an immutable `?revision=N`                                                           |
+| GET                  | `/v1/documents/{id}/export`                                          | `format=markdown` or `text`, optional `timestamps=false`                                                                           |
+| GET                  | `/v1/documents/{id}/jobs`                                            | Private job history with `limit`/`offset`                                                                                          |
+| GET                  | `/v1/sync/snapshot`, `/v1/sync/changes`                              | Owner-scoped workspace bootstrap and ordered incremental metadata                                                                  |
+| PUT / GET            | `/v1/documents/{id}/transcript`                                      | Save `{base_revision,segments}`; read current or `?revision=N`                                                                     |
+| POST                 | `/v1/documents/{id}/transcription-runs?base_revision=0&locale=en-US` | Raw `audio/wav` body, returns a durable job                                                                                        |
+| POST                 | `/v1/documents/{id}/summary-runs`                                    | `{note_revision,transcript_revision,language:"en"}`; returns a durable job                                                         |
+| GET                  | `/v1/jobs/{id}`                                                      | Status, independent result, failure, and input-staleness flag                                                                      |
+| POST                 | `/v1/jobs/{id}/cancel`                                               | Explicit cancellation, with terminal-state arbitration                                                                             |
+| GET                  | `/v1/jobs/{id}/events`                                               | SSE; numeric `Last-Event-ID` for replay                                                                                            |
+| GET                  | `/v1/models`, `/v1/templates`                                        | Fixed deployment capability catalog, never keys or arbitrary provider URLs                                                         |
 
-Notes currently contain plain text. Segments have UUID `id`, `start_ms`, `end_ms`
+Notes include canonical plain text and optional structured `content`, validated
+by `packages/contracts/src/content.ts`. Supported blocks include paragraphs,
+headings, lists, quotes, and fenced code; basic inline marks are supported.
+Images, raw HTML, embedded files, and active links are not accepted.
+When both `notes` and `content` are supplied, their text must agree. Existing
+plain-text notes remain unchanged by the migration. Tags are limited to 16
+unique values. Segments have UUID `id`, `start_ms`, `end_ms`
 and `text`. A summary has `overview`, `topics`, `decisions`, `action_items` and
 `open_questions`; each fact cites `{source,id,revision}`. Note references use the
 document ID and note revision; transcript references use a segment ID and
@@ -127,6 +139,25 @@ Use `base_revision` for optimistic updates; an optional `If-Match: "N"` must
 agree. Conflicts never silently replace user edits. Summary results remain
 separate even when their inputs become stale. Transcription completion fails if
 a manual transcript edit arrived while recognition was running.
+
+Send an `Idempotency-Key` with note and metadata saves to safely retry after a
+lost response. A replay returns the current document and `applied_revision`
+identifying the original mutation; it never reapplies an old edit over newer
+content. Note and metadata keys have separate route scopes. Deleted document
+IDs cannot be recreated by retrying a stale offline request.
+
+For synchronization, first page through `/v1/sync/snapshot?workspace_id=UUID`,
+passing the first page's `cursor` and the returned `next_after` unchanged on
+subsequent pages. After the last page, consume `/v1/sync/changes` using that
+cursor, then retain each response cursor only after applying its changes
+locally. Fetch changed documents, transcripts or jobs through their authorized
+endpoints. Workspace row locks serialize change numbers with their commits;
+database sequences are not used as synchronization watermarks. Changes contain
+IDs/revisions, never meeting bodies. Keep pending local edits on cursor expiry
+(`410 sync_cursor_expired`) while refreshing the snapshot; on
+`403 workspace_access_revoked`, remove that workspace's cached content.
+The worker prunes change metadata after seven days. A revoked then reactivated
+membership requires a fresh snapshot.
 
 **Current server limits:** canonical PCM16 mono 16 kHz WAV, at most 60 seconds
 per imported clip; English (`en-US`) and Chinese (`zh-CN`); 48,000 bytes of summary
@@ -140,7 +171,7 @@ idempotency key.
 This first slice uses PostgreSQL polling/leases as the durable scheduler rather
 than introducing unused Redis/BullMQ infrastructure. Full S3/resumable uploads,
 recording manifests/sealing, complete-meeting finalization, realtime STT, chat,
-sync, rich text, budget reservation/settlement and token streaming remain later
+the desktop sync engine, budget reservation/settlement and token streaming remain later
 implementation work. Successful jobs expose provider usage, but this is not a
 billing ledger; retries can incur duplicate provider charges.
 

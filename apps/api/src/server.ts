@@ -15,7 +15,10 @@ import {
   transcriptionQuerySchema,
   resourceId,
   idempotencyKey,
+  syncSnapshotQuerySchema,
+  syncChangesQuerySchema,
 } from '@windows-ai-notes/contracts/server';
+import { exportMeeting } from '@windows-ai-notes/contracts/content';
 import type { Database } from '@windows-ai-notes/db';
 import { validateWav } from '@windows-ai-notes/ai/wav';
 import { createAuthenticator, principal, type AuthConfig } from './auth.js';
@@ -142,6 +145,25 @@ export async function createServer(db: Database, config: AuthConfig) {
   app.get('/v1/templates', async () => ({
     templates: [{ id: 'meeting-summary-v1', name: 'Meeting summary' }],
   }));
+  app.get('/v1/sync/snapshot', async (request) => {
+    const query = parse(syncSnapshotQuerySchema, request.query);
+    return db.sync.snapshot(
+      principal(request).userId,
+      query.workspace_id,
+      query.cursor,
+      query.after,
+      query.limit,
+    );
+  });
+  app.get('/v1/sync/changes', async (request) => {
+    const query = parse(syncChangesQuerySchema, request.query);
+    return db.sync.changes(
+      principal(request).userId,
+      query.workspace_id,
+      query.cursor,
+      query.limit,
+    );
+  });
   app.post('/v1/documents', async (request, reply) => {
     const body = parse(createDocumentSchema, request.body);
     const key = parse(idempotencyKey, request.headers['idempotency-key']);
@@ -172,7 +194,8 @@ export async function createServer(db: Database, config: AuthConfig) {
       principal(request).userId,
       id,
       body.base_revision,
-      { title: body.title },
+      body,
+      optionalMutationKey(request.headers['idempotency-key']),
     );
     return reply.header('ETag', `"${doc.revision}"`).send(doc);
   });
@@ -184,7 +207,8 @@ export async function createServer(db: Database, config: AuthConfig) {
       principal(request).userId,
       id,
       body.base_revision,
-      { notes: body.notes },
+      body,
+      optionalMutationKey(request.headers['idempotency-key']),
     );
     return reply.header('ETag', `"${doc.revision}"`).send(doc);
   });
@@ -197,6 +221,54 @@ export async function createServer(db: Database, config: AuthConfig) {
       id,
       revision ?? (await db.document(user, id)).revision,
     );
+  });
+  app.get('/v1/documents/:id/jobs', async (request) => {
+    const { id } = parse(idParams, request.params);
+    const query = parse(
+      z.strictObject({
+        limit: z.coerce.number().int().min(1).max(20).default(10),
+        offset: z.coerce.number().int().min(0).max(10_000).default(0),
+      }),
+      request.query,
+    );
+    return {
+      jobs: await db.jobs(
+        principal(request).userId,
+        id,
+        query.limit,
+        query.offset,
+      ),
+    };
+  });
+  app.get('/v1/documents/:id/export', async (request, reply) => {
+    const { id } = parse(idParams, request.params);
+    const query = parse(
+      z.strictObject({
+        format: z.enum(['markdown', 'text']).default('markdown'),
+        timestamps: z.enum(['true', 'false']).default('true'),
+      }),
+      request.query,
+    );
+    const user = principal(request).userId;
+    const document = await db.document(user, id);
+    const transcript = await db.transcript(user, id);
+    const content = exportMeeting(
+      { ...document, segments: transcript.segments },
+      query.format,
+      query.timestamps === 'true',
+    );
+    return reply
+      .header(
+        'Content-Type',
+        query.format === 'markdown'
+          ? 'text/markdown; charset=utf-8'
+          : 'text/plain; charset=utf-8',
+      )
+      .header(
+        'Content-Disposition',
+        `attachment; filename="meeting-${id}.${query.format === 'markdown' ? 'md' : 'txt'}"`,
+      )
+      .send(content);
   });
   app.delete('/v1/documents/:id', async (request, reply) => {
     const { id } = parse(idParams, request.params);
@@ -334,6 +406,9 @@ export async function createServer(db: Database, config: AuthConfig) {
   return app;
 }
 
+function optionalMutationKey(value: unknown): string | undefined {
+  return value === undefined ? undefined : parse(idempotencyKey, value);
+}
 function checkMatch(value: string | string[] | undefined, base: number) {
   if (value !== undefined && value !== `"${base}"`) {
     throw new ServiceError(

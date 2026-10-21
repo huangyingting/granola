@@ -7,6 +7,7 @@ import {
   jobSchema,
   jobEventSchema,
   segmentsSchema,
+  createDocumentSchema,
   type Job,
   type JobInput,
   type JobResult,
@@ -14,10 +15,15 @@ import {
   type Segment,
 } from '@windows-ai-notes/contracts/server';
 import type { z } from 'zod';
-import type {
-  createDocumentSchema,
-  summaryRequestSchema,
-} from '@windows-ai-notes/contracts/server';
+import type { summaryRequestSchema } from '@windows-ai-notes/contracts/server';
+import {
+  richTextToPlainText,
+  type RichTextDocument,
+} from '@windows-ai-notes/contracts/content';
+import { recordChange, SyncStore } from './sync.js';
+export { recordChange } from './sync.js';
+
+const migrationFiles = ['001_initial.sql', '002_editing_sync.sql'];
 
 export type Transaction = pg.PoolClient;
 export interface Document {
@@ -28,6 +34,9 @@ export interface Document {
   revision: number;
   transcript_revision: number;
   notes: string;
+  content: RichTextDocument | null;
+  tags: string[];
+  applied_revision?: number;
   created_at: Date;
   updated_at: Date;
 }
@@ -49,6 +58,26 @@ interface JobRow {
   current_note_revision: number;
   current_transcript_revision: number;
 }
+type JobStatusRow = Pick<
+  JobRow,
+  | 'id'
+  | 'document_id'
+  | 'kind'
+  | 'state'
+  | 'attempt'
+  | 'input'
+  | 'result'
+  | 'error'
+  | 'created_at'
+  | 'current_note_revision'
+  | 'current_transcript_revision'
+>;
+const jobStatusQuery = `
+ SELECT j.id,j.document_id,j.kind,j.state,j.attempt,j.input,j.result,j.error,j.created_at,
+ d.revision current_note_revision,d.transcript_revision current_transcript_revision FROM jobs j
+ JOIN documents d ON d.id=j.document_id
+ JOIN memberships m ON m.workspace_id=d.workspace_id AND m.user_id=j.owner_id AND m.active
+ JOIN users u ON u.id=j.owner_id AND u.active`;
 export interface ClaimedJob {
   id: string;
   documentId: string;
@@ -60,7 +89,7 @@ export interface ClaimedJob {
 }
 const terminal = new Set(['succeeded', 'failed', 'cancelled']);
 const documentQuery = `
- SELECT d.id,d.workspace_id,d.owner_id,d.title,d.revision,d.transcript_revision,d.created_at,d.updated_at,n.notes FROM documents d
+ SELECT d.id,d.workspace_id,d.owner_id,d.title,d.tags,d.revision,d.transcript_revision,d.created_at,d.updated_at,n.notes,n.content FROM documents d
  JOIN note_versions n ON n.document_id=d.id AND n.revision=d.revision
  JOIN memberships m ON m.workspace_id=d.workspace_id AND m.user_id=d.owner_id AND m.active
  JOIN users u ON u.id=d.owner_id AND u.active
@@ -81,11 +110,28 @@ export function requireDatabaseUrl(
     throw new Error('DATABASE_URL must use PostgreSQL.');
   return value;
 }
-export const digest = (value: unknown): string =>
-  createHash('sha256').update(JSON.stringify(value)).digest('hex');
+export const digest = (value: unknown, canonical = false): string =>
+  createHash('sha256')
+    .update(
+      JSON.stringify(
+        value,
+        canonical
+          ? (_key, item: unknown) =>
+              item && typeof item === 'object' && !Array.isArray(item)
+                ? Object.fromEntries(
+                    Object.entries(item).sort(([a], [b]) =>
+                      a < b ? -1 : a > b ? 1 : 0,
+                    ),
+                  )
+                : item
+          : undefined,
+      ),
+    )
+    .digest('hex');
 
 export class Database {
   readonly pool: pg.Pool;
+  readonly sync: SyncStore;
   constructor(url: string) {
     this.pool = new pg.Pool({
       connectionString: url,
@@ -93,6 +139,7 @@ export class Database {
       connectionTimeoutMillis: 5000,
       statement_timeout: 10_000,
     });
+    this.sync = new SyncStore(this);
     this.pool.on('error', () =>
       console.error(
         'database_connection_failed: idle PostgreSQL connection closed.',
@@ -103,10 +150,13 @@ export class Database {
     await this.pool.end();
   }
   async assertReady(): Promise<void> {
-    const applied = await this.pool.query(
-      'SELECT version FROM schema_migrations WHERE version=1',
+    const applied = await this.pool.query<{ version: number }>(
+      'SELECT version FROM schema_migrations ORDER BY version',
     );
-    if (applied.rowCount !== 1)
+    if (
+      applied.rows.length !== migrationFiles.length ||
+      applied.rows.some((row, index) => row.version !== index + 1)
+    )
       throw new Error('Apply database migrations before starting the service.');
   }
   async transaction<T>(
@@ -126,9 +176,14 @@ export class Database {
     }
   }
   async migrate(): Promise<void> {
-    const sql = await readFile(
-      new URL('../migrations/001_initial.sql', import.meta.url),
-      'utf8',
+    const migrations = await Promise.all(
+      migrationFiles.map(async (file, index) => ({
+        version: index + 1,
+        sql: await readFile(
+          new URL(`../migrations/${file}`, import.meta.url),
+          'utf8',
+        ),
+      })),
     );
     await this.transaction(async (tx) => {
       await tx.query(
@@ -137,17 +192,32 @@ export class Database {
       await tx.query(
         'CREATE TABLE IF NOT EXISTS schema_migrations (version integer PRIMARY KEY, checksum text NOT NULL)',
       );
-      const existing = await tx.query<{ checksum: string }>(
-        'SELECT checksum FROM schema_migrations WHERE version=1',
+      const existing = await tx.query<{ version: number; checksum: string }>(
+        'SELECT version,checksum FROM schema_migrations ORDER BY version',
       );
-      const checksum = createHash('sha256').update(sql).digest('hex');
-      if (existing.rows[0]) {
-        if (existing.rows[0].checksum !== checksum)
-          throw new Error('Applied migration checksum mismatch.');
-        return;
+      if (
+        existing.rows.length > migrations.length ||
+        existing.rows.some((row, index) => row.version !== index + 1)
+      )
+        throw new Error('Database migration history is newer or inconsistent.');
+      for (const migration of migrations) {
+        const checksum = createHash('sha256')
+          .update(migration.sql)
+          .digest('hex');
+        const applied = existing.rows.find(
+          (row) => row.version === migration.version,
+        );
+        if (applied) {
+          if (applied.checksum !== checksum)
+            throw new Error('Applied migration checksum mismatch.');
+          continue;
+        }
+        await tx.query(migration.sql);
+        await tx.query('INSERT INTO schema_migrations VALUES ($1,$2)', [
+          migration.version,
+          checksum,
+        ]);
       }
-      await tx.query(sql);
-      await tx.query('INSERT INTO schema_migrations VALUES (1,$1)', [checksum]);
     });
   }
   async provision(
@@ -243,7 +313,7 @@ export class Database {
     return (
       await this.pool.query<Document>(
         `
-      SELECT d.id,d.workspace_id,d.owner_id,d.title,d.revision,d.transcript_revision,d.created_at,d.updated_at,n.notes
+      SELECT d.id,d.workspace_id,d.owner_id,d.title,d.tags,d.revision,d.transcript_revision,d.created_at,d.updated_at,n.notes,n.content
       FROM documents d JOIN note_versions n ON n.document_id=d.id AND n.revision=d.revision
       JOIN memberships m ON m.workspace_id=d.workspace_id AND m.user_id=d.owner_id AND m.active
       JOIN users u ON u.id=d.owner_id AND u.active
@@ -254,9 +324,10 @@ export class Database {
   }
   async createDocument(
     userId: string,
-    input: z.infer<typeof createDocumentSchema>,
+    request: z.input<typeof createDocumentSchema>,
     key: string,
   ): Promise<Document> {
+    const input = createDocumentSchema.parse(request);
     const id = await this.transaction(async (tx) => {
       await tx.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', [
         `document:${userId}:${input.workspace_id}:${key}`,
@@ -271,7 +342,20 @@ export class Database {
           'The workspace is unavailable.',
           404,
         );
-      const hash = digest(input);
+      const legacy =
+        input.id === undefined &&
+        input.content === null &&
+        input.tags.length === 0;
+      const hash = digest(
+        legacy
+          ? {
+              workspace_id: input.workspace_id,
+              title: input.title,
+              notes: input.notes,
+            }
+          : input,
+        !legacy,
+      );
       const existing = await tx.query<{ id: string; create_hash: string }>(
         'SELECT id,create_hash FROM documents WHERE owner_id=$1 AND workspace_id=$2 AND create_key=$3',
         [userId, input.workspace_id, key],
@@ -286,15 +370,22 @@ export class Database {
         await this.document(userId, existing.rows[0].id, tx);
         return existing.rows[0].id;
       }
-      const id = randomUUID();
-      await tx.query(
-        'INSERT INTO documents (id,workspace_id,owner_id,title,create_key,create_hash) VALUES ($1,$2,$3,$4,$5,$6)',
-        [id, input.workspace_id, userId, input.title, key, hash],
+      const id = input.id ?? randomUUID();
+      const inserted = await tx.query(
+        'INSERT INTO documents (id,workspace_id,owner_id,title,tags,create_key,create_hash) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (id) DO NOTHING RETURNING id',
+        [id, input.workspace_id, userId, input.title, input.tags, key, hash],
       );
+      if (!inserted.rowCount)
+        throw new ServiceError(
+          'document_id_conflict',
+          'The document identifier is unavailable. It was not overwritten.',
+          409,
+        );
       await tx.query(
-        'INSERT INTO note_versions (document_id,revision,notes) VALUES ($1,1,$2)',
-        [id, input.notes],
+        'INSERT INTO note_versions (document_id,revision,notes,content) VALUES ($1,1,$2,$3)',
+        [id, input.notes, input.content ? JSON.stringify(input.content) : null],
       );
+      await recordChange(tx, id, 'document');
       return id;
     });
     return this.document(userId, id);
@@ -303,28 +394,86 @@ export class Database {
     userId: string,
     id: string,
     baseRevision: number,
-    update: { notes?: string; title?: string },
+    update: {
+      notes?: string | undefined;
+      title?: string | undefined;
+      content?: RichTextDocument | null | undefined;
+      tags?: string[] | undefined;
+    },
+    mutationId?: string,
   ): Promise<Document> {
-    await this.transaction(async (tx) => {
+    const appliedRevision = await this.transaction(async (tx) => {
       const doc = await this.document(userId, id, tx);
+      const operation =
+        update.notes !== undefined || update.content !== undefined
+          ? 'notes'
+          : 'metadata';
+      const hash = digest({ base_revision: baseRevision, update }, true);
+      if (mutationId) {
+        const previous = (
+          await tx.query<{ request_hash: string; applied_revision: number }>(
+            'SELECT request_hash,applied_revision FROM note_mutations WHERE document_id=$1 AND operation=$2 AND mutation_id=$3',
+            [id, operation, mutationId],
+          )
+        ).rows[0];
+        if (previous) {
+          if (previous.request_hash !== hash)
+            throw new ServiceError(
+              'idempotency_conflict',
+              'This mutation key is bound to different input.',
+              409,
+            );
+          return previous.applied_revision;
+        }
+      }
       if (doc.revision !== baseRevision) throw conflict(doc.revision);
       const next = doc.revision + 1;
+      const notes = update.content
+        ? richTextToPlainText(update.content)
+        : (update.notes ?? doc.notes);
+      if (
+        update.content &&
+        update.notes !== undefined &&
+        update.notes !== notes
+      )
+        throw new ServiceError(
+          'invalid_request',
+          'Plain text must agree with the structured notes.',
+          400,
+        );
       await tx.query(
-        'UPDATE documents SET revision=$2,title=$3,updated_at=now() WHERE id=$1',
-        [id, next, update.title ?? doc.title],
+        'UPDATE documents SET revision=$2,title=$3,tags=$4,updated_at=now() WHERE id=$1',
+        [id, next, update.title ?? doc.title, update.tags ?? doc.tags],
       );
+      const content =
+        update.content !== undefined
+          ? update.content
+          : update.notes !== undefined
+            ? null
+            : doc.content;
       await tx.query(
-        'INSERT INTO note_versions (document_id,revision,notes) VALUES ($1,$2,$3)',
-        [id, next, update.notes ?? doc.notes],
+        'INSERT INTO note_versions (document_id,revision,notes,content) VALUES ($1,$2,$3,$4)',
+        [id, next, notes, content ? JSON.stringify(content) : null],
       );
+      if (mutationId)
+        await tx.query(
+          'INSERT INTO note_mutations (document_id,operation,mutation_id,request_hash,applied_revision) VALUES ($1,$2,$3,$4,$5)',
+          [id, operation, mutationId, hash, next],
+        );
+      await recordChange(tx, id, 'document');
+      return next;
     });
-    return this.document(userId, id);
+    const doc = await this.document(userId, id);
+    return mutationId ? { ...doc, applied_revision: appliedRevision } : doc;
   }
   async notes(userId: string, id: string, version: number) {
     await this.document(userId, id);
-    const result = await this.pool.query<{ notes: string }>(
+    const result = await this.pool.query<{
+      notes: string;
+      content: RichTextDocument | null;
+    }>(
       `
-      SELECT n.notes FROM note_versions n JOIN documents d ON d.id=n.document_id
+      SELECT n.notes,n.content FROM note_versions n JOIN documents d ON d.id=n.document_id
       JOIN memberships m ON m.workspace_id=d.workspace_id AND m.user_id=d.owner_id AND m.active
       JOIN users u ON u.id=d.owner_id AND u.active
       WHERE n.document_id=$1 AND n.revision=$2 AND d.owner_id=$3 AND d.deleted_at IS NULL`,
@@ -336,7 +485,7 @@ export class Database {
         'The requested note revision is unavailable.',
         404,
       );
-    return { document_id: id, revision: version, notes: result.rows[0].notes };
+    return { document_id: id, revision: version, ...result.rows[0] };
   }
   async transcript(userId: string, id: string, version?: number) {
     const doc = await this.document(userId, id);
@@ -393,6 +542,7 @@ export class Database {
       'UPDATE documents SET transcript_revision=$2,updated_at=now() WHERE id=$1',
       [id, version],
     );
+    await recordChange(tx, id, 'transcript');
   }
   async enqueueSummary(
     userId: string,
@@ -549,14 +699,18 @@ export class Database {
       'INSERT INTO job_events (job_id,seq,event_type,payload) VALUES ($1,$2,$3,$4)',
       [id, result.rows[0]!.event_seq, type, JSON.stringify(payload)],
     );
+    const source = (
+      await tx.query<{ document_id: string }>(
+        'SELECT document_id FROM jobs WHERE id=$1',
+        [id],
+      )
+    ).rows[0]!;
+    await recordChange(tx, source.document_id, 'job', id);
   }
   async job(userId: string, id: string): Promise<Job> {
-    const result = await this.pool.query<JobRow>(
-      `
-      SELECT j.*,d.revision current_note_revision,d.transcript_revision current_transcript_revision FROM jobs j
-      JOIN documents d ON d.id=j.document_id JOIN memberships m ON m.workspace_id=d.workspace_id AND m.user_id=j.owner_id AND m.active
-      JOIN users u ON u.id=j.owner_id AND u.active
-      WHERE j.id=$1 AND j.owner_id=$2 AND d.deleted_at IS NULL`,
+    const result = await this.pool.query<JobStatusRow>(
+      jobStatusQuery +
+        ' WHERE j.id=$1 AND j.owner_id=$2 AND d.deleted_at IS NULL',
       [id, userId],
     );
     const row = result.rows[0];
@@ -566,26 +720,22 @@ export class Database {
         'The job is unavailable or not accessible.',
         404,
       );
-    const input = jobInputSchema.parse(row.input);
-    const stale =
-      input.kind === 'summary'
-        ? input.snapshot.note_revision !== row.current_note_revision ||
-          input.snapshot.transcript_revision !== row.current_transcript_revision
-        : (row.state === 'succeeded'
-            ? input.base_transcript_revision + 1
-            : input.base_transcript_revision) !==
-          row.current_transcript_revision;
-    return jobSchema.parse({
-      id: row.id,
-      document_id: row.document_id,
-      kind: row.kind,
-      state: row.state,
-      attempt: row.attempt,
-      input_stale: stale,
-      result: row.result,
-      error: row.error,
-      created_at: row.created_at.toISOString(),
-    });
+    return jobView(row);
+  }
+  async jobs(
+    userId: string,
+    documentId: string,
+    limit = 10,
+    offset = 0,
+  ): Promise<Job[]> {
+    await this.document(userId, documentId);
+    const result = await this.pool.query<JobStatusRow>(
+      jobStatusQuery +
+        ` WHERE j.document_id=$1 AND j.owner_id=$2 AND d.deleted_at IS NULL
+      ORDER BY j.created_at DESC,j.id LIMIT $3 OFFSET $4`,
+      [documentId, userId, limit, offset],
+    );
+    return result.rows.map(jobView);
   }
   async events(userId: string, id: string, after: number) {
     const job = await this.job(userId, id);
@@ -676,9 +826,11 @@ export class Database {
         [id],
       );
       await tx.query('DELETE FROM note_versions WHERE document_id=$1', [id]);
+      await tx.query('DELETE FROM note_mutations WHERE document_id=$1', [id]);
       await tx.query('DELETE FROM transcript_revisions WHERE document_id=$1', [
         id,
       ]);
+      await recordChange(tx, id, 'deleted');
     });
   }
   async claim(leaseMs = 120_000): Promise<ClaimedJob | null> {
@@ -829,6 +981,10 @@ export class Database {
   }
   async cleanup(): Promise<void> {
     await this.transaction(async (tx) => {
+      const leader = await tx.query<{ acquired: boolean }>(
+        "SELECT pg_try_advisory_xact_lock(hashtextextended('windows-ai-notes-cleanup',0)) acquired",
+      );
+      if (!leader.rows[0]!.acquired) return;
       const expired = await tx.query<{ id: string }>(
         `SELECT id FROM jobs WHERE audio IS NOT NULL AND created_at<now()-interval '24 hours' AND state IN ('queued','retry_wait','running') FOR UPDATE SKIP LOCKED LIMIT 100`,
       );
@@ -847,10 +1003,32 @@ export class Database {
       await tx.query(
         "DELETE FROM job_events WHERE created_at<now()-interval '7 days'",
       );
+      await this.sync.prune(tx);
     });
   }
 }
 
+function jobView(row: JobStatusRow): Job {
+  const input = jobInputSchema.parse(row.input);
+  const stale =
+    input.kind === 'summary'
+      ? input.snapshot.note_revision !== row.current_note_revision ||
+        input.snapshot.transcript_revision !== row.current_transcript_revision
+      : (row.state === 'succeeded'
+          ? input.base_transcript_revision + 1
+          : input.base_transcript_revision) !== row.current_transcript_revision;
+  return jobSchema.parse({
+    id: row.id,
+    document_id: row.document_id,
+    kind: row.kind,
+    state: row.state,
+    attempt: row.attempt,
+    input_stale: stale,
+    result: row.result,
+    error: row.error,
+    created_at: row.created_at.toISOString(),
+  });
+}
 function conflict(current: number): ServiceError {
   return new ServiceError(
     'revision_conflict',
