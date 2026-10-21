@@ -36,4 +36,32 @@ describe('authentication startup gates', () => {
       }),
     ).toThrow('HTTPS');
   });
+  it('requires a complete public native-client registration and offline scope when desktop login is enabled', () => {
+    const env = {
+      OIDC_ISSUER: 'https://identity.example.test/',
+      OIDC_AUDIENCE: 'notes-api',
+      OIDC_JWKS_URL: 'https://identity.example.test/keys',
+      OIDC_REQUIRED_SCOPE: 'notes.access',
+      OIDC_DESKTOP_CLIENT_ID: 'native-public-client',
+    };
+    expect(() => loadAuthConfig(env)).toThrow();
+    expect(() =>
+      loadAuthConfig({ ...env, OIDC_DESKTOP_SCOPES: 'openid notes.access' }),
+    ).toThrow('offline_access');
+    expect(
+      loadAuthConfig({
+        ...env,
+        OIDC_DESKTOP_SCOPES:
+          'openid offline_access api://notes-api/notes.access',
+        OIDC_DESKTOP_LOOPBACK_HOST: 'localhost',
+      }).desktop,
+    ).toEqual({
+      issuer: env.OIDC_ISSUER,
+      audience: env.OIDC_AUDIENCE,
+      required_scope: 'notes.access',
+      client_id: 'native-public-client',
+      scope: 'openid offline_access api://notes-api/notes.access',
+      loopback_host: 'localhost',
+    });
+  });
 });

@@ -1,7 +1,12 @@
 import { createRemoteJWKSet, jwtVerify } from 'jose';
 import type { FastifyRequest } from 'fastify';
 import type { Database } from '@windows-ai-notes/db';
-import { resourceId, ServiceError } from '@windows-ai-notes/contracts/server';
+import {
+  resourceId,
+  ServiceError,
+  oidcClientConfigurationSchema,
+  type OidcClientConfiguration,
+} from '@windows-ai-notes/contracts/server';
 
 export interface AuthConfig {
   mode: 'development' | 'oidc';
@@ -10,6 +15,7 @@ export interface AuthConfig {
   audience?: string;
   jwksUrl?: string;
   requiredScope?: string;
+  desktop?: OidcClientConfiguration;
 }
 export interface Principal {
   userId: string;
@@ -72,7 +78,30 @@ export function loadAuthConfig(
       );
     }
   }
-  return { mode: 'oidc', host, issuer, audience, jwksUrl, requiredScope };
+  let desktop: OidcClientConfiguration | undefined;
+  if (
+    env.OIDC_DESKTOP_CLIENT_ID ||
+    env.OIDC_DESKTOP_SCOPES ||
+    env.OIDC_DESKTOP_LOOPBACK_HOST
+  ) {
+    desktop = oidcClientConfigurationSchema.parse({
+      issuer,
+      audience,
+      client_id: env.OIDC_DESKTOP_CLIENT_ID,
+      scope: env.OIDC_DESKTOP_SCOPES,
+      required_scope: requiredScope,
+      loopback_host: env.OIDC_DESKTOP_LOOPBACK_HOST ?? '127.0.0.1',
+    });
+  }
+  return {
+    mode: 'oidc',
+    host,
+    issuer,
+    audience,
+    jwksUrl,
+    requiredScope,
+    ...(desktop ? { desktop } : {}),
+  };
 }
 
 export function createAuthenticator(config: AuthConfig, db: Database) {

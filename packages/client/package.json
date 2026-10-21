@@ -4,6 +4,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./auth": {
+      "types": "./dist/auth.d.ts",
+      "import": "./dist/auth.js"
+    },
     "./http": {
       "types": "./dist/http.d.ts",
       "import": "./dist/http.js"
@@ -16,6 +20,7 @@
   "dependencies": {
     "@windows-ai-notes/contracts": "workspace:*",
     "@windows-ai-notes/local": "workspace:*",
+    "jose": "^6.1.0",
     "zod": "^4.1.0"
   },
   "devDependencies": {

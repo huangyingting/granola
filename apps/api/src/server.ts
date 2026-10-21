@@ -59,7 +59,9 @@ export async function createServer(db: Database, config: AuthConfig) {
     reply
       .header('X-Content-Type-Options', 'nosniff')
       .header('Cache-Control', 'no-store');
-    if (request.routeOptions.url !== '/health')
+    if (
+      !['/health', '/v1/client-config'].includes(request.routeOptions.url ?? '')
+    )
       request.principal = await authenticate(request);
   });
   await app.register(rateLimit, { max: 120, timeWindow: '1 minute' });
@@ -131,6 +133,15 @@ export async function createServer(db: Database, config: AuthConfig) {
     }
   });
   app.get('/v1/me', async (request) => ({ id: principal(request).userId }));
+  app.get('/v1/client-config', async () => {
+    if (config.mode !== 'oidc' || !config.desktop)
+      throw new ServiceError(
+        'desktop_login_not_configured',
+        'The deployment administrator has not configured native-client OIDC login.',
+        503,
+      );
+    return config.desktop;
+  });
   app.get('/v1/workspaces', async (request) => ({
     workspaces: await db.workspaces(principal(request).userId),
   }));

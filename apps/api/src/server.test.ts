@@ -169,6 +169,9 @@ describe.skipIf(!databaseUrl)('PostgreSQL API and durable AI worker', () => {
       ).statusCode,
     ).toBe(403);
     expect((await app.inject('/health')).statusCode).toBe(200);
+    const config = await app.inject('/v1/client-config');
+    expect(config.statusCode).toBe(503);
+    expect(config.json().code).toBe('desktop_login_not_configured');
   });
   it('verifies real signed OIDC tokens, issuer, audience, expiry and scope without accepting dev headers', async () => {
     const issuer = 'https://identity.example.test/';

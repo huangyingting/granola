@@ -80,6 +80,13 @@ and encrypted transcript/job artifacts commit together. The v1 local vault is
 migrated transactionally without resetting keys, drafts or retries. Real
 HTTP/PostgreSQL/SQLite tests cover lost responses, two-device conflicts, expiry,
 deletion and revocation. This core is not yet wired to the offline preview UI.
+The OIDC client core uses a system-browser code/S256 flow and a loopback-only
+callback, validates signed ID/access tokens and state/nonce/audience/scope, and
+stores rotating refresh credentials only in the encrypted main-process vault.
+Refresh requests are durably fenced before sending; an uncertain rotation requires
+sign-in again rather than replaying a possibly consumed refresh token. Real
+synthetic-issuer tests cover rollover, cancellation and logout races; production
+identity-provider registration and the desktop account UI are still required.
 
 ```sh
 pnpm desktop:build
@@ -145,8 +152,23 @@ pnpm user:provision --issuer https://YOUR-ISSUER/ --subject OIDC_SUBJECT
 
 Use `--workspace-id UUID` to add an explicitly provisioned identity to an existing
 workspace. Membership alone never grants access to another member's private
-documents. Team sharing, desktop PKCE, refresh-token handling and account UI are
-not implemented by this server slice.
+documents. Team sharing remains outside the first release.
+
+To enable native-client configuration discovery, set `OIDC_DESKTOP_CLIENT_ID`,
+`OIDC_DESKTOP_SCOPES` (including `openid`, `offline_access` and the API scope) and,
+if needed, `OIDC_DESKTOP_LOOPBACK_HOST=localhost`. Register the corresponding
+`http://127.0.0.1/oauth/callback` or `http://localhost/oauth/callback` as a native
+loopback redirect supporting dynamic ports and PKCE S256. Do not configure a
+native-client secret. The issuer and API must issue matching RS256 access tokens
+with the configured audience/scope; Azure Entra registrations may require
+explicitly enabling v2 access tokens.
+
+`GET /v1/client-config` returns only this public issuer/client/scope information,
+without authentication or deployment secrets. It never creates users or grants
+access. Unconfigured deployments return `503 desktop_login_not_configured`.
+Administrative account provisioning remains CLI-only. Logout always removes the
+local credential record; the client reports provider revocation as confirmed,
+unsupported or unconfirmed rather than claiming an unavailable remote logout.
 
 ### Server API
 
@@ -158,6 +180,7 @@ letters, digits, dots, colons, underscores or hyphens.
 | Method               | Path                                                                 | Input / behavior                                                                                                                   |
 | -------------------- | -------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
 | GET                  | `/health`                                                            | Database readiness; no authentication or meeting content                                                                           |
+| GET                  | `/v1/client-config`                                                  | Public native OIDC registration; no secrets, bootstrap accounts or access grants                                                   |
 | GET                  | `/v1/me`, `/v1/workspaces`                                           | Current provisioned user and active memberships                                                                                    |
 | POST / GET           | `/v1/documents`                                                      | Create `{workspace_id,title,notes}`, optional offline `id`, `content`, `tags`; list with `workspace_id`, optional `limit`/`offset` |
 | GET / PATCH / DELETE | `/v1/documents/{id}`                                                 | Read; change `{base_revision,title?,tags?}`; tombstone and purge online content                                                    |

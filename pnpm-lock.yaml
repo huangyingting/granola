@@ -227,6 +227,9 @@ importers:
       '@windows-ai-notes/local':
         specifier: workspace:*
         version: link:../local
+      jose:
+        specifier: ^6.1.0
+        version: 6.2.13
       zod:
         specifier: ^4.1.0
         version: 4.6.7

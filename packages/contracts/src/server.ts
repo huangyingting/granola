@@ -12,6 +12,36 @@ export const revision = z.number().int().nonnegative();
 export const locale = z.enum(['en-US', 'zh-CN']);
 export const idempotencyKey = z.string().regex(/^[A-Za-z0-9_.:-]{8,128}$/);
 export const MAX_AUDIO_BYTES = 60 * 16_000 * 2 + 44;
+const oauthScope = /^[\x21\x23-\x5b\x5d-\x7e]+(?: [\x21\x23-\x5b\x5d-\x7e]+)*$/;
+export const oidcClientConfigurationSchema = z.strictObject({
+  issuer: z.url().max(2048),
+  audience: z.string().min(1).max(1024),
+  client_id: z
+    .string()
+    .min(1)
+    .max(1024)
+    .regex(/^[^\u0000-\u0020\u007f]+$/),
+  scope: z
+    .string()
+    .max(2048)
+    .regex(oauthScope)
+    .refine(
+      (value) =>
+        ['openid', 'offline_access'].every((scope) =>
+          value.split(' ').includes(scope),
+        ),
+      'Desktop login requires openid and offline_access scopes.',
+    ),
+  required_scope: z
+    .string()
+    .min(1)
+    .max(200)
+    .regex(/^[^\s\u0000-\u001f\u007f]+$/),
+  loopback_host: z.enum(['127.0.0.1', 'localhost']).default('127.0.0.1'),
+});
+export type OidcClientConfiguration = z.infer<
+  typeof oidcClientConfigurationSchema
+>;
 
 const noteFields = {
   notes: notesTextSchema.optional(),
