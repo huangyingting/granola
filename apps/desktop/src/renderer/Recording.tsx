@@ -9,6 +9,7 @@ import type {
   LocalRecording,
   RecordingUploadStatus,
 } from '@windows-ai-notes/contracts/recording';
+import { LivePreview } from './LivePreview.js';
 
 const labels = {
   starting: 'Starting audio',
@@ -101,13 +102,21 @@ export function CaptureMeters({
   );
 }
 function useAudioState(scope: number, document: string | null) {
-  const [state, setState] = useState<AudioState | null>(null);
+  const [loaded, setLoaded] = useState<{
+    scope: number;
+    state: AudioState;
+  } | null>(null);
+  const state =
+    loaded?.scope === scope && loaded.state.document_id === document
+      ? loaded.state
+      : null;
   const [error, setError] = useState('');
   const [operationError, setOperationError] = useState('');
   const [busy, setBusy] = useState(false);
   const [offset, setOffset] = useState(0);
   const alive = useRef(false);
   const generation = useRef(0);
+  const view = useRef(0);
   async function refresh() {
     const attempt = ++generation.current;
     try {
@@ -130,7 +139,7 @@ function useAudioState(scope: number, document: string | null) {
         setError('Audio status could not be loaded for this workspace.');
         return;
       }
-      setState(response.audio_state.state);
+      setLoaded({ scope, state: response.audio_state.state });
       setError('');
     } catch {
       if (alive.current && attempt === generation.current)
@@ -138,7 +147,10 @@ function useAudioState(scope: number, document: string | null) {
     }
   }
   useEffect(() => {
+    view.current++;
     alive.current = true;
+    setBusy(false);
+    setOperationError('');
     void refresh();
     const off = window.notes.onChanged((change) => {
       if (
@@ -149,30 +161,32 @@ function useAudioState(scope: number, document: string | null) {
     });
     return () => {
       alive.current = false;
+      view.current++;
       generation.current++;
       off();
     };
   }, [scope, document, offset]);
   async function act(command: DesktopCommand) {
+    const current = view.current;
     setBusy(true);
     setOperationError('');
     try {
       const response = await window.notes.invoke(command);
-      if (!alive.current) return false;
+      if (!alive.current || view.current !== current) return false;
       if (!response.ok) {
         setOperationError(response.error.message);
         return false;
       }
       await refresh();
-      return true;
+      return alive.current && view.current === current;
     } catch {
-      if (alive.current)
+      if (alive.current && view.current === current)
         setOperationError(
           'The desktop connection failed. Inspect saved audio before assuming capture completed.',
         );
       return false;
     } finally {
-      if (alive.current) setBusy(false);
+      if (alive.current && view.current === current) setBusy(false);
     }
   }
   return {
@@ -216,8 +230,8 @@ export function RecordingBar({ scope }: { scope: number }) {
           <div>
             <strong>{labels[active.state]}</strong>
             <span>
-              Encrypted capture stays on this device unless you explicitly
-              upload saved audio.
+              Saved audio stays encrypted on this device. Live preview and
+              saved-audio uploads each require separate cloud consent.
             </span>
           </div>
           {['recording', 'paused'].includes(active.state) && (
@@ -288,6 +302,12 @@ export function RecordingBar({ scope }: { scope: number }) {
             levels={state?.levels ?? null}
             now={now}
           />
+          {state?.live?.running &&
+            !['stopped', 'attention'].includes(state.live.phase) && (
+              <span className="live-cloud-indicator" role="status">
+                Cloud live preview enabled
+              </span>
+            )}
         </>
       )}
       {(error || state?.error) && (
@@ -727,6 +747,14 @@ export function RecordingPanel({
     }
   }
   const choices: Track[] = [];
+  const liveRecording =
+    state?.active?.document_id === document
+      ? state.active
+      : state?.recordings.find(
+          (recording) =>
+            recording.document_id === document &&
+            recording.id === state.live?.recording_id,
+        );
   for (const [kind, enabled, id] of [
     ['microphone', microphone, microphoneId],
     ['loopback', loopback, loopbackId],
@@ -747,7 +775,8 @@ export function RecordingPanel({
           <strong>Meeting audio</strong>
           <p className="quiet-note">
             Encrypted on this device. Saved audio uploads only with your
-            consent. Transcription requires a separate Azure confirmation.
+            consent. Live preview and final transcription each require a
+            separate Azure confirmation.
           </p>
         </div>
         <button
@@ -762,6 +791,22 @@ export function RecordingPanel({
         <p className="account-alert" role="alert">
           {error || deviceError}
         </p>
+      )}
+      {liveRecording && (
+        <LivePreview
+          scope={scope}
+          recording={liveRecording}
+          live={
+            state?.live?.document_id === document &&
+            state.live.recording_id === liveRecording.id
+              ? state.live
+              : null
+          }
+          available={state?.upload_available ?? false}
+          destination={state?.upload_destination ?? null}
+          busy={acting}
+          act={act}
+        />
       )}
       {configure && (
         <div className="audio-configuration">

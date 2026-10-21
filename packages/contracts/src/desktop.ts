@@ -121,6 +121,20 @@ export const desktopCommandSchema = z.discriminatedUnion('operation', [
   }),
   z.strictObject({ operation: z.literal('retryRecordingCleanup'), ...scoped }),
   z.strictObject({
+    operation: z.literal('startLivePreview'),
+    ...scoped,
+    id: resourceId,
+    recording_id: resourceId,
+    locale: z.enum(['en-US', 'zh-CN']),
+    confirmed: z.literal(true),
+  }),
+  z.strictObject({
+    operation: z.literal('stopLivePreview'),
+    ...scoped,
+    id: resourceId,
+    recording_id: resourceId,
+  }),
+  z.strictObject({
     operation: z.literal('uploadRecording'),
     ...scoped,
     id: resourceId,

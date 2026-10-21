@@ -1,4 +1,7 @@
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   afterAll,
@@ -23,6 +26,8 @@ import type {
 import { ApiClient, ClientError } from './http.js';
 import { AudioHostClient } from './audio.js';
 import type { LiveConnection } from './live.js';
+import { LocalStore } from '@windows-ai-notes/local';
+import { RecordingController } from './recording.js';
 
 type Provider = NonNullable<Parameters<typeof createServer>[3]>;
 type Session = Awaited<ReturnType<Provider['open']>>;
@@ -386,6 +391,118 @@ describe.skipIf(!url)(
         );
       } finally {
         await host.close();
+      }
+    });
+    it('connects the consented recording controller through the gateway and clears revoked captions without stopping saved capture', async () => {
+      const { user, api } = await actor();
+      const directory = mkdtempSync(
+        join(tmpdir(), 'notes-live-gateway-desktop-'),
+      );
+      const key = randomBytes(32);
+      const local = new LocalStore(join(directory, 'notes.sqlite'), key);
+      const profile = `cloud:${user.user_id}`;
+      const draft = local.create(profile);
+      const doc = await db.createDocument(
+        user.user_id,
+        {
+          id: draft.id,
+          workspace_id: user.workspace_id,
+          title: draft.title,
+          notes: 'Keep manual notes intact.',
+        },
+        randomUUID(),
+      );
+      const notifications: string[] = [];
+      const capture = new RecordingController(
+        local,
+        (observe) =>
+          new AudioHostClient(
+            process.execPath,
+            [
+              fileURLToPath(
+                new URL('../fixtures/audio-host.mjs', import.meta.url),
+              ),
+              'capture-live',
+            ],
+            (event) => {
+              notifications.push(event.event_type);
+              observe(event);
+            },
+          ),
+        () => {},
+        async () => {},
+      );
+      const context = { profile, scope: 1, api, authorize: () => {} };
+      const state = () => capture.snapshot(profile, draft.id);
+      try {
+        await capture.start(
+          profile,
+          draft.id,
+          [
+            {
+              track_id: randomUUID(),
+              kind: 'microphone',
+              capture_scope: 'endpoint',
+              device_selection_policy: 'explicit',
+              device_id: 'synthetic',
+            },
+          ],
+          () => {},
+        );
+        const recording = state().active!.id;
+        capture.resumeUploads(context);
+        capture.startLive(profile, draft.id, recording, {
+          context,
+          locale: 'en-US',
+          confirmed: true,
+          authorize: () => {},
+          prepare: async () => {},
+        });
+        await vi.waitFor(
+          () =>
+            expect(state().live?.segments[0]?.event.text).toBe(
+              'Synthetic meeting evidence.',
+            ),
+          { timeout: 3000 },
+        );
+        expect(local.recordingUpload(profile, draft.id, recording)).toBeNull();
+        expect(notifications).not.toContain('recording.live_audio');
+        await db.pool.query('UPDATE users SET active=false WHERE id=$1', [
+          user.user_id,
+        ]);
+        await vi.waitFor(() => expect(state().live?.running).toBe(false), {
+          timeout: 3000,
+        });
+        expect(state().live?.phase).toBe('attention');
+        expect(['document_not_found', 'live_lease_lost']).toContain(
+          state().live?.error?.code,
+        );
+        expect(state().live?.segments).toEqual([]);
+        expect(state().live?.sources).toEqual([]);
+        expect(state().active?.state).toBe('recording');
+        expect(state().error).toBeNull();
+        await capture.control(profile, draft.id, recording, 'pause', () => {});
+        await capture.control(profile, draft.id, recording, 'resume', () => {});
+        await capture.stop(() => {});
+        expect(state().recordings[0]?.tracks[0]?.saved_samples).toBe(64_000);
+        await db.pool.query('UPDATE users SET active=true WHERE id=$1', [
+          user.user_id,
+        ]);
+        expect((await db.usage.snapshot(user.user_id)).uncertain.audio_ms).toBe(
+          '60000',
+        );
+        expect(await api.document(doc.id)).toMatchObject({
+          notes: 'Keep manual notes intact.',
+          transcript_revision: 0,
+        });
+        expect((await db.pool.query('SELECT id FROM recordings')).rows).toEqual(
+          [],
+        );
+      } finally {
+        await capture.stop(() => {});
+        local.close();
+        key.fill(0);
+        rmSync(directory, { recursive: true, force: true });
       }
     });
     it('aborts immediately and permits a late known receipt to settle the original reservation', async () => {

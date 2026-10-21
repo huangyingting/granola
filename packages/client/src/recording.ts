@@ -13,6 +13,7 @@ import {
   uploadSavedRecording,
   deleteSavedRemoteRecording,
 } from './recording-upload.js';
+import { RecordingLivePreview } from './recording-live.js';
 
 type AudioClient = Pick<
   AudioHostClient,
@@ -54,6 +55,8 @@ function missing(error: unknown) {
 
 export class RecordingController {
   private levels: AudioState['levels'] = null;
+  private live: { profile: string; preview: RecordingLivePreview } | null =
+    null;
   private client: AudioClient | null = null;
   private owner: RecordingOwner | null = null;
   private revoked = false;
@@ -148,6 +151,7 @@ export class RecordingController {
     }
   }
   private release(client: AudioClient): Promise<void> {
+    this.live?.preview.cancel(this.revoked);
     if (this.closing) return this.closing;
     const operation = (async () => {
       try {
@@ -224,6 +228,7 @@ export class RecordingController {
       case 'recording.resumed':
       case 'recording.stopped':
       case 'recording.status': {
+        if (event.payload.state !== 'recording') this.live?.preview.cancel();
         if (
           event.event_type !== 'recording.status' ||
           event.payload.state !== 'recording'
@@ -311,6 +316,8 @@ export class RecordingController {
           'recording_in_progress',
           'Stop the current recording before starting another.',
         );
+      this.live?.preview.cancel(true);
+      this.live = null;
       const recording = this.local.beginRecording(profile, document, tracks);
       this.owner = {
         profile,
@@ -377,6 +384,7 @@ export class RecordingController {
           'This recording cannot perform that action.',
         );
       try {
+        if (action !== 'resume') this.live?.preview.cancel();
         await client.request({
           command:
             action === 'pause'
@@ -399,6 +407,7 @@ export class RecordingController {
     });
   }
   async stop(authorize: () => void) {
+    this.live?.preview.cancel();
     this.uploadContext = null;
     if (this.uploadTimer) clearTimeout(this.uploadTimer);
     this.uploadTimer = null;
@@ -417,8 +426,112 @@ export class RecordingController {
         authorize,
       );
     else if (this.closing) await this.closing;
+    await this.live?.preview.closed();
     if (this.uploadTask) await this.uploadTask;
     if (this.cleaning) await this.cleaning;
+  }
+  startLive(
+    profile: string,
+    document: string,
+    id: string,
+    options: {
+      locale: 'en-US' | 'zh-CN';
+      confirmed: true;
+      context: RecordingUploadContext | null;
+      authorize: () => void;
+      prepare: () => Promise<void>;
+    },
+  ) {
+    options.authorize();
+    if (options.confirmed !== true)
+      throw new ClientError(
+        'live_consent_required',
+        'Live preview requires separate cloud consent.',
+      );
+    const context = options.context;
+    if (!context || context.profile !== profile)
+      throw new ClientError(
+        'live_account_required',
+        'Connect the original cloud workspace before starting live preview.',
+      );
+    context.authorize();
+    if (this.live?.preview.running)
+      throw new ClientError(
+        'live_preview_active',
+        'Stop the current live preview and wait for cleanup.',
+      );
+    const client = this.client;
+    const owner = this.owner;
+    const recording = this.local.getRecording(profile, document, id);
+    if (
+      !client ||
+      !owner ||
+      this.revoked ||
+      this.closing ||
+      this.running ||
+      owner.profile !== profile ||
+      owner.document_id !== document ||
+      owner.recording_id !== id ||
+      recording.state !== 'recording'
+    )
+      throw new ClientError(
+        'invalid_live_state',
+        'Live preview requires this meeting to be actively recording.',
+      );
+    const previous =
+      this.live?.profile === profile ? this.live.preview.snapshot() : undefined;
+    const preview = new RecordingLivePreview(
+      client,
+      recording,
+      {
+        api: context.api,
+        prepare: options.prepare,
+        authorize: () => {
+          options.authorize();
+          context.authorize();
+          if (
+            this.client !== client ||
+            this.owner !== owner ||
+            this.revoked ||
+            this.uploadContext?.profile !== profile ||
+            this.uploadContext.scope !== context.scope ||
+            this.uploadContext.api !== context.api ||
+            this.local.getRecording(profile, document, id).state !== 'recording'
+          )
+            throw new ClientError(
+              'live_owner_changed',
+              'The recording or authenticated workspace changed.',
+            );
+        },
+      },
+      this.changed,
+      options.locale,
+      previous?.recording_id === id && previous.document_id === document
+        ? previous
+        : undefined,
+    );
+    this.live = { profile, preview };
+    preview.start();
+  }
+  stopLive(
+    profile: string,
+    document: string,
+    id: string,
+    authorize: () => void,
+  ) {
+    authorize();
+    const live = this.live;
+    const snapshot = live?.preview.snapshot();
+    if (
+      live?.profile !== profile ||
+      snapshot?.document_id !== document ||
+      snapshot.recording_id !== id
+    )
+      throw new ClientError(
+        'live_preview_missing',
+        'This meeting has no matching live preview.',
+      );
+    live.preview.cancel();
   }
   listDevices() {
     if (this.deviceRequest) return this.deviceRequest;
@@ -580,6 +693,13 @@ export class RecordingController {
   }
   resumeUploads(context: RecordingUploadContext | null): void {
     const previous = this.uploadContext;
+    if (
+      !context ||
+      previous?.profile !== context.profile ||
+      previous.scope !== context.scope ||
+      previous.api !== context.api
+    )
+      this.live?.preview.cancel(true);
     this.uploadContext = context;
     if (this.uploadTimer) clearTimeout(this.uploadTimer);
     this.uploadTimer = null;
@@ -983,6 +1103,12 @@ export class RecordingController {
       document_id: document,
       active,
       levels: active?.state === 'recording' ? this.levels : null,
+      live:
+        this.live?.profile === profile &&
+        (document === null ||
+          this.live.preview.snapshot().document_id === document)
+          ? this.live.preview.snapshot()
+          : null,
       ...page,
       offset,
       busy: this.running || this.closing !== null,
@@ -1046,6 +1172,7 @@ export class RecordingController {
       }
       if (forbidden) {
         this.revoked = true;
+        this.live?.preview.cancel(true);
         void this.release(this.client).catch((error: unknown) =>
           this.report(error),
         );

@@ -377,6 +377,8 @@ async function start() {
           command.operation === 'removeRecording' ||
           command.operation === 'uploadRecording' ||
           command.operation === 'pauseRecordingUpload' ||
+          command.operation === 'startLivePreview' ||
+          command.operation === 'stopLivePreview' ||
           command.operation === 'retryRecordingCleanup'
         ) {
           const active = workspace();
@@ -388,6 +390,24 @@ async function start() {
             capture.resumeUploads(active.recordingUploadContext());
           if (command.operation === 'startRecording')
             await capture.start(profile, command.id, command.tracks, authorize);
+          else if (command.operation === 'startLivePreview')
+            capture.startLive(profile, command.id, command.recording_id, {
+              locale: command.locale,
+              confirmed: command.confirmed,
+              context: active.recordingUploadContext(),
+              authorize,
+              prepare: async () => {
+                await active.synchronize();
+                authorize();
+              },
+            });
+          else if (command.operation === 'stopLivePreview')
+            capture.stopLive(
+              profile,
+              command.id,
+              command.recording_id,
+              authorize,
+            );
           else if (command.operation === 'controlRecording')
             await capture.control(
               profile,

@@ -730,6 +730,47 @@ h1 {
   font-size: 12px;
   line-height: 1.8;
 }
+.live-preview {
+  margin-top: 16px;
+  padding: 18px;
+  border: 1px solid #dce7f4;
+  border-radius: 14px;
+  background: #f8fbff;
+}
+.live-captions {
+  display: grid;
+  gap: 10px;
+  max-height: 280px;
+  overflow-y: auto;
+  margin-top: 12px;
+}
+.live-caption {
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: white;
+  overflow-wrap: anywhere;
+}
+.live-caption small {
+  color: #68788f;
+  font-size: 11px;
+}
+.live-caption p {
+  margin: 5px 0 0;
+  white-space: pre-wrap;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.live-caption.is-provisional {
+  opacity: 0.7;
+}
+.live-boundaries {
+  margin-top: 12px;
+  font-size: 12px;
+}
+.live-cloud-indicator {
+  color: #386caa;
+  font-size: 12px;
+}
 .account-card {
   border: 1px solid #e9edf5;
   border-radius: 15px;

@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { captureLevelsSchema, recoverySchema, trackSchema } from './index.js';
 import { resourceId } from './server.js';
+import { liveRecognitionEventSchema, liveSourceSchema } from './realtime.js';
 import {
   createRecordingSchema,
   registerChunkSchema,
@@ -142,6 +143,71 @@ export const recordingUploadIntentSchema = recordingUploadStatusSchema
 export type RecordingUploadPlan = z.infer<typeof recordingUploadPlanSchema>;
 export type RecordingUploadStatus = z.infer<typeof recordingUploadStatusSchema>;
 export type RecordingUploadIntent = z.infer<typeof recordingUploadIntentSchema>;
+export const livePreviewSchema = z.strictObject({
+  document_id: resourceId,
+  recording_id: resourceId,
+  locale: z.enum(['en-US', 'zh-CN']),
+  phase: z.enum([
+    'starting',
+    'live',
+    'finishing',
+    'rotating',
+    'stopped',
+    'attention',
+  ]),
+  running: z.boolean(),
+  attempt: z.number().int().min(1).max(100_000),
+  canonical: z.literal(false),
+  continuity: z.literal('unverified'),
+  usage_status: z.enum(['settled', 'check_account']),
+  sources: z
+    .array(
+      z.strictObject({
+        track_id: resourceId,
+        kind: z.enum(['microphone', 'loopback']),
+        provider_epoch: resourceId.nullable(),
+        accepted_samples: z.number().int().min(0).max(960_000),
+        skipped_samples: z.number().int().min(0).max(230_400_000),
+      }),
+    )
+    .max(2),
+  segments: z
+    .array(
+      z.strictObject({
+        attempt: z.number().int().min(1).max(100_000),
+        event: liveRecognitionEventSchema,
+      }),
+    )
+    .max(12),
+  boundaries: z
+    .array(
+      z.strictObject({
+        attempt: z.number().int().min(1).max(100_000),
+        reason: z.enum([
+          'started',
+          'normal_rotation',
+          'uncertain_previous_tail',
+        ]),
+      }),
+    )
+    .max(8),
+  gaps: z
+    .array(
+      z
+        .strictObject({
+          attempt: z.number().int().min(1).max(100_000),
+          source: liveSourceSchema,
+          sample_start: z.number().int().min(0).max(230_400_000),
+          sample_end: z.number().int().min(1).max(230_400_000),
+          reason: z.enum(['startup', 'rotation', 'authorization']),
+        })
+        .refine((gap) => gap.sample_end > gap.sample_start),
+    )
+    .max(8),
+  omitted: z.boolean(),
+  error: recordingProblemSchema.nullable(),
+});
+export type LivePreviewState = z.infer<typeof livePreviewSchema>;
 export const audioStateSchema = z.strictObject({
   document_id: resourceId.nullable(),
   active: localRecordingSchema.nullable(),
@@ -163,5 +229,6 @@ export const audioStateSchema = z.strictObject({
     })
     .nullable()
     .default(null),
+  live: livePreviewSchema.nullable().default(null),
 });
 export type AudioState = z.infer<typeof audioStateSchema>;

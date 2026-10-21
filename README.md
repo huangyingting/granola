@@ -655,12 +655,13 @@ real signed-token expiry, revocation/regrant, cursor replay/gaps, slow/broken
 consumers, late receipts/deletion, finish ordering and shutdown. A synthetic
 loopback test crosses the actual isolated Speech SDK, API WebSocket, durable
 cursor authorization and settlement without contacting Azure. Desktop capture
-orchestration, explicit consent and physical/semantic quality gates remain incomplete.
+orchestration and explicit consent are connected below; physical/semantic
+quality gates remain incomplete.
 
 ### Main-owned live client transport
 
-`ApiClient.openLiveSource` provides the internal Node/Main transport; it is not
-yet exposed in the desktop UI. It uses the existing private credential factory
+`ApiClient.openLiveSource` provides the internal Node/Main transport used by
+the optional desktop preview. It uses the existing private credential factory
 for header-only authenticated WSS, with WS allowed only for explicitly configured
 development loopback origins. It never follows redirects, reconnects or replays
 audio. Starting requires separate literal live consent and a synchronous scope
@@ -681,10 +682,10 @@ finish, wall-lifetime and forced-close deadlines.
 The native `start_live_preview` command now accepts optional `max_buffered_ms`
 from 50 to 5000, in complete 50 ms frames. It bounds both buffered samples and
 their native-clock age; omission preserves the existing five-second default.
-The upcoming desktop controller must explicitly choose **2500 ms** and hold only
-one 500 ms read, so native + Main + submitted/unfinalized media total at most
-five seconds per source. These primitives alone do **not** establish that
-end-to-end budget: using the legacy native default would exceed it. This is a
+The desktop controller explicitly chooses **2500 ms** and holds only one
+500 ms read, so native + Main + submitted/unfinalized media total at most
+five seconds per source. Using the legacy native default alongside the client
+would exceed that end-to-end budget. This is a
 media-buffer bound, not a latency or recognition-quality guarantee.
 
 Cancellation and transport/protocol/scope faults reject pending work, close only
@@ -695,8 +696,47 @@ redirects, cancellation and deadlines. PostgreSQL gateway integration also
 crosses the framed helper client, verifies final-only credit/known settlement
 without uploads or note changes, and keeps capture controllable after cloud
 revocation. Native budget regressions independently verify that overrun does not
-interrupt encrypted chunk persistence. Capture orchestration, inline consent,
-attempt-boundary UX and Windows UI coverage remain to be connected.
+interrupt encrypted chunk persistence.
+
+### Optional desktop live preview
+
+While recording in the original signed-in workspace, **Preview speech live**
+offers inline, separate Azure Speech consent and an English/Mandarin locale.
+It synchronizes the meeting and verifies remote document access before starting
+native preview. It does not create saved-audio upload intents, S3 objects,
+canonical transcript segments or note edits. The API must explicitly enable and
+configure live transcription as described above. Credentials and raw PCM remain
+in Main; scoped, contract-validated renderer IPC contains only bounded status
+and temporary text.
+
+One preview connection per selected source shares the recording's existing
+ownership guards. Native reads begin during cloud startup: frames that cannot
+yet be forwarded are discarded, not queued indefinitely, and their source
+ranges are disclosed as startup gaps. Text is limited to twelve recent segment
+revisions and 16 KiB, revision metadata to 256 segments per source/attempt, and
+boundary/gap lists to eight each, with visible omission disclosure. The UI
+shows six recent results with source and attempt labels. No live text is
+persisted or promoted to the final transcript.
+
+Each bounded attempt finishes after at most sixty seconds or its media limit.
+Only confirmed, settled finishes can start a fresh native/provider attempt
+after cleanup; every rotation is visibly marked **continuity unverified**.
+This does not prove seamless audio coverage, complete recognition, wall-clock
+alignment or source/speaker attribution. Measured skipped ranges are only known
+gaps, not an exhaustive account of missing speech. Provider capacity/startup
+failure or uncertain usage stops the preview without automatic retry or replay.
+Long phrases and silence can exhaust the conservative final-only window.
+
+Pause, stop, account/context changes and document revocation cancel preview
+independently of saved capture. Resume does not silently restart cloud audio;
+fresh confirmation is required. Authorization loss clears temporary text.
+Cloud-only failures do not close the capture helper or turn healthy encrypted
+capture into a failed recording. Synthetic framed-helper/controller tests and
+real PostgreSQL/gateway integration exercise these boundaries; isolated Windows
+Electron scenarios use the production preload, recording UI and validated
+synthetic metadata without adding production test hooks or claiming physical
+audio-device coverage. Production continuous-meeting STT and physical/language
+quality gates remain open.
 
 ### Internal Azure streaming adapter
 
