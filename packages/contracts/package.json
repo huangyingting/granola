@@ -8,6 +8,7 @@
     "./server": "./dist/server.js",
     "./content": "./dist/content.js",
     "./desktop": "./dist/desktop.js",
+    "./generation": "./dist/generation.js",
     "./recording": "./dist/recording.js",
     "./uploads": "./dist/uploads.js",
     "./realtime": "./dist/realtime.js"

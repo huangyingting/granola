@@ -29,6 +29,7 @@ import type { AudioEvent } from '@windows-ai-notes/contracts';
 import { resourceId } from '@windows-ai-notes/contracts/server';
 import {
   exportMeeting,
+  richTextFromPlainText,
   richTextToPlainText,
 } from '@windows-ai-notes/contracts/content';
 import {
@@ -358,6 +359,43 @@ async function start() {
             ok: true,
             state: await workspace().applyTranscript(command),
           });
+        if (
+          command.operation === 'startSummary' ||
+          command.operation === 'controlSummary' ||
+          command.operation === 'applySummaryReview'
+        ) {
+          const active = workspace();
+          if (command.operation === 'startSummary')
+            await active.summaries.start(command);
+          else if (command.operation === 'controlSummary')
+            await active.summaries.control(command);
+          else await active.summaries.apply(command);
+          return desktopResponseSchema.parse({
+            ok: true,
+            state: active.snapshot(),
+          });
+        }
+        if (
+          command.operation === 'openSummaryReview' ||
+          command.operation === 'saveSummaryReview'
+        ) {
+          const active = workspace();
+          const review =
+            command.operation === 'openSummaryReview'
+              ? await active.summaries.open(command)
+              : active.summaries.save(command);
+          return desktopResponseSchema.parse({
+            ok: true,
+            summary_review: { scope: command.scope, review },
+          });
+        }
+        if (command.operation === 'getSummarySource') {
+          const source = await workspace().summaries.source(command);
+          return desktopResponseSchema.parse({
+            ok: true,
+            summary_source: { scope: command.scope, source },
+          });
+        }
         if (command.operation === 'listAudioDevices') {
           const active = workspace();
           active.assertScope(command.scope);
@@ -470,11 +508,18 @@ async function start() {
             },
           });
         }
-        if (command.operation === 'export') {
+        if (
+          command.operation === 'export' ||
+          command.operation === 'exportSummaryReview'
+        ) {
           const active = workspace();
           active.assertScope(command.scope);
           const profile = active.profile;
           const draft = db.get(profile, command.id);
+          const summary =
+            command.operation === 'exportSummaryReview'
+              ? await active.summaries.export(command)
+              : null;
           const suffix = command.format === 'markdown' ? 'md' : 'txt';
           let name =
             Array.from(
@@ -488,8 +533,14 @@ async function start() {
           if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu.test(name))
             name = `_${name}`;
           const result = await dialog.showSaveDialog(current, {
-            title: 'Export unencrypted notes',
-            defaultPath: join(app.getPath('documents'), `${name}.${suffix}`),
+            title:
+              summary === null
+                ? 'Export unencrypted notes'
+                : 'Export unencrypted summary draft',
+            defaultPath: join(
+              app.getPath('documents'),
+              `${name}${summary === null ? '' : '-summary'}.${suffix}`,
+            ),
             filters: [
               {
                 name: command.format === 'markdown' ? 'Markdown' : 'Plain text',
@@ -502,6 +553,8 @@ async function start() {
             return { ok: true, state: state(), notice: 'export_cancelled' };
           active.assertScope(command.scope);
           db.get(profile, command.id);
+          if (command.operation === 'exportSummaryReview')
+            active.summaries.assertExport(command);
           const temporary = `${result.filePath}.${randomUUID()}.tmp`;
           try {
             await writeFile(
@@ -509,7 +562,13 @@ async function start() {
               exportMeeting(
                 {
                   ...draft,
-                  notes: richTextToPlainText(draft.content),
+                  ...(summary === null
+                    ? {}
+                    : {
+                        title: `${draft.title} - Summary draft`,
+                        content: richTextFromPlainText(summary),
+                      }),
+                  notes: summary ?? richTextToPlainText(draft.content),
                 },
                 command.format,
               ),
@@ -517,6 +576,8 @@ async function start() {
             );
             active.assertScope(command.scope);
             db.get(profile, command.id);
+            if (command.operation === 'exportSummaryReview')
+              active.summaries.assertExport(command);
             await rename(temporary, result.filePath);
           } finally {
             await rm(temporary, { force: true });

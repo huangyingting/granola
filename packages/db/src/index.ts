@@ -29,6 +29,10 @@ import { TranscriptStore } from './transcripts.js';
 import { RecordingTranscriptions } from './recording-transcriptions.js';
 import { UsageStore } from './usage.js';
 import { LiveSourceStore } from './live.js';
+import {
+  summaryCitations,
+  summarySourceSchema,
+} from '@windows-ai-notes/contracts/generation';
 export type { UsageReservation } from './usage.js';
 export type { LiveClaim, LiveStart, LiveCursor } from './live.js';
 export { LIVE_MEDIA_MS, LIVE_LEASE_MS } from './live.js';
@@ -867,6 +871,75 @@ export class Database {
       [documentId, userId, limit, offset],
     );
     return result.rows.map(jobView);
+  }
+  async summarySource(
+    userId: string,
+    id: string,
+    selected: z.infer<typeof summarySourceSchema>['citation'],
+  ) {
+    const row = (
+      await this.pool.query<JobStatusRow>(
+        jobStatusQuery +
+          ' WHERE j.id=$1 AND j.owner_id=$2 AND d.deleted_at IS NULL',
+        [id, userId],
+      )
+    ).rows[0];
+    if (!row)
+      throw new ServiceError(
+        'job_not_found',
+        'The job is unavailable or not accessible.',
+        404,
+      );
+    const input = jobInputSchema.parse(row.input);
+    const result = row.result === null ? null : resultSchema.parse(row.result);
+    if (
+      row.state !== 'succeeded' ||
+      input.kind !== 'summary' ||
+      result?.kind !== 'summary'
+    )
+      throw new ServiceError(
+        'summary_unavailable',
+        'This job has no completed summary evidence.',
+        409,
+      );
+    if (
+      !summaryCitations(result.summary).some(
+        (citation) =>
+          citation.source === selected.source &&
+          citation.id === selected.id &&
+          citation.revision === selected.revision,
+      )
+    )
+      throw new ServiceError(
+        'citation_not_found',
+        'This source is not cited by the completed summary.',
+        404,
+      );
+    const snapshot = input.snapshot;
+    const segment =
+      selected.source === 'transcript' &&
+      selected.revision === snapshot.transcript_revision
+        ? snapshot.segments.find((item) => item.id === selected.id)
+        : undefined;
+    if (
+      selected.source === 'note'
+        ? selected.id !== snapshot.document_id ||
+          selected.revision !== snapshot.note_revision
+        : !segment
+    )
+      throw new ServiceError(
+        'citation_not_found',
+        'The frozen source is unavailable.',
+        404,
+      );
+    return summarySourceSchema.parse({
+      document_id: row.document_id,
+      job_id: row.id,
+      citation: selected,
+      text: selected.source === 'note' ? snapshot.notes : segment!.text,
+      start_ms: segment?.start_ms ?? null,
+      end_ms: segment?.end_ms ?? null,
+    });
   }
   async events(userId: string, id: string, after: number) {
     const job = await this.job(userId, id);

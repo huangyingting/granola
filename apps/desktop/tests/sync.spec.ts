@@ -4,7 +4,7 @@ import {
   test,
   type ElectronApplication,
 } from '@playwright/test';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -56,6 +56,279 @@ async function synchronize(application: ElectronApplication) {
     });
   });
 }
+test('recovers one consented summary, inspects frozen evidence, persists review edits and explicitly appends and exports without replacing notes', async () => {
+  test.setTimeout(90_000);
+  const directory = await mkdtemp(join(tmpdir(), 'windows-notes-summary-ui-'));
+  const fixture = await desktopFixture();
+  const remote = fixture.seed(
+    'Original frozen UI note evidence.',
+    'Frozen UI transcript evidence.',
+  );
+  let application: ElectronApplication | null = null;
+  const reviewed = 'A deliberately reviewed UI summary [1].';
+  try {
+    application = await launch(directory);
+    let page = await application.firstWindow();
+    await page.getByRole('button', { name: /Account & sync/ }).click();
+    await page.getByRole('textbox', { name: 'Service URL' }).fill(fixture.url);
+    await page
+      .getByRole('button', { name: 'Sign in with browser', exact: true })
+      .click();
+    await page
+      .getByRole('button', {
+        name: /^Synthetic cloud workspace (Open workspace|Current workspace)$/,
+      })
+      .click();
+    await expect(
+      page.getByRole('textbox', { name: 'Meeting notes', exact: true }),
+    ).toHaveText(remote.notes);
+    await page
+      .getByRole('button', { name: 'Generate summary', exact: true })
+      .click();
+    await expect(
+      page.getByRole('button', { name: 'Generate cited draft', exact: true }),
+    ).toBeDisabled();
+    await page
+      .getByRole('button', { name: 'Keep writing', exact: true })
+      .click();
+    expect(fixture.state.jobs.size).toBe(0);
+    await page
+      .getByRole('button', { name: 'Generate summary', exact: true })
+      .click();
+    await page
+      .getByRole('combobox', { name: 'Summary language' })
+      .selectOption('zh');
+    await page
+      .getByRole('checkbox', {
+        name: 'I agree to Azure processing for this summary.',
+      })
+      .check();
+    fixture.state.lose_summary_response = true;
+    await page
+      .getByRole('button', { name: 'Generate cited draft', exact: true })
+      .click();
+    await expect.poll(() => fixture.state.jobs.size).toBe(1);
+    await expect(
+      page.getByRole('button', { name: 'Recover saved summary request' }),
+    ).toBeVisible();
+    await close(application);
+    application = null;
+    application = await launch(directory);
+    page = await application.firstWindow();
+    await page
+      .getByRole('button', { name: 'Recover saved summary request' })
+      .click();
+    await expect(
+      page.getByRole('combobox', { name: 'Summary language' }),
+    ).toHaveValue('zh');
+    await page
+      .getByRole('checkbox', {
+        name: 'Recover the original authorized request, submitting it if its receipt was lost.',
+      })
+      .check();
+    await page
+      .getByRole('button', { name: 'Recover request', exact: true })
+      .click();
+    await expect(
+      page.getByRole('button', { name: 'Recover request', exact: true }),
+    ).toHaveCount(0);
+    expect(fixture.state.jobs.size).toBe(1);
+    const job = [...fixture.state.jobs.values()][0]!;
+    fixture.change(remote.id, 'Newer human cloud notes remain authoritative.');
+    fixture.publishSummary(job.id);
+    await synchronize(application);
+    await expect(
+      page.getByText('Synthetic generated summary for review.', {
+        exact: true,
+      }),
+    ).toBeVisible();
+    await page
+      .getByRole('button', { name: 'Inspect source 1', exact: true })
+      .first()
+      .click();
+    let source = page.getByRole('complementary', {
+      name: 'Frozen summary source',
+    });
+    await expect(source).toContainText(remote.notes);
+    await expect(source).not.toContainText('Newer human cloud notes');
+    await page
+      .getByRole('button', { name: 'Close source', exact: true })
+      .click();
+    await page
+      .locator('.summary-panel summary')
+      .filter({ hasText: 'Action items' })
+      .click();
+    await expect(
+      page.getByText('Owner: Not specified - Due: Not specified', {
+        exact: true,
+      }),
+    ).toBeVisible();
+    await page
+      .locator('.summary-panel summary')
+      .filter({ hasText: 'Decisions' })
+      .click();
+    await page
+      .getByRole('button', { name: 'Inspect source 2', exact: true })
+      .click();
+    await expect(source).toContainText('Frozen UI transcript evidence.');
+    await page
+      .getByRole('button', { name: 'Close source', exact: true })
+      .click();
+    await page
+      .getByRole('button', { name: 'Review and edit draft', exact: true })
+      .click();
+    let editor = page.getByRole('region', {
+      name: 'Editable summary review',
+      exact: true,
+    });
+    await expect(
+      editor.getByRole('textbox', { name: 'Summary review text' }),
+    ).toBeEnabled();
+    await editor.getByRole('textbox', { name: 'Summary review text' }).fill('');
+    await expect(editor.getByRole('alert')).toContainText(
+      'have not been saved',
+    );
+    await page.getByRole('button', { name: /Account & sync/ }).click();
+    await expect(editor).toBeVisible();
+    await editor
+      .getByRole('textbox', { name: 'Summary review text' })
+      .fill(reviewed);
+    await expect(editor.getByRole('status')).toHaveText(
+      'Encrypted local draft',
+    );
+    await close(application);
+    application = null;
+    application = await launch(directory);
+    page = await application.firstWindow();
+    await page
+      .getByRole('button', { name: 'Review and edit draft', exact: true })
+      .click();
+    editor = page.getByRole('region', {
+      name: 'Editable summary review',
+      exact: true,
+    });
+    await expect(
+      editor.getByRole('textbox', { name: 'Summary review text' }),
+    ).toHaveValue(reviewed);
+    fixture.state.summary_online = false;
+    await page
+      .getByRole('button', { name: 'Inspect source 1', exact: true })
+      .first()
+      .click();
+    source = page.getByRole('complementary', { name: 'Frozen summary source' });
+    await expect(source).toContainText(remote.notes);
+    const human =
+      'Another human edit must survive applying the generated review.';
+    await page
+      .getByRole('textbox', { name: 'Meeting notes', exact: true })
+      .fill(human);
+    await expect(
+      editor.getByRole('button', {
+        name: 'Use latest notes as append baseline',
+      }),
+    ).toBeVisible();
+    await expect(
+      editor.getByRole('button', { name: 'Append reviewed summary' }),
+    ).toBeDisabled();
+    await editor
+      .getByRole('button', { name: 'Use latest notes as append baseline' })
+      .click();
+    await expect(
+      editor.getByRole('button', {
+        name: 'Use latest notes as append baseline',
+      }),
+    ).toHaveCount(0);
+    await editor
+      .getByRole('checkbox', {
+        name: 'Append this reviewed draft without replacing my existing notes.',
+      })
+      .check();
+    await editor
+      .getByRole('button', { name: 'Append reviewed summary' })
+      .click();
+    await expect(editor.getByText(/Appended once/)).toBeVisible();
+    const notes = page.getByRole('textbox', {
+      name: 'Meeting notes',
+      exact: true,
+    });
+    await expect(notes).toContainText(human);
+    await expect(notes).toContainText(reviewed);
+    expect((await notes.innerText()).split(reviewed)).toHaveLength(2);
+    await expect(
+      editor.getByRole('textbox', { name: 'Summary review text' }),
+    ).toBeDisabled();
+    const destination = join(directory, 'reviewed-summary.txt');
+    await application.evaluate(({ dialog }, path) => {
+      dialog.showSaveDialog = async () => ({ canceled: false, filePath: path });
+    }, destination);
+    await editor
+      .getByRole('combobox', { name: 'Summary export format' })
+      .selectOption('text');
+    await editor.getByRole('button', { name: 'Export reviewed draft' }).click();
+    await expect(
+      page.getByText('Unencrypted export saved.', { exact: true }),
+    ).toBeVisible();
+    const exported = await readFile(destination, 'utf8');
+    expect(exported).toContain(reviewed);
+    expect(exported).toContain(`Note ${remote.id}, revision 1`);
+    expect(exported).not.toContain(human);
+    expect(fixture.state.jobs.size).toBe(1);
+    fixture.state.summary_online = true;
+    await page
+      .getByRole('button', { name: 'New summary', exact: true })
+      .click();
+    await page
+      .getByRole('checkbox', {
+        name: 'I agree to Azure processing for this summary.',
+      })
+      .check();
+    await page
+      .getByRole('button', { name: 'Generate cited draft', exact: true })
+      .click();
+    await expect(
+      page.getByRole('button', { name: 'Generate cited draft', exact: true }),
+    ).toHaveCount(0);
+    await expect.poll(() => fixture.state.jobs.size).toBe(2);
+    const next = [...fixture.state.jobs.values()].find(
+      (item) => item.id !== job.id,
+    )!;
+    fixture.publishSummary(next.id);
+    await synchronize(application);
+    await page
+      .getByRole('button', { name: 'Inspect source 1', exact: true })
+      .first()
+      .click();
+    await expect(
+      page.getByRole('complementary', { name: 'Frozen summary source' }),
+    ).toBeVisible();
+    await page
+      .getByRole('button', { name: 'Review and edit draft', exact: true })
+      .click();
+    await page.getByRole('textbox', { name: 'Summary review text' }).fill('');
+    await expect(
+      page
+        .getByRole('region', { name: 'Editable summary review' })
+        .getByRole('alert'),
+    ).toContainText('have not been saved');
+    fixture.remove(remote.id);
+    await synchronize(application);
+    await expect(
+      page.getByRole('complementary', { name: 'Frozen summary source' }),
+    ).toHaveCount(0);
+    await expect(
+      page.getByRole('textbox', { name: 'Summary review text' }),
+    ).toHaveCount(0);
+    await close(application);
+    application = null;
+  } finally {
+    if (application) await application.close();
+    await fixture.close();
+    expect(fixture.state.failures).toEqual([]);
+    expect(fixture.issuer.state.failures).toEqual([]);
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 async function savedRecording(
   application: ElectronApplication,
   directory: string,

@@ -19,6 +19,7 @@ import { Account } from './Account.js';
 import { NoteExtras } from './NoteExtras.js';
 import { AudioDevices } from './AudioDevices.js';
 import { RecordingBar, RecordingPanel } from './Recording.js';
+import { SummaryPanel } from './Summaries.js';
 
 declare global {
   interface Window {
@@ -549,6 +550,7 @@ function Note({
   });
   const pending = useRef(false);
   const running = useRef<Promise<boolean> | null>(null);
+  const reviewFlush = useRef<() => Promise<boolean>>(async () => true);
   const invalid = useRef(new Set<'content' | 'tags'>());
   const editor = useEditor({
     extensions: [StarterKit.configure({ link: false })],
@@ -625,7 +627,7 @@ function Note({
     }
   }
   useEffect(() => {
-    flush.current = save;
+    flush.current = async () => (await save()) && (await reviewFlush.current());
     return () => {
       flush.current = async () => true;
     };
@@ -854,6 +856,15 @@ function Note({
           document={draft.id}
           beforeStart={save}
           jobs={state.jobs}
+        />
+      )}
+      {draft.status !== 'deleted_remote' && (
+        <SummaryPanel
+          state={state}
+          draft={draft}
+          beforeStart={save}
+          reviewFlush={reviewFlush}
+          invoke={invoke}
         />
       )}
       <input

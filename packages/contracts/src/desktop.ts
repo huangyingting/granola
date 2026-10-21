@@ -11,6 +11,11 @@ import {
 } from './server.js';
 import { deviceSchema, trackSchema } from './index.js';
 import { audioStateSchema } from './recording.js';
+import {
+  summaryReviewSchema,
+  summarySourceSchema,
+  summarySubmissionSchema,
+} from './generation.js';
 
 export const editableSchema = z.strictObject({
   title: z
@@ -35,8 +40,54 @@ export const draftSummarySchema = draftSchema.omit({ content: true }).extend({
 });
 export type DraftSummary = z.infer<typeof draftSummarySchema>;
 const scoped = { scope: z.number().int().positive() };
+const summaryScoped = { ...scoped, id: resourceId, job_id: resourceId };
 export const desktopCommandSchema = z.discriminatedUnion('operation', [
   z.strictObject({ operation: z.literal('bootstrap') }),
+  z.strictObject({
+    operation: z.literal('startSummary'),
+    ...scoped,
+    id: resourceId,
+    language: z.enum(['en', 'zh']),
+    confirmed: z.literal(true),
+    new_attempt: z.boolean(),
+    consent_id: resourceId,
+  }),
+  z.strictObject({
+    operation: z.literal('controlSummary'),
+    ...summaryScoped,
+    action: z.enum(['refresh', 'cancel']),
+    confirmed: z.literal(true),
+  }),
+  z.strictObject({
+    operation: z.literal('openSummaryReview'),
+    ...summaryScoped,
+    rebase: z.boolean(),
+    confirmed: z.literal(true),
+  }),
+  z.strictObject({
+    operation: z.literal('saveSummaryReview'),
+    ...summaryScoped,
+    review_revision: z.number().int().positive(),
+    text: summaryReviewSchema.shape.text,
+  }),
+  z.strictObject({
+    operation: z.literal('applySummaryReview'),
+    ...summaryScoped,
+    review_revision: z.number().int().positive(),
+    local_revision: z.number().int().positive(),
+    confirmed: z.literal(true),
+  }),
+  z.strictObject({
+    operation: z.literal('getSummarySource'),
+    ...summaryScoped,
+    citation: summarySourceSchema.shape.citation,
+  }),
+  z.strictObject({
+    operation: z.literal('exportSummaryReview'),
+    ...summaryScoped,
+    review_revision: z.number().int().positive(),
+    format: z.enum(['markdown', 'text']),
+  }),
   z.strictObject({ operation: z.literal('getAccountUsage'), ...scoped }),
   z.strictObject({
     operation: z.literal('getTranscriptPage'),
@@ -255,6 +306,7 @@ export const desktopStateSchema = z.strictObject({
   transcript_revision: z.number().int().nonnegative(),
   transcript: cachedTranscriptSchema.nullable(),
   jobs: z.array(jobSchema).max(20),
+  summary_submission: summarySubmissionSchema.nullable().default(null),
 });
 export const desktopChangeSchema = z.strictObject({
   version: z.number().int().positive(),
@@ -262,6 +314,14 @@ export const desktopChangeSchema = z.strictObject({
   kind: z.enum(['data', 'scope', 'revoked', 'status', 'audio']),
 });
 export const desktopResponseSchema = z.union([
+  z.strictObject({
+    ok: z.literal(true),
+    summary_review: z.strictObject({ ...scoped, review: summaryReviewSchema }),
+  }),
+  z.strictObject({
+    ok: z.literal(true),
+    summary_source: z.strictObject({ ...scoped, source: summarySourceSchema }),
+  }),
   z.strictObject({
     ok: z.literal(true),
     account_usage: z.strictObject({ ...scoped, account: accountUsageSchema }),

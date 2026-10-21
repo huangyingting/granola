@@ -15,6 +15,7 @@ import {
   updateNotesSchema,
   updateTranscriptSchema,
   summaryRequestSchema,
+  citationSchema,
   transcriptionQuerySchema,
   transcriptPageQuerySchema,
   applyTranscriptSchema,
@@ -419,6 +420,14 @@ export async function createServer(
   app.get('/v1/jobs/:id', async (request) => {
     const { id } = parse(idParams, request.params);
     return db.job(principal(request).userId, id);
+  });
+  app.post('/v1/jobs/:id/citation', async (request) => {
+    const { id } = parse(idParams, request.params);
+    return db.summarySource(
+      principal(request).userId,
+      id,
+      parse(citationSchema, request.body),
+    );
   });
   app.post('/v1/jobs/:id/cancel', async (request) => {
     const { id } = parse(idParams, request.params);

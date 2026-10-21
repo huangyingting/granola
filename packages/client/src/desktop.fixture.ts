@@ -18,7 +18,14 @@ import {
   applyTranscriptSchema,
   accountUsageSchema,
   DEFAULT_AI_LIMITS,
+  summaryRequestSchema,
+  citationSchema,
+  type SummarySnapshot,
 } from '@windows-ai-notes/contracts/server';
+import {
+  summaryCitations,
+  summarySourceSchema,
+} from '@windows-ai-notes/contracts/generation';
 import { canonicalJson } from '@windows-ai-notes/contracts/content';
 import { oidcFixture } from './oidc.fixture.js';
 
@@ -52,6 +59,7 @@ export async function desktopFixture() {
     z.infer<typeof transcriptTimelineEntrySchema>[]
   >();
   const jobs = new Map<string, Job>();
+  const summarySnapshots = new Map<string, SummarySnapshot>();
   const recordings = new Map<
     string,
     {
@@ -95,6 +103,8 @@ export async function desktopFixture() {
     documents,
     jobs,
     lose_finalization_response: false,
+    lose_summary_response: false,
+    summary_online: true,
     workspaces: [{ id: workspace, name: 'Synthetic cloud workspace' }],
     failures: [] as unknown[],
     usage,
@@ -290,6 +300,69 @@ export async function desktopFixture() {
     );
     record(document, 'job', id);
   }
+  function publishSummary(id: string) {
+    const job = jobs.get(id),
+      snapshot = summarySnapshots.get(id);
+    const document = job ? documents.get(job.document_id) : null;
+    if (!job || !snapshot || !document)
+      throw new Error('Missing synthetic summary.');
+    const note = {
+      source: 'note' as const,
+      id: snapshot.document_id,
+      revision: snapshot.note_revision,
+    };
+    const segment = snapshot.segments[0];
+    const fact = {
+      text: 'Synthetic generated summary for review.',
+      citations: [note],
+    };
+    const next = jobSchema.parse({
+      ...job,
+      state: 'succeeded',
+      attempt: 1,
+      input_stale:
+        document.revision !== snapshot.note_revision ||
+        document.transcript_revision !== snapshot.transcript_revision,
+      result: {
+        kind: 'summary',
+        summary: {
+          overview: fact,
+          topics: [{ ...fact, text: 'Synthetic discussion topic.' }],
+          decisions: segment
+            ? [
+                {
+                  text: 'Verify the cited synthetic decision.',
+                  citations: [
+                    {
+                      source: 'transcript',
+                      id: segment.id,
+                      revision: snapshot.transcript_revision,
+                    },
+                  ],
+                },
+              ]
+            : [],
+          action_items: [
+            {
+              ...fact,
+              text: 'Verify the reviewed draft.',
+              owner: null,
+              due_date: null,
+            },
+          ],
+          open_questions: [
+            { ...fact, text: 'Which details still need verification?' },
+          ],
+        },
+        provider: 'fixture',
+        configuration_version: 'synthetic-summary-v1',
+        prompt_version: 'meeting-summary-v1',
+        usage: { input_tokens: 100, output_tokens: 80, audio_ms: 0 },
+      },
+    });
+    jobs.set(id, next);
+    record(document, 'job', id);
+  }
   function send(response: ServerResponse, value: unknown, status = 200) {
     response.writeHead(status, { 'Content-Type': 'application/json' });
     response.end(status === 204 ? undefined : JSON.stringify(value));
@@ -481,10 +554,90 @@ export async function desktopFixture() {
         }
         return send(response, job, 202);
       }
+      if (
+        request.method === 'POST' &&
+        parts[2] === 'documents' &&
+        parts[4] === 'summary-runs'
+      ) {
+        if (!existing) return error(response, 'document_not_found', 404);
+        const value = summaryRequestSchema.parse(body);
+        if (
+          existing.revision !== value.note_revision ||
+          existing.transcript_revision !== value.transcript_revision
+        )
+          return error(response, 'revision_conflict', 409);
+        const snapshot: SummarySnapshot = {
+          document_id: id,
+          note_revision: value.note_revision,
+          transcript_revision: value.transcript_revision,
+          language: value.language,
+          notes: existing.notes,
+          segments: structuredClone(
+            transcripts.get(`${id}:${value.transcript_revision}`)?.segments ??
+              [],
+          ),
+        };
+        const job = jobSchema.parse({
+          id: randomUUID(),
+          document_id: id,
+          kind: 'summary',
+          state: 'queued',
+          attempt: 0,
+          input_stale: false,
+          result: null,
+          error: null,
+          created_at: new Date().toISOString(),
+        });
+        jobs.set(job.id, job);
+        summarySnapshots.set(job.id, snapshot);
+        replays.set(key, { hash, value: job });
+        record(existing, 'job', job.id);
+        if (state.lose_summary_response) {
+          state.lose_summary_response = false;
+          response.destroy();
+          return;
+        }
+        return send(response, job, 202);
+      }
       if (request.method === 'POST' && parts[2] === 'jobs') {
         const job = jobs.get(id),
           document = job ? documents.get(job.document_id) : null;
         if (!job || !document) return error(response, 'job_not_found', 404);
+        if (parts[4] === 'citation') {
+          if (!state.summary_online)
+            return error(response, 'service_unavailable', 503);
+          const selected = citationSchema.parse(body),
+            snapshot = summarySnapshots.get(id);
+          if (
+            !snapshot ||
+            job.state !== 'succeeded' ||
+            job.result?.kind !== 'summary'
+          )
+            return error(response, 'summary_unavailable', 409);
+          if (
+            !summaryCitations(job.result.summary).some(
+              (item) =>
+                item.source === selected.source &&
+                item.id === selected.id &&
+                item.revision === selected.revision,
+            )
+          )
+            return error(response, 'citation_not_found', 404);
+          const segment = snapshot.segments.find(
+            (item) => item.id === selected.id,
+          );
+          return send(
+            response,
+            summarySourceSchema.parse({
+              document_id: document.id,
+              job_id: id,
+              citation: selected,
+              text: selected.source === 'note' ? snapshot.notes : segment?.text,
+              start_ms: segment?.start_ms ?? null,
+              end_ms: segment?.end_ms ?? null,
+            }),
+          );
+        }
         if (parts[4] === 'cancel') {
           const terminal = ['succeeded', 'failed', 'cancelled'].includes(
             job.state,
@@ -615,6 +768,7 @@ export async function desktopFixture() {
     remove,
     transcript,
     publishCandidate,
+    publishSummary,
     registerRecording(
       document_id: string,
       value: {

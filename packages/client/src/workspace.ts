@@ -24,6 +24,7 @@ import type {
 import { AccountSession, clientConfiguration, OidcClient } from './auth.js';
 import { ApiClient, ClientError, serverUrl } from './http.js';
 import { SyncEngine, workspaceProfile } from './sync.js';
+import { DesktopSummaries, summaryIntentSchema } from './summaries.js';
 
 const workspaceSchema = z.strictObject({
   id: resourceId,
@@ -47,6 +48,7 @@ const finalizationIntentSchema = z.strictObject({
 });
 
 export class WorkspaceController {
+  readonly summaries: DesktopSummaries;
   private account: Account | null;
   private session: AccountSession | null = null;
   private api: ApiClient | null = null;
@@ -95,6 +97,33 @@ export class WorkspaceController {
       if (this.status === 'ready') this.replaceEngine();
     }
     this.local.purgeCredentials(this.session?.profile ?? null);
+    this.summaries = new DesktopSummaries(local, {
+      owner: (scope) => {
+        this.assertScope(scope);
+        const profile = this.profile;
+        return {
+          profile,
+          remote: this.recordingUploadContext(),
+          authorize: () => {
+            this.assertScope(scope);
+            if (this.profile !== profile)
+              throw new ClientError(
+                'workspace_changed',
+                'The summary workspace changed.',
+              );
+          },
+        };
+      },
+      reads: this.transcriptReads,
+      synchronize: () => this.synchronize(),
+      cacheJob: (profile, id, job) => this.cacheJob(profile, id, job),
+      revoked: (error, profile, api) =>
+        this.artifactRevocation(error, profile, api),
+      changed: () => {
+        this.emit('data');
+        this.schedule(1000);
+      },
+    });
   }
   get scope() {
     return this.scopeRevision;
@@ -255,6 +284,14 @@ export class WorkspaceController {
     this.selection.set(profile, selected?.id ?? null);
     const details = selected ? this.local.details(profile, selected.id) : null;
     const account = this.account;
+    const summaryIntent = selected
+      ? this.local.getArtifact(
+          profile,
+          selected.id,
+          'summary-submission',
+          summaryIntentSchema,
+        )
+      : null;
     return {
       version: this.revision,
       scope: this.scopeRevision,
@@ -282,6 +319,14 @@ export class WorkspaceController {
         error: this.error,
       },
       conflict: details?.conflict ?? null,
+      summary_submission: summaryIntent
+        ? {
+            language: summaryIntent.body.language,
+            consent_id: summaryIntent.consent_id,
+            job_id: summaryIntent.job_id,
+            rejected: summaryIntent.rejected,
+          }
+        : null,
       transcript_revision: details?.transcript_revision ?? 0,
       transcript:
         selected && details?.transcript_revision

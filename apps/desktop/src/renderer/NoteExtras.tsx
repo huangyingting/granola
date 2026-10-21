@@ -630,9 +630,6 @@ export function NoteExtras({
                   {job.error && (
                     <p className="account-alert">{job.error.message}</p>
                   )}
-                  {job.result?.kind === 'summary' && (
-                    <p>{job.result.summary.overview.text}</p>
-                  )}
                   {job.kind === 'recording_transcription' && (
                     <RecordingJobActions
                       state={state}

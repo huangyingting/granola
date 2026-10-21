@@ -75,6 +75,10 @@ Real Windows audio behavior still requires the hardware checks below.
 - Azure Speech Fast Transcription and Azure OpenAI structured summaries. Inputs
   freeze their revisions; generated summaries never overwrite notes. Citations
   must resolve to the supplied immutable evidence. Provider errors are explicit.
+- Desktop cited-summary consent, durable lost-reply recovery, structured results
+  and frozen-source inspection. Separately encrypted editable reviews autosave
+  locally; explicit revision-safe append preserves manual notes and native export
+  includes the original source locators.
 - Complete-recording transcription from ready, immutable private audio. Fenced
   per-chunk results survive worker replacement; retries skip completed chunks and
   refuse changed speech configurations. Track/epoch/chunk provenance, measured
@@ -85,16 +89,11 @@ Real Windows audio behavior still requires the hardware checks below.
   replies, cancellation and retries retain uncertain holds instead of assuming zero
   usage. The account screen separates known usage and holds; deployment-only CLI
   changes limits without resetting counters.
-- Internal native live-audio transport groundwork: explicitly activated,
-  request-only 50 ms PCM frames with track/epoch/sample identity, at most five
-  seconds buffered per source, and preview-only failure on overrun. Raw PCM is
-  excluded from normal status/renderer observers. This does **not** enable live
-  desktop Azure recognition; Main orchestration and its consent UI remain open.
-- An internal Azure streaming adapter using the official pinned Speech SDK in
-  isolated workers, with versioned partial/final/discard events and bounded SDK
-  input/replay. Durable owner-fenced source leases and shared quota reservations
-  are integrated with an optional authenticated server WebSocket. A synthetic live
-  Azure probe is available; desktop consent/transport is **not implemented yet**.
+- Optional desktop live captions with separate inline consent, Main-owned private
+  transport, the official isolated Azure Speech SDK and durable source leases.
+  Request-only native PCM and submitted SDK media have a combined five-second
+  bound per source. Captions remain provisional and ephemeral; preview failures
+  do not stop healthy encrypted recording. This is not verified continuous STT.
 - Revision-pinned transcript pages backed by indexed immutable PostgreSQL segments.
   Synchronization atomically caches the first bounded page with the document and
   cursor; the desktop loads additional pages on demand into its encrypted cache.
@@ -277,6 +276,40 @@ real loopback OIDC, consent-gated synchronization, stale-editor recovery,
 revocation-driven UI clearing and the packaged executable. It publishes an **unsigned developer-preview**
 NSIS installer under the workflow artifacts; this is not a signed release or
 evidence of clean-machine install/upgrade/rollback compatibility.
+
+## Desktop cited summaries
+
+**Generate summary** first asks for separate Azure processing consent and English
+or Chinese output. Main synchronizes saved notes, pins their note/transcript
+revisions and encrypts a private request key before submitting. **Recover saved
+summary request** reuses that exact key and input after a lost reply or restart;
+an unresolved receipt cannot be replaced with a fresh billable request. A known
+pre-enqueue input rejection instead permits a newly confirmed request after the
+meeting is corrected. Refresh/cancel controls reconcile durable server jobs;
+closing the app does not stop an accepted job or erase uncertain provider usage.
+
+Results expose overview, topics, decisions, action items and open questions.
+Source buttons retrieve only citations actually present in the completed result,
+from the job's frozen input rather than the currently edited meeting. Inspected
+sources are encrypted with their owning document and can be reopened offline.
+A locator identifies a whole versioned note or an exact versioned transcript
+segment; it does **not** prove that the generated claim is supported.
+
+**Review and edit draft** autosaves a separate encrypted, device-local review.
+Invalid or unsaved review text blocks normal navigation and shutdown instead of
+being discarded. Document deletion or observed revocation still clears its summary
+view, even if invalid review text would block a normal refresh. Appending requires explicit confirmation and matching note/review
+revisions; changed notes require a deliberate baseline update that preserves the
+review text. The append and its applied marker commit atomically, so duplicate
+requests cannot append twice. Existing rich text, title, tags and transcript are
+not replaced. Edited claims still require verification against the original
+source locators. Review Markdown/plain-text export does not require changing the
+notes; its native save dialog and final write recheck authorization and the review
+revision. Exported files are **unencrypted**.
+
+This uses the existing fixed `meeting-summary-v1` template and bounded 48,000-byte
+context. Long-meeting extraction, selectable administrator-owned templates,
+current-meeting chat and token-streamed generation are not implemented yet.
 
 ## Server setup
 
@@ -470,6 +503,7 @@ letters, digits, dots, colons, underscores or hyphens.
 | POST                 | `/v1/documents/{id}/transcription-runs?base_revision=0&locale=en-US` | Raw `audio/wav` body, returns a durable job                                                                                        |
 | POST                 | `/v1/documents/{id}/summary-runs`                                    | `{note_revision,transcript_revision,language:"en"}`; returns a durable job                                                         |
 | GET                  | `/v1/jobs/{id}`                                                      | Status, independent result, failure, and input-staleness flag                                                                      |
+| POST                 | `/v1/jobs/{id}/citation`                                             | `{source,id,revision}`; only a completed summary's cited frozen note/segment, with current access checks                           |
 | POST                 | `/v1/jobs/{id}/cancel`                                               | Explicit cancellation, with terminal-state arbitration                                                                             |
 | POST                 | `/v1/jobs/{id}/retry`                                                | `{confirmed:true}`; resume a failed recording job's unexpired processing, not a new run                                            |
 | GET                  | `/v1/jobs/{id}/events`                                               | SSE; numeric `Last-Event-ID` for replay                                                                                            |
