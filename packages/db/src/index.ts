@@ -8,6 +8,8 @@ import {
   jobEventSchema,
   segmentsSchema,
   createDocumentSchema,
+  resultSchema,
+  type finalizeTranscriptSchema,
   type Job,
   type JobInput,
   type JobResult,
@@ -24,6 +26,7 @@ import {
 import { recordChange, SyncStore } from './sync.js';
 import { RecordingStore } from './recordings.js';
 import { TranscriptStore } from './transcripts.js';
+import { RecordingTranscriptions } from './recording-transcriptions.js';
 export { recordChange } from './sync.js';
 
 const migrationFiles = [
@@ -31,6 +34,7 @@ const migrationFiles = [
   '002_editing_sync.sql',
   '003_recordings.sql',
   '004_transcript_pages.sql',
+  '005_recording_transcription.sql',
 ];
 
 export type Transaction = pg.PoolClient;
@@ -52,7 +56,7 @@ interface JobRow {
   id: string;
   document_id: string;
   owner_id: string;
-  kind: 'summary' | 'transcription';
+  kind: Job['kind'];
   state: Job['state'];
   attempt: number;
   lease_token: number;
@@ -65,6 +69,7 @@ interface JobRow {
   event_seq: number;
   current_note_revision: number;
   current_transcript_revision: number;
+  progress: unknown;
 }
 type JobStatusRow = Pick<
   JobRow,
@@ -79,9 +84,10 @@ type JobStatusRow = Pick<
   | 'created_at'
   | 'current_note_revision'
   | 'current_transcript_revision'
+  | 'progress'
 >;
 const jobStatusQuery = `
- SELECT j.id,j.document_id,j.kind,j.state,j.attempt,j.input,j.result,j.error,j.created_at,
+ SELECT j.id,j.document_id,j.kind,j.state,j.attempt,j.input,j.result,j.error,j.created_at,j.progress,
  d.revision current_note_revision,d.transcript_revision current_transcript_revision FROM jobs j
  JOIN documents d ON d.id=j.document_id
  JOIN memberships m ON m.workspace_id=d.workspace_id AND m.user_id=j.owner_id AND m.active
@@ -128,6 +134,7 @@ export class Database {
   readonly sync: SyncStore;
   readonly recordings: RecordingStore;
   readonly transcripts: TranscriptStore;
+  readonly recordingTranscriptions: RecordingTranscriptions;
   constructor(url: string) {
     this.pool = new pg.Pool({
       connectionString: url,
@@ -138,6 +145,7 @@ export class Database {
     this.sync = new SyncStore(this);
     this.recordings = new RecordingStore(this);
     this.transcripts = new TranscriptStore(this);
+    this.recordingTranscriptions = new RecordingTranscriptions(this);
     this.pool.on('error', () =>
       console.error(
         'database_connection_failed: idle PostgreSQL connection closed.',
@@ -500,11 +508,11 @@ export class Database {
     base: number,
     segments: Segment[],
   ) {
-    await this.transaction(async (tx) => {
+    const version = await this.transaction(async (tx) => {
       const doc = await this.document(userId, id, tx);
       if (doc.transcript_revision !== base)
         throw conflict(doc.transcript_revision);
-      await this.transcripts.write(
+      const version = await this.transcripts.write(
         tx,
         userId,
         id,
@@ -512,8 +520,23 @@ export class Database {
         'manual',
         segmentsSchema.parse(segments),
       );
+      if (base > 0) {
+        await tx.query(
+          `UPDATE transcript_revisions t SET recording_metadata=s.recording_metadata,
+           timeline_count=s.timeline_count,based_on_revision=$2
+           FROM transcript_revisions s WHERE t.document_id=$1 AND t.revision=$3
+             AND s.document_id=$1 AND s.revision=$2`,
+          [id, base, version],
+        );
+        await tx.query(
+          `INSERT INTO transcript_timeline SELECT document_id,$3,position,entry
+           FROM transcript_timeline WHERE document_id=$1 AND revision=$2`,
+          [id, base, version],
+        );
+      }
+      return version;
     });
-    return this.transcript(userId, id, base + 1);
+    return this.transcript(userId, id, version);
   }
   async enqueueSummary(
     userId: string,
@@ -606,6 +629,116 @@ export class Database {
       wav,
     );
   }
+  async enqueueRecordingTranscription(
+    user: string,
+    recording: string,
+    request: z.infer<typeof finalizeTranscriptSchema>,
+    key: string,
+  ) {
+    const source = await this.recordings.get(user, recording);
+    return this.enqueue(
+      user,
+      source.document_id,
+      'recording_transcription',
+      key,
+      digest({ recording: source.id, ...request }),
+      async (doc, tx) => {
+        if (doc.transcript_revision !== request.base_revision)
+          throw conflict(doc.transcript_revision);
+        const frozen = await this.recordings.transcriptionSource(
+          user,
+          recording,
+          request.seal_sha256,
+          tx,
+        );
+        if (frozen.partial && !request.accept_incomplete)
+          throw new ServiceError(
+            'incomplete_consent_required',
+            'Separately accept the incomplete capture before transcribing.',
+            409,
+          );
+        return {
+          kind: 'recording_transcription',
+          recording_id: source.id,
+          seal_sha256: request.seal_sha256,
+          base_transcript_revision: request.base_revision,
+          locale: request.locale,
+          accept_incomplete: request.accept_incomplete,
+          chunk_count: frozen.chunk_count,
+        };
+      },
+    );
+  }
+  async retryRecordingTranscription(user: string, id: string) {
+    const visible = await this.job(user, id);
+    await this.transaction(async (tx) => {
+      await this.document(user, visible.document_id, tx);
+      const row = (
+        await tx.query<{
+          state: Job['state'];
+          input: unknown;
+          progress: unknown;
+        }>('SELECT state,input,progress FROM jobs WHERE id=$1 FOR UPDATE', [id])
+      ).rows[0]!;
+      const selected = jobInputSchema.parse(row.input);
+      if (selected.kind !== 'recording_transcription')
+        throw new ServiceError(
+          'unsupported_retry',
+          'This retry operation is only for saved-recording transcription.',
+          409,
+        );
+      if (['queued', 'running', 'retry_wait'].includes(row.state)) return;
+      if (row.state !== 'failed')
+        throw new ServiceError(
+          'job_not_retryable',
+          'This job is complete or was explicitly cancelled. It cannot be resumed.',
+          409,
+        );
+      await this.recordings.transcriptionSource(
+        user,
+        selected.recording_id,
+        selected.seal_sha256,
+        tx,
+      );
+      const progress = (
+        await tx.query(
+          'SELECT job_id FROM recording_transcription_runs WHERE job_id=$1',
+          [id],
+        )
+      ).rowCount;
+      if (row.progress !== null && !progress)
+        throw new ServiceError(
+          'transcription_progress_expired',
+          'Processing progress expired. Explicitly start a new transcription to send audio again.',
+          410,
+        );
+      await tx.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', [
+        `job-budget:${user}`,
+      ]);
+      const pending = (
+        await tx.query<{ count: number }>(
+          "SELECT count(*)::integer count FROM jobs WHERE owner_id=$1 AND state IN ('queued','running','retry_wait')",
+          [user],
+        )
+      ).rows[0]!.count;
+      if (pending >= 8)
+        throw new ServiceError(
+          'quota_exceeded',
+          'At most eight pending jobs are allowed per user.',
+          429,
+          true,
+        );
+      await tx.query(
+        "UPDATE jobs SET state='queued',attempt=0,error=NULL,lease_token=lease_token+1,lease_until=NULL,available_at=now(),updated_at=now() WHERE id=$1",
+        [id],
+      );
+      await this.event(tx, id, 'job.accepted', {
+        state: 'queued',
+        resumed: true,
+      });
+    });
+    return this.job(user, id);
+  }
   private async enqueue(
     userId: string,
     id: string,
@@ -665,12 +798,7 @@ export class Database {
     });
     return this.job(userId, jobId);
   }
-  private async event(
-    tx: Transaction,
-    id: string,
-    type: string,
-    payload: unknown,
-  ) {
+  async event(tx: Transaction, id: string, type: string, payload: unknown) {
     const result = await tx.query<{ event_seq: number }>(
       'UPDATE jobs SET event_seq=event_seq+1 WHERE id=$1 RETURNING event_seq',
       [id],
@@ -781,6 +909,10 @@ export class Database {
         "UPDATE jobs SET state='cancelled',audio=NULL,lease_token=lease_token+1,lease_until=NULL,updated_at=now() WHERE id=$1",
         [id],
       );
+      await tx.query(
+        'DELETE FROM recording_transcription_runs WHERE job_id=$1',
+        [id],
+      );
       await this.event(tx, id, 'job.cancelled', { state: 'cancelled' });
       return false;
     });
@@ -793,6 +925,10 @@ export class Database {
     await this.transaction(async (tx) => {
       await this.document(userId, id, tx);
       await this.recordings.removeDocument(tx, id);
+      await tx.query(
+        'DELETE FROM recording_transcription_runs WHERE job_id IN (SELECT id FROM jobs WHERE document_id=$1)',
+        [id],
+      );
       await tx.query(
         "UPDATE documents SET deleted_at=now(),title='[deleted]',updated_at=now() WHERE id=$1",
         [id],
@@ -869,18 +1005,38 @@ export class Database {
           `UPDATE jobs j SET lease_until=now()+interval '120 seconds' FROM documents d,memberships m,users u
       WHERE j.id=$1 AND j.lease_token=$2 AND j.state='running' AND j.lease_until>now()
       AND d.id=j.document_id AND d.deleted_at IS NULL AND m.workspace_id=d.workspace_id AND m.user_id=j.owner_id AND m.active
-      AND u.id=j.owner_id AND u.active`,
+      AND u.id=j.owner_id AND u.active
+      AND (j.kind<>'recording_transcription' OR EXISTS
+        (SELECT 1 FROM recordings r WHERE r.id::text=j.input->>'recording_id' AND r.document_id=j.document_id
+         AND r.deleted_at IS NULL AND r.seal_hash=j.input->>'seal_sha256'))`,
           [job.id, job.leaseToken],
         )
       ).rowCount === 1
     );
+  }
+  async finishRecording(job: ClaimedJob) {
+    if (job.input.kind !== 'recording_transcription')
+      throw new Error('Expected a recording transcription job.');
+    return this.finish(job, null, null, undefined, true);
   }
   async finish(
     job: ClaimedJob,
     result: JobResult | null,
     failure: Failure | null,
     transcript?: Segment[],
+    recordingComplete = false,
   ): Promise<boolean> {
+    if (job.input.kind === 'recording_transcription' && (result || transcript))
+      throw new Error(
+        'Complete recording jobs through their durable source coordinator.',
+      );
+    if (
+      recordingComplete &&
+      (job.input.kind !== 'recording_transcription' || failure)
+    )
+      throw new Error(
+        'Durable recording completion cannot publish a failure or another job kind.',
+      );
     return this.transaction(async (tx) => {
       await tx.query('SELECT id FROM documents WHERE id=$1 FOR UPDATE', [
         job.documentId,
@@ -903,6 +1059,10 @@ export class Database {
       if (!row?.valid) return false;
       if (!doc?.allowed) {
         await tx.query(
+          'DELETE FROM recording_transcription_runs WHERE job_id=$1',
+          [job.id],
+        );
+        await tx.query(
           "UPDATE jobs SET state='cancelled',audio=NULL,result=NULL,error=NULL,lease_token=lease_token+1,lease_until=NULL WHERE id=$1",
           [job.id],
         );
@@ -922,7 +1082,9 @@ export class Database {
         } else {
           if (!transcript)
             throw new Error('Transcription completion requires segments.');
-          await this.transcripts.write(
+          if (result.kind !== 'transcription')
+            throw new Error('Expected a clip transcription result.');
+          const version = await this.transcripts.write(
             tx,
             job.ownerId,
             job.documentId,
@@ -930,7 +1092,44 @@ export class Database {
             'azure_speech_fast',
             segmentsSchema.parse(transcript),
           );
+          result = { ...result, transcript_revision: version };
         }
+      }
+      if (recordingComplete && job.input.kind === 'recording_transcription') {
+        const generated = await this.recordingTranscriptions.output(tx, job);
+        const applied =
+          doc.transcript_revision === job.input.base_transcript_revision;
+        const version = await this.transcripts.write(
+          tx,
+          job.ownerId,
+          job.documentId,
+          doc.transcript_revision,
+          'azure_speech_fast',
+          generated.segments,
+          {
+            candidate: !applied,
+            basedOn: job.input.base_transcript_revision,
+            recording: generated.recording,
+            timeline: generated.timeline,
+          },
+        );
+        result = resultSchema.parse({
+          kind: 'recording_transcription',
+          recording_id: job.input.recording_id,
+          transcript_revision: version,
+          segment_count: generated.segments.length,
+          processed_chunks: generated.run.completed_chunks,
+          uncertain_requests: generated.run.uncertain_requests,
+          applied,
+          partial: generated.recording.partial,
+          provider: generated.run.provider,
+          configuration_version: generated.run.configuration_version,
+          usage: generated.run.usage,
+        });
+        await tx.query(
+          'DELETE FROM recording_transcription_runs WHERE job_id=$1',
+          [job.id],
+        );
       }
       if (result) {
         await tx.query(
@@ -988,6 +1187,13 @@ export class Database {
       await tx.query(
         "DELETE FROM job_events WHERE created_at<now()-interval '7 days'",
       );
+      await tx.query(
+        `DELETE FROM recording_transcription_runs p USING jobs j,documents d,memberships m,users u
+         WHERE p.job_id=j.id AND d.id=j.document_id AND m.workspace_id=d.workspace_id
+         AND m.user_id=j.owner_id AND u.id=j.owner_id
+         AND (d.deleted_at IS NOT NULL OR NOT m.active OR NOT u.active OR j.state IN ('cancelled','succeeded')
+           OR (j.state='failed' AND j.updated_at<now()-interval '24 hours'))`,
+      );
       await this.sync.prune(tx);
     });
   }
@@ -995,12 +1201,21 @@ export class Database {
 
 function jobView(row: JobStatusRow): Job {
   const input = jobInputSchema.parse(row.input);
+  const result = row.result === null ? null : resultSchema.parse(row.result);
+  const outputRevision =
+    result?.kind === 'transcription' ||
+    result?.kind === 'recording_transcription'
+      ? result.transcript_revision
+      : input.kind === 'summary'
+        ? 0
+        : input.base_transcript_revision;
   const stale =
     input.kind === 'summary'
       ? input.snapshot.note_revision !== row.current_note_revision ||
         input.snapshot.transcript_revision !== row.current_transcript_revision
-      : (row.state === 'succeeded'
-          ? input.base_transcript_revision + 1
+      : (result?.kind === 'recording_transcription' && !result.applied) ||
+        (row.state === 'succeeded'
+          ? outputRevision
           : input.base_transcript_revision) !== row.current_transcript_revision;
   return jobSchema.parse({
     id: row.id,
@@ -1012,6 +1227,9 @@ function jobView(row: JobStatusRow): Job {
     result: row.result,
     error: row.error,
     created_at: row.created_at.toISOString(),
+    recording_id:
+      input.kind === 'recording_transcription' ? input.recording_id : null,
+    progress: row.progress,
   });
 }
 function conflict(current: number): ServiceError {

@@ -56,6 +56,147 @@ async function synchronize(application: ElectronApplication) {
     });
   });
 }
+async function savedRecording(
+  application: ElectronApplication,
+  directory: string,
+  id: string,
+  uploaded = false,
+) {
+  return application.evaluate(
+    ({ safeStorage }, { directory, id, uploaded }) => {
+      const { readFileSync } = process.getBuiltinModule('node:fs');
+      const { join } = process.getBuiltinModule('node:path');
+      const { DatabaseSync } = process.getBuiltinModule('node:sqlite');
+      const { createHash } = process.getBuiltinModule('node:crypto');
+      const require = process
+        .getBuiltinModule('node:module')
+        .createRequire(join(process.cwd(), 'synthetic-upload-fixture.cjs'));
+      const {
+        LocalStore,
+      }: typeof import('@windows-ai-notes/local') = require('@windows-ai-notes/local');
+      const {
+        canonicalJson,
+      }: typeof import('@windows-ai-notes/contracts/content') = require('@windows-ai-notes/contracts/content');
+      const path = join(directory, 'notes.sqlite');
+      const inspect = new DatabaseSync(path, { readOnly: true });
+      let profile: unknown;
+      try {
+        profile = inspect
+          .prepare('SELECT profile FROM drafts WHERE id=?')
+          .get(id)?.profile;
+      } finally {
+        inspect.close();
+      }
+      if (typeof profile !== 'string')
+        throw new Error('The synthetic cloud meeting has no cached profile.');
+      const key = Buffer.from(
+        safeStorage.decryptString(
+          readFileSync(join(directory, 'content-key.protected')),
+        ),
+        'base64',
+      );
+      try {
+        const local = new LocalStore(path, key);
+        try {
+          const spec = {
+            track_id: crypto.randomUUID(),
+            kind: 'microphone' as const,
+            capture_scope: 'endpoint' as const,
+            device_selection_policy: 'explicit' as const,
+            device_id: 'synthetic-unavailable-source',
+          };
+          const value = local.beginRecording(profile, id, [spec]);
+          local.updateRecording(profile, id, value.id, {
+            state: uploaded ? 'failed' : 'interrupted',
+          });
+          const chunk = {
+            chunk: {
+              format_version: 1 as const,
+              recording_id: value.id,
+              track_id: spec.track_id,
+              chunk_id: crypto.randomUUID(),
+              capture_epoch: crypto.randomUUID(),
+              sequence: 0,
+              sample_start: 0,
+              sample_count: 16000,
+              sample_rate: 16000 as const,
+              channels: 1 as const,
+              bits_per_sample: 16 as const,
+              clock_start_ms: 0,
+              clock_end_ms: 1000,
+              pcm_sha256: 'a'.repeat(64),
+            },
+            size_bytes: 32044,
+            sha256: 'b'.repeat(64),
+          };
+          const seal = {
+            native_state: 'failed' as const,
+            accept_incomplete: true,
+            tracks: [
+              {
+                track_id: spec.track_id,
+                end_sample: 16000,
+                chunk_ids: [chunk.chunk.chunk_id],
+              },
+            ],
+            events: [
+              {
+                event_type: 'capture.started' as const,
+                clock_ms: 0,
+                capture_epoch: chunk.chunk.capture_epoch,
+                code: null,
+              },
+            ],
+            gaps: [
+              {
+                track_id: spec.track_id,
+                start_ms: 500,
+                end_ms: 900,
+                reason: 'paused' as const,
+              },
+            ],
+          };
+          if (uploaded)
+            local.saveRecordingUpload(profile, {
+              recording_id: value.id,
+              document_id: id,
+              state: 'complete',
+              verified_chunks: 1,
+              total_chunks: 1,
+              verified_bytes: 32044,
+              partial: true,
+              attempts: 1,
+              retry_at: 0,
+              error: null,
+              accept_incomplete: true,
+              plan: {
+                create: {
+                  id: value.id,
+                  created_at: value.created_at,
+                  tracks: [{ spec, actual_device_id: spec.device_id }],
+                },
+                chunks: [chunk],
+                seal,
+              },
+            });
+          return {
+            id: value.id,
+            track_id: spec.track_id,
+            seal_sha256: createHash('sha256')
+              .update(canonicalJson(seal))
+              .digest('hex'),
+            partial: true,
+          };
+        } finally {
+          local.close();
+        }
+      } finally {
+        key.fill(0);
+      }
+    },
+    { directory, id, uploaded },
+  );
+}
 
 test('requires inline upload consent and preserves the encrypted journal after native preflight fails and the app restarts', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'windows-notes-upload-ui-'));
@@ -78,59 +219,10 @@ test('requires inline upload consent and preserves the encrypted journal after n
     await expect(
       page.getByRole('textbox', { name: 'Meeting notes', exact: true }),
     ).toHaveText(remote.notes);
-    const recording = await application.evaluate(
-      async ({ safeStorage }, { directory, id }) => {
-        const { readFileSync } = process.getBuiltinModule('node:fs');
-        const { join } = process.getBuiltinModule('node:path');
-        const { DatabaseSync } = process.getBuiltinModule('node:sqlite');
-        const require = process
-          .getBuiltinModule('node:module')
-          .createRequire(join(process.cwd(), 'synthetic-upload-fixture.cjs'));
-        const {
-          LocalStore,
-        }: typeof import('@windows-ai-notes/local') = require('@windows-ai-notes/local');
-        const path = join(directory, 'notes.sqlite');
-        const inspect = new DatabaseSync(path, { readOnly: true });
-        let profile: unknown;
-        try {
-          profile = inspect
-            .prepare('SELECT profile FROM drafts WHERE id=?')
-            .get(id)?.profile;
-        } finally {
-          inspect.close();
-        }
-        if (typeof profile !== 'string')
-          throw new Error('The synthetic cloud meeting has no cached profile.');
-        const key = Buffer.from(
-          safeStorage.decryptString(
-            readFileSync(join(directory, 'content-key.protected')),
-          ),
-          'base64',
-        );
-        try {
-          const local = new LocalStore(path, key);
-          try {
-            const value = local.beginRecording(profile, id, [
-              {
-                track_id: crypto.randomUUID(),
-                kind: 'microphone',
-                capture_scope: 'endpoint',
-                device_selection_policy: 'explicit',
-                device_id: 'synthetic-unavailable-source',
-              },
-            ]);
-            local.updateRecording(profile, id, value.id, {
-              state: 'interrupted',
-            });
-            return value.id;
-          } finally {
-            local.close();
-          }
-        } finally {
-          key.fill(0);
-        }
-      },
-      { directory, id: remote.id },
+    const { id: recording } = await savedRecording(
+      application,
+      directory,
+      remote.id,
     );
     await page.reload();
     await page.getByText(/^Saved audio \(/).click();
@@ -211,6 +303,218 @@ test('requires inline upload consent and preserves the encrypted journal after n
   }
 });
 
+test('separately confirms Azure processing, reconciles a lost reply after restart, reviews candidates and reads capture evidence offline', async () => {
+  test.setTimeout(60_000);
+  const directory = await mkdtemp(
+    join(tmpdir(), 'windows-notes-recording-asr-'),
+  );
+  const fixture = await desktopFixture();
+  const remote = fixture.seed(
+    'Synthetic notes remain editable during recognition.',
+    'Original manual transcript.',
+  );
+  let application: ElectronApplication | null = null;
+  try {
+    application = await launch(directory);
+    let page = await application.firstWindow();
+    await page.getByRole('button', { name: /Account & sync/ }).click();
+    await page.getByRole('textbox', { name: 'Service URL' }).fill(fixture.url);
+    await page
+      .getByRole('button', { name: 'Sign in with browser', exact: true })
+      .click();
+    await page
+      .getByRole('button', {
+        name: /^Synthetic cloud workspace (Open workspace|Current workspace)$/,
+      })
+      .click();
+    await expect(
+      page.getByRole('textbox', { name: 'Meeting notes', exact: true }),
+    ).toHaveText(remote.notes);
+    fixture.registerRecording(
+      remote.id,
+      await savedRecording(application, directory, remote.id, true),
+    );
+    await page.reload();
+    await page.getByText(/^Saved audio \(/).click();
+    expect(fixture.state.jobs.size).toBe(0);
+    await page
+      .getByRole('button', { name: 'Transcribe saved audio', exact: true })
+      .click();
+    await expect(
+      page.getByRole('button', {
+        name: 'Confirm Azure transcription',
+        exact: true,
+      }),
+    ).toBeDisabled();
+    await page.getByRole('button', { name: 'Not now', exact: true }).click();
+    expect(fixture.state.jobs.size).toBe(0);
+    await page
+      .getByRole('button', { name: 'Transcribe saved audio', exact: true })
+      .click();
+    await page
+      .getByRole('combobox', { name: 'Transcription language', exact: true })
+      .selectOption('zh-CN');
+    await page
+      .getByRole('checkbox', {
+        name: /I accept transcription of an incomplete recording/,
+      })
+      .check();
+    fixture.state.lose_finalization_response = true;
+    await page
+      .getByRole('button', { name: 'Confirm Azure transcription', exact: true })
+      .click();
+    await expect.poll(() => fixture.state.jobs.size).toBe(1);
+    await expect(
+      page.locator('.meeting-audio [role="alert"]').first(),
+    ).toBeVisible();
+    await close(application);
+    application = null;
+    application = await launch(directory);
+    page = await application.firstWindow();
+    await page.getByText(/^Saved audio \(/).click();
+    await page
+      .getByRole('button', {
+        name: 'Reconcile transcription request',
+        exact: true,
+      })
+      .click();
+    await page
+      .getByRole('button', {
+        name: 'Confirm request reconciliation',
+        exact: true,
+      })
+      .click();
+    await expect(
+      page.getByRole('button', {
+        name: 'Confirm request reconciliation',
+        exact: true,
+      }),
+    ).toHaveCount(0);
+    expect(fixture.state.jobs.size).toBe(1);
+    const job = [...fixture.state.jobs.values()][0]!;
+    fixture.transcript(
+      remote.id,
+      'Newer manual evidence must not be overwritten.',
+    );
+    fixture.publishCandidate(job.id);
+    await synchronize(application);
+    await page.locator('summary').filter({ hasText: 'AI activity' }).click();
+    await page
+      .locator('summary')
+      .filter({ hasText: 'Generated transcript' })
+      .click();
+    await expect(
+      page
+        .locator('.job-card .transcript-segment')
+        .filter({ hasText: 'Synthetic generated recording evidence.' }),
+    ).toBeVisible();
+    await expect(
+      page
+        .locator('.job-card')
+        .getByText(
+          /Incomplete recording: missing audio was explicitly accepted/,
+        ),
+    ).toBeVisible();
+    await page
+      .locator('.job-card summary')
+      .filter({ hasText: 'Capture evidence' })
+      .click();
+    await expect(
+      page.getByText('0:00-0:00: paused', { exact: true }),
+    ).toBeVisible();
+    const editor = page.getByRole('textbox', {
+      name: 'Meeting notes',
+      exact: true,
+    });
+    const text =
+      'Synthetic edited notes survive transcript review and application.';
+    await editor.fill(text);
+    await page
+      .getByRole('button', { name: 'Apply generated transcript', exact: true })
+      .click();
+    await page
+      .getByRole('button', {
+        name: 'Confirm transcript replacement',
+        exact: true,
+      })
+      .click();
+    await expect
+      .poll(() => fixture.state.documents.get(remote.id)?.transcript_revision)
+      .toBe(4);
+    await expect(editor).toHaveText(text);
+    await expect(
+      page.getByText('This generated version is already applied.', {
+        exact: true,
+      }),
+    ).toBeVisible();
+    await close(application);
+    application = null;
+    fixture.state.transcript_online = false;
+    application = await launch(directory);
+    page = await application.firstWindow();
+    await page.locator('summary').filter({ hasText: 'AI activity' }).click();
+    await page
+      .locator('summary')
+      .filter({ hasText: 'Generated transcript' })
+      .click();
+    await expect(
+      page
+        .locator('.job-card .transcript-segment')
+        .filter({ hasText: 'Synthetic generated recording evidence.' }),
+    ).toBeVisible();
+    await page
+      .locator('.job-card summary')
+      .filter({ hasText: 'Capture evidence' })
+      .click();
+    await expect(
+      page.getByText('0:00-0:00: paused', { exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole('textbox', { name: 'Meeting notes', exact: true }),
+    ).toHaveText(text);
+    fixture.state.transcript_online = true;
+    await synchronize(application);
+    await page.getByText(/^Saved audio \(/).click();
+    await page
+      .getByRole('button', { name: 'Transcribe again', exact: true })
+      .click();
+    await page
+      .getByRole('checkbox', {
+        name: /I accept transcription of an incomplete recording/,
+      })
+      .check();
+    await page
+      .getByRole('button', { name: 'Confirm Azure transcription', exact: true })
+      .click();
+    await expect.poll(() => fixture.state.jobs.size).toBe(2);
+    await page
+      .getByRole('button', { name: 'Cancel transcription', exact: true })
+      .click();
+    await page
+      .getByRole('button', {
+        name: 'Confirm transcription cancellation',
+        exact: true,
+      })
+      .click();
+    await expect
+      .poll(
+        () =>
+          [...fixture.state.jobs.values()].filter(
+            (value) => value.state === 'cancelled',
+          ).length,
+      )
+      .toBe(1);
+    expect(fixture.state.documents.get(remote.id)?.transcript_revision).toBe(4);
+    await close(application);
+    application = null;
+  } finally {
+    if (application) await application.close();
+    await fixture.close();
+    expect(fixture.state.failures).toEqual([]);
+    expect(fixture.issuer.state.failures).toEqual([]);
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 test('pages long transcripts without losing editor text and reads opened pages offline after restart', async () => {
   const directory = await mkdtemp(
     join(tmpdir(), 'windows-notes-transcript-pages-'),

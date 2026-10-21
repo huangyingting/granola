@@ -353,14 +353,14 @@ describe('encrypted local drafts and durable outbox', () => {
             .get(`recording:${recording.id}`)?.payload,
         ).toEqual(bytes);
         expect(after.prepare('PRAGMA user_version').get()?.user_version).toBe(
-          5,
+          6,
         );
       } finally {
         after.close();
       }
     },
   );
-  it('does not recreate an unexpectedly missing v5 upload journal or reset existing notes', () => {
+  it('does not recreate an unexpectedly missing current upload journal or reset existing notes', () => {
     const store = open();
     savedUpload(store);
     close(store);
@@ -369,53 +369,56 @@ describe('encrypted local drafts and durable outbox', () => {
     inspect.close();
     expect(() => open()).toThrow('structure is incomplete');
   });
-  it('upgrades v4 semantics without rewriting encrypted legacy transcript or upload evidence', () => {
-    const store = open();
-    const { recording, draft, intent } = savedUpload(store);
-    store.saveRecordingUpload(profile, frozen(recording, intent));
-    store.applyRemote(profile, remote(draft));
-    const transcript = {
-      document_id: draft.id,
-      revision: 1,
-      source: 'manual',
-      segments: [
-        {
-          id: randomUUID(),
-          start_ms: 0,
-          end_ms: 1,
-          text: 'Private cached v4 transcript.',
-        },
-      ],
-    };
-    store.putArtifact(profile, draft.id, 'transcript:1', transcript);
-    close(store);
-    const old = new DatabaseSync(path);
-    old.exec('PRAGMA user_version=4');
-    const payloads = old
-      .prepare('SELECT profile,id,payload FROM vault ORDER BY profile,id')
-      .all();
-    old.close();
-    const upgraded = open();
-    expect(
-      upgraded.getArtifact(profile, draft.id, 'transcript:1', z.unknown()),
-    ).toEqual(transcript);
-    expect(
-      upgraded.recordingUpload(profile, draft.id, recording.id)?.plan,
-    ).not.toBeNull();
-    const inspect = new DatabaseSync(path, { readOnly: true });
-    try {
-      expect(inspect.prepare('PRAGMA user_version').get()?.user_version).toBe(
-        5,
-      );
+  it.each([4, 5])(
+    'upgrades v%s semantics without rewriting encrypted legacy transcript or upload evidence',
+    (version) => {
+      const store = open();
+      const { recording, draft, intent } = savedUpload(store);
+      store.saveRecordingUpload(profile, frozen(recording, intent));
+      store.applyRemote(profile, remote(draft));
+      const transcript = {
+        document_id: draft.id,
+        revision: 1,
+        source: 'manual',
+        segments: [
+          {
+            id: randomUUID(),
+            start_ms: 0,
+            end_ms: 1,
+            text: 'Private cached v4 transcript.',
+          },
+        ],
+      };
+      store.putArtifact(profile, draft.id, 'transcript:1', transcript);
+      close(store);
+      const old = new DatabaseSync(path);
+      old.exec(`PRAGMA user_version=${version}`);
+      const payloads = old
+        .prepare('SELECT profile,id,payload FROM vault ORDER BY profile,id')
+        .all();
+      old.close();
+      const upgraded = open();
       expect(
-        inspect
-          .prepare('SELECT profile,id,payload FROM vault ORDER BY profile,id')
-          .all(),
-      ).toEqual(payloads);
-    } finally {
-      inspect.close();
-    }
-  });
+        upgraded.getArtifact(profile, draft.id, 'transcript:1', z.unknown()),
+      ).toEqual(transcript);
+      expect(
+        upgraded.recordingUpload(profile, draft.id, recording.id)?.plan,
+      ).not.toBeNull();
+      const inspect = new DatabaseSync(path, { readOnly: true });
+      try {
+        expect(inspect.prepare('PRAGMA user_version').get()?.user_version).toBe(
+          6,
+        );
+        expect(
+          inspect
+            .prepare('SELECT profile,id,payload FROM vault ORDER BY profile,id')
+            .all(),
+        ).toEqual(payloads);
+      } finally {
+        inspect.close();
+      }
+    },
+  );
   it('durably binds encrypted recording metadata to exactly one document and profile before capture', () => {
     const store = open();
     const draft = store.create('offline', fields('Private offline recording.'));
@@ -487,7 +490,7 @@ describe('encrypted local drafts and durable outbox', () => {
     const inspect = new DatabaseSync(path, { readOnly: true });
     try {
       expect(inspect.prepare('PRAGMA user_version').get()?.user_version).toBe(
-        5,
+        6,
       );
     } finally {
       inspect.close();

@@ -138,6 +138,20 @@ export const uploadChunkSchema = z
     'The upload checksum and size describe canonical WAV bytes, not local ciphertext.',
   );
 export type UploadChunk = z.infer<typeof uploadChunkSchema>;
+export const captureTimelineEventSchema = z.strictObject({
+  event_type: z.string().min(1).max(80),
+  clock_ms: z.number().finite().min(0).max(14_400_000),
+  capture_epoch: z.uuidv4().nullable(),
+  code: z.string().max(80).nullable(),
+});
+export const captureGapSchema = z
+  .strictObject({
+    track_id: z.uuidv4(),
+    start_ms: z.number().finite().min(0).max(14_400_000),
+    end_ms: z.number().finite().min(0).max(14_400_000),
+    reason: z.enum(['paused', 'device_lost', 'interrupted', 'unknown']),
+  })
+  .refine((gap) => gap.end_ms >= gap.start_ms);
 
 export const recoverySchema = z
   .object({

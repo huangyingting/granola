@@ -324,6 +324,33 @@ async function start() {
             transcript_page: { scope: command.scope, page },
           });
         }
+        if (command.operation === 'getTranscriptTimeline') {
+          const page = await workspace().transcriptTimeline(
+            command.scope,
+            command.id,
+            command.revision,
+            command.offset,
+          );
+          return desktopResponseSchema.parse({
+            ok: true,
+            transcript_timeline: { scope: command.scope, page },
+          });
+        }
+        if (command.operation === 'finalizeRecordingTranscript')
+          return desktopResponseSchema.parse({
+            ok: true,
+            state: await workspace().finalizeRecording(command),
+          });
+        if (command.operation === 'controlTranscriptionJob')
+          return desktopResponseSchema.parse({
+            ok: true,
+            state: await workspace().controlTranscription(command),
+          });
+        if (command.operation === 'applyTranscript')
+          return desktopResponseSchema.parse({
+            ok: true,
+            state: await workspace().applyTranscript(command),
+          });
         if (command.operation === 'listAudioDevices') {
           const active = workspace();
           active.assertScope(command.scope);

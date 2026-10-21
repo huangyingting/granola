@@ -5,6 +5,8 @@ import {
   segmentsSchema,
   storedSegmentsSchema,
   transcriptPageSchema,
+  segmentSchema,
+  transcriptTimelinePageSchema,
   TRANSCRIPT_PAGE_TEXT_BYTES,
 } from './server.js';
 
@@ -80,5 +82,60 @@ describe('bounded immutable transcript pages', () => {
         Array.from({ length: 801 }, () => segment('x'.repeat(10_000))),
       ).success,
     ).toBe(false);
+  });
+  it('bounds recording provenance and capture evidence without inventing a speaker label', () => {
+    const origin = {
+      recording_id: randomUUID(),
+      track_id: randomUUID(),
+      kind: 'loopback' as const,
+      capture_epoch: randomUUID(),
+      chunk_id: randomUUID(),
+      start_offset_ms: 0,
+      end_offset_ms: 1000,
+      time_basis: 'chunk_clock_linear' as const,
+    };
+    expect(segmentSchema.parse({ ...segment(), origin }).origin).toEqual(
+      origin,
+    );
+    for (const change of [
+      { kind: 'speaker' },
+      { end_offset_ms: 30_001 },
+      { start_offset_ms: 2000 },
+      { speaker: 'Someone' },
+    ])
+      expect(
+        segmentSchema.safeParse({
+          ...segment(),
+          origin: { ...origin, ...change },
+        }).success,
+      ).toBe(false);
+    const page = {
+      document_id: randomUUID(),
+      revision: 1,
+      offset: 0,
+      total: 1,
+      has_more: false,
+      entries: [
+        {
+          kind: 'gap',
+          value: {
+            track_id: origin.track_id,
+            start_ms: 100,
+            end_ms: 200,
+            reason: 'paused',
+          },
+        },
+      ],
+    };
+    expect(transcriptTimelinePageSchema.parse(page)).toEqual(page);
+    for (const change of [
+      { total: 2 },
+      { offset: 2 },
+      { has_more: true },
+      { entries: [] },
+    ])
+      expect(
+        transcriptTimelinePageSchema.safeParse({ ...page, ...change }).success,
+      ).toBe(false);
   });
 });

@@ -279,10 +279,26 @@ export interface MeetingExport {
   notes: string;
   content?: RichTextDocument | null;
   tags: string[];
-  segments?: { start_ms: number; text: string }[];
+  recording?:
+    | {
+        partial: boolean;
+        tracks: { kind: 'microphone' | 'loopback' }[];
+      }
+    | undefined;
+  segments?: {
+    start_ms: number;
+    text: string;
+    origin?:
+      | {
+          kind: 'microphone' | 'loopback';
+          time_basis: 'chunk_clock_linear' | 'unmapped_clock';
+        }
+      | undefined;
+  }[];
 }
+type ExportSegment = NonNullable<MeetingExport['segments']>[number];
 function exportSegment(
-  segment: { start_ms: number; text: string },
+  segment: ExportSegment,
   format: 'markdown' | 'text',
   timestamps: boolean,
 ) {
@@ -294,11 +310,22 @@ function exportSegment(
     .padStart(2, '0')}:${(seconds % 60).toString().padStart(2, '0')}`;
   const text =
     format === 'markdown' ? escapeMarkdown(segment.text) : segment.text;
-  return `${timestamps ? `[${clock}] ` : ''}${text}`;
+  const source = segment.origin
+    ? `[${segment.origin.kind === 'microphone' ? 'Microphone' : 'System audio'}${segment.origin.time_basis === 'unmapped_clock' ? '; unmapped capture clock' : ''}] `
+    : '';
+  return `${timestamps ? `[${clock}] ` : ''}${source}${text}`;
+}
+function transcriptHeading(
+  format: 'markdown' | 'text',
+  recording: MeetingExport['recording'],
+) {
+  const heading = format === 'markdown' ? '## Transcript' : 'Transcript';
+  if (!recording) return heading;
+  return `${heading}\n\nSources: ${recording.tracks.map((track) => (track.kind === 'microphone' ? 'Microphone' : 'System audio')).join(' + ')}. Capture sources are not speaker identities.${recording.partial ? '\n\nIncomplete recording: known gaps or missing audio were explicitly accepted.' : ''}`;
 }
 export async function* exportMeetingStream(
   meeting: Omit<MeetingExport, 'segments'>,
-  segments: AsyncIterable<{ start_ms: number; text: string }>,
+  segments: AsyncIterable<ExportSegment>,
   format: 'markdown' | 'text',
   timestamps = true,
 ): AsyncGenerator<string> {
@@ -307,10 +334,15 @@ export async function* exportMeetingStream(
   for await (const segment of segments) {
     yield pending;
     yield first
-      ? `\n\n${format === 'markdown' ? '## Transcript' : 'Transcript'}\n\n`
+      ? `\n\n${transcriptHeading(format, meeting.recording)}\n\n`
       : '\n\n';
     first = false;
     pending = exportSegment(segment, format, timestamps);
+  }
+  if (first && meeting.recording) {
+    yield pending;
+    yield `\n\n${transcriptHeading(format, meeting.recording)}\n\n`;
+    pending = 'No speech segments were recognized.';
   }
   yield pending.trimEnd() + '\n';
 }
@@ -342,12 +374,14 @@ export function exportMeeting(
   timestamps = true,
 ): string {
   const sections = [exportNotes(meeting, format)];
-  if (meeting.segments?.length) {
+  if (meeting.segments?.length || meeting.recording) {
     sections.push(
-      format === 'markdown' ? '## Transcript' : 'Transcript',
-      meeting.segments
-        .map((segment) => exportSegment(segment, format, timestamps))
-        .join('\n\n'),
+      transcriptHeading(format, meeting.recording),
+      meeting.segments?.length
+        ? meeting.segments
+            .map((segment) => exportSegment(segment, format, timestamps))
+            .join('\n\n')
+        : 'No speech segments were recognized.',
     );
   }
   return sections.join('\n\n').trimEnd() + '\n';

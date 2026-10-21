@@ -2,6 +2,15 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import {
+  S3Client,
+  CreateBucketCommand,
+  ListObjectsV2Command,
+  DeleteObjectCommand,
+  DeleteBucketCommand,
+} from '@aws-sdk/client-s3';
+import { z } from 'zod';
 import {
   afterAll,
   afterEach,
@@ -29,6 +38,10 @@ import { workspaceProfile } from './sync.js';
 import { oidcFixture } from './oidc.fixture.js';
 import { ApiClient } from './http.js';
 import { transcriptPageSchema } from '@windows-ai-notes/contracts/server';
+import { RecordingBlobs } from '@windows-ai-notes/storage';
+import { AudioHostClient } from './audio.js';
+import { RecordingController } from './recording.js';
+import { runOnce } from '@windows-ai-notes/worker';
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 describe.skipIf(!databaseUrl)(
@@ -215,6 +228,299 @@ describe.skipIf(!databaseUrl)(
       expect(accountSession().summary().status).toBe('active');
       expect(issuer.state.tokenCalls).toBe(1);
     });
+    it.skipIf(!process.env.TEST_S3_ENDPOINT)(
+      'durably reconciles lost transcription replies across restart, reviews candidates and fences late scope responses through real OIDC and private storage',
+      async () => {
+        const config = {
+          endpoint: process.env.TEST_S3_ENDPOINT!,
+          region: 'us-east-1',
+          bucket: `notes-transcription-client-${randomUUID()}`,
+          encryption: 'none' as const,
+          credentials: {
+            accessKeyId: 'storage-test-only',
+            secretAccessKey: 'storage-test-only-secret',
+          },
+        };
+        const s3 = new S3Client({ ...config, forcePathStyle: true });
+        const nativeClients = new Set<AudioHostClient>();
+        let recorder: RecordingController | undefined;
+        let release: (() => void) | undefined;
+        let pending: Promise<unknown> | undefined;
+        await s3.send(new CreateBucketCommand({ Bucket: config.bucket }));
+        try {
+          await app.close();
+          const blobs = new RecordingBlobs(config);
+          app = await createServer(
+            db,
+            {
+              mode: 'oidc',
+              host: '127.0.0.1',
+              issuer: issuer.configuration.issuer,
+              audience: issuer.configuration.audience,
+              jwksUrl: `${issuer.state.issuer}keys`,
+              requiredScope: 'notes.access',
+              desktop: issuer.configuration,
+            },
+            blobs,
+          );
+          base = await app.listen({ host: '127.0.0.1', port: 0 });
+          const remote = await seed(
+            'Notes stay independent of generated transcripts.',
+          );
+          await connect();
+          await activate();
+          await controller.synchronize();
+          const profile = controller.profile;
+          const spec = {
+            track_id: randomUUID(),
+            kind: 'microphone' as const,
+            capture_scope: 'endpoint' as const,
+            device_selection_policy: 'explicit' as const,
+            device_id: 'synthetic',
+          };
+          const recording = local.beginRecording(profile, remote.id, [spec]);
+          local.updateRecording(profile, remote.id, recording.id, {
+            state: 'sealed',
+          });
+          const chunk = randomUUID();
+          recorder = new RecordingController(
+            local,
+            () => {
+              const client = new AudioHostClient(
+                process.execPath,
+                [
+                  fileURLToPath(
+                    new URL('../fixtures/audio-host.mjs', import.meta.url),
+                  ),
+                  'archive',
+                  JSON.stringify(spec),
+                  recording.id,
+                  spec.track_id,
+                  chunk,
+                ],
+                () => {},
+              );
+              nativeClients.add(client);
+              return client;
+            },
+            () => {},
+            async () => {},
+          );
+          recorder.resumeUploads(controller.recordingUploadContext());
+          recorder.requestUpload(profile, remote.id, recording.id, false);
+          await vi.waitFor(() =>
+            expect(
+              local.recordingUploadStatus(profile, remote.id, recording.id)
+                ?.state,
+            ).toBe('complete'),
+          );
+          await recorder.stop(() => {});
+          const intentName = `recording-finalization:${recording.id}`;
+          const original = ApiClient.prototype.finalizeRecording;
+          let lose = true,
+            hold = false,
+            heldJob: string | undefined;
+          const requests = vi
+            .spyOn(ApiClient.prototype, 'finalizeRecording')
+            .mockImplementation(async function (
+              this: ApiClient,
+              id,
+              body,
+              key,
+              signal,
+            ) {
+              expect(
+                local.getArtifact(profile, remote.id, intentName, z.unknown()),
+              ).toMatchObject({ body, key, job_id: null });
+              const job = await original.call(this, id, body, key, signal);
+              if (lose) {
+                lose = false;
+                throw new TypeError(
+                  'Synthetic response loss after enqueue commit.',
+                );
+              }
+              if (hold) {
+                heldJob = job.id;
+                await new Promise<void>((resolve) => {
+                  release = resolve;
+                });
+              }
+              return job;
+            });
+          const command = () => ({
+            operation: 'finalizeRecordingTranscript' as const,
+            scope: controller.scope,
+            id: remote.id,
+            recording_id: recording.id,
+            locale: 'en-US' as const,
+            accept_incomplete: false,
+            confirmed: true as const,
+            new_attempt: true,
+            consent_id: randomUUID(),
+          });
+          await expect(controller.finalizeRecording(command())).rejects.toThrow(
+            'Synthetic response loss',
+          );
+          expect(await db.jobs(actor.user_id, remote.id)).toHaveLength(1);
+          await db.editTranscript(actor.user_id, remote.id, 0, [
+            {
+              id: randomUUID(),
+              start_ms: 0,
+              end_ms: 1,
+              text: 'A manual transcript won the race.',
+            },
+          ]);
+          await controller.synchronize();
+          controller.dispose();
+          local.close();
+          local = new LocalStore(join(directory, 'notes.sqlite'), key);
+          controller = open();
+          await controller.finalizeRecording(command());
+          expect(requests).toHaveBeenCalledTimes(2);
+          expect(requests.mock.calls[1]!.slice(1, 3)).toEqual(
+            requests.mock.calls[0]!.slice(1, 3),
+          );
+          expect(requests.mock.calls[1]![1].base_revision).toBe(0);
+          await runOnce(
+            db,
+            {
+              provider: 'fixture',
+              configurationVersion: 'desktop-finalization-v1',
+              transcribe: async () => ({
+                segments: [
+                  {
+                    id: randomUUID(),
+                    start_ms: 0,
+                    end_ms: 500,
+                    text: 'Generated source evidence.',
+                  },
+                ],
+                usage: { input_tokens: 0, output_tokens: 0, audio_ms: 2048 },
+              }),
+              summarize: async () => {
+                throw new Error('Unexpected summary request.');
+              },
+            },
+            undefined,
+            blobs,
+          );
+          await controller.synchronize();
+          expect(controller.snapshot()).toMatchObject({
+            transcript_revision: 1,
+            jobs: [{ result: { applied: false, transcript_revision: 2 } }],
+          });
+          const candidate = await controller.transcriptPage(
+            controller.scope,
+            remote.id,
+            2,
+            0,
+          );
+          expect(candidate).toMatchObject({
+            is_candidate: true,
+            recording: { id: recording.id },
+          });
+          const timeline = await controller.transcriptTimeline(
+            controller.scope,
+            remote.id,
+            2,
+            0,
+          );
+          expect(timeline.entries).toHaveLength(4);
+          const draft = controller.snapshot().selected!;
+          await controller.execute({
+            operation: 'save',
+            scope: controller.scope,
+            id: remote.id,
+            local_revision: draft.local_revision,
+            value: fields('Pending note edits survive transcript application.'),
+          });
+          await controller.applyTranscript({
+            operation: 'applyTranscript',
+            scope: controller.scope,
+            id: remote.id,
+            source_revision: 2,
+            base_revision: 1,
+            confirmed: true,
+          });
+          expect(controller.snapshot().transcript_revision).toBe(3);
+          expect((await db.document(actor.user_id, remote.id)).notes).toBe(
+            'Pending note edits survive transcript application.',
+          );
+          controller.dispose();
+          local.close();
+          local = new LocalStore(join(directory, 'notes.sqlite'), key);
+          controller = open();
+          const offline = vi
+            .spyOn(ApiClient.prototype, 'transcriptTimeline')
+            .mockRejectedValue(
+              new TypeError('Synthetic offline timeline transport.'),
+            );
+          expect(
+            await controller.transcriptTimeline(
+              controller.scope,
+              remote.id,
+              2,
+              0,
+            ),
+          ).toEqual(timeline);
+          expect(offline).not.toHaveBeenCalled();
+          offline.mockRestore();
+          hold = true;
+          pending = controller.finalizeRecording(command());
+          const failure = expect(pending).rejects.toMatchObject({
+            code: 'workspace_changed',
+          });
+          await vi.waitFor(() => expect(heldJob).toBeTypeOf('string'));
+          await controller.execute({
+            operation: 'workOffline',
+            scope: controller.scope,
+          });
+          release!();
+          await failure;
+          expect(
+            local.getArtifact(profile, remote.id, intentName, z.unknown()),
+          ).toMatchObject({ job_id: null });
+          expect(
+            local.getArtifact(
+              profile,
+              remote.id,
+              `job:${heldJob}`,
+              z.unknown(),
+            ),
+          ).toBeNull();
+        } finally {
+          release?.();
+          if (pending) await Promise.allSettled([pending]);
+          await recorder?.stop(() => {});
+          for (const client of nativeClients) await client.close();
+          await app.close();
+          await db.pool.query(
+            "UPDATE jobs SET state='cancelled',lease_token=lease_token+1 WHERE owner_id=$1 AND state IN ('queued','running','retry_wait')",
+            [actor.user_id],
+          );
+          let continuation: string | undefined;
+          do {
+            const page = await s3.send(
+              new ListObjectsV2Command({
+                Bucket: config.bucket,
+                ContinuationToken: continuation,
+              }),
+            );
+            for (const item of page.Contents ?? [])
+              if (item.Key)
+                await s3.send(
+                  new DeleteObjectCommand({
+                    Bucket: config.bucket,
+                    Key: item.Key,
+                  }),
+                );
+            continuation = page.NextContinuationToken;
+          } while (continuation);
+          await s3.send(new DeleteBucketCommand({ Bucket: config.bucket }));
+          s3.destroy();
+        }
+      },
+    );
     it('rejects stale renderer writes after changing scopes without altering either profile', async () => {
       await create('Original device-only text.');
       await connect();
@@ -328,6 +634,14 @@ describe.skipIf(!databaseUrl)(
       const read = vi
         .spyOn(ApiClient.prototype, 'transcriptPage')
         .mockResolvedValue({ ...page, total_segments: 61, has_more: true });
+      await expect(
+        controller.transcriptPage(controller.scope, remote.id, 1, 50),
+      ).rejects.toMatchObject({ code: 'invalid_server_response' });
+      read.mockResolvedValueOnce({ ...page, is_candidate: true });
+      await expect(
+        controller.transcriptPage(controller.scope, remote.id, 1, 50),
+      ).rejects.toMatchObject({ code: 'invalid_server_response' });
+      read.mockResolvedValueOnce({ ...page, based_on_revision: 7 });
       await expect(
         controller.transcriptPage(controller.scope, remote.id, 1, 50),
       ).rejects.toMatchObject({ code: 'invalid_server_response' });

@@ -7,6 +7,7 @@
     { "path": "../local" },
     { "path": "../db" },
     { "path": "../storage" },
-    { "path": "../../apps/api" }
+    { "path": "../../apps/api" },
+    { "path": "../../apps/worker" }
   ]
 }

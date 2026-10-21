@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import type { AudioEvent, Track } from '@windows-ai-notes/contracts';
-import type { DesktopCommand } from '@windows-ai-notes/contracts/desktop';
+import type {
+  DesktopCommand,
+  DesktopState,
+} from '@windows-ai-notes/contracts/desktop';
 import type {
   AudioState,
   LocalRecording,
@@ -231,6 +234,142 @@ type Device = Extract<
   AudioEvent,
   { event_type: 'devices' }
 >['payload']['devices'][number];
+function TranscriptionControls({
+  scope,
+  document,
+  recording,
+  status,
+  available,
+  busy,
+  act,
+  jobs,
+}: {
+  scope: number;
+  document: string;
+  recording: LocalRecording;
+  status: RecordingUploadStatus;
+  available: boolean;
+  busy: boolean;
+  act: (command: DesktopCommand) => Promise<boolean>;
+  jobs: DesktopState['jobs'];
+}) {
+  const [consent, setConsent] = useState<string | null>(null);
+  const [locale, setLocale] = useState<'en-US' | 'zh-CN'>('en-US');
+  const [incomplete, setIncomplete] = useState(false);
+  const latest = jobs.find(
+    (job) =>
+      job.kind === 'recording_transcription' &&
+      job.recording_id === recording.id,
+  );
+  const pending =
+    latest && ['queued', 'running', 'retry_wait'].includes(latest.state);
+  return (
+    <div className="audio-upload">
+      {latest && (
+        <p className="quiet-note" role="status">
+          Transcription: {latest.state.replaceAll('_', ' ')}.
+          {latest.progress &&
+            ` ${latest.progress.completed_chunks} / ${latest.progress.total_chunks} chunks processed.`}{' '}
+          Review results and job controls in AI activity.
+        </p>
+      )}
+      <button
+        className="secondary"
+        disabled={busy || !available}
+        onClick={() => {
+          setIncomplete(false);
+          setConsent(crypto.randomUUID());
+        }}
+      >
+        {pending
+          ? 'Reconcile transcription request'
+          : latest
+            ? 'Transcribe again'
+            : 'Transcribe saved audio'}
+      </button>
+      {consent && (
+        <div className="audio-configuration">
+          <p>
+            {pending
+              ? 'Reconcile the previously confirmed Azure request with its original language and capture acceptance. Its saved request key is reused, not a new transcription run.'
+              : 'Send this verified recording to Azure Speech? This is separate from audio upload consent and may incur provider charges. Server processing can continue after this app closes.'}
+          </p>
+          {!pending && (
+            <label>
+              Transcription language
+              <select
+                className="service-input"
+                aria-label="Transcription language"
+                value={locale}
+                disabled={busy}
+                onChange={(event) => {
+                  const value = event.target.value;
+                  if (value === 'en-US' || value === 'zh-CN') setLocale(value);
+                }}
+              >
+                <option value="en-US">English (United States)</option>
+                <option value="zh-CN">Chinese (Mandarin, simplified)</option>
+              </select>
+            </label>
+          )}
+          {status.partial && !pending && (
+            <label className="checkbox-label">
+              <input
+                type="checkbox"
+                checked={incomplete}
+                disabled={busy}
+                onChange={(event) => setIncomplete(event.target.checked)}
+              />
+              I accept transcription of an incomplete recording with known gaps
+              or lost audio.
+            </label>
+          )}
+          <p className="quiet-note">
+            Capture source labels are not speaker identities. Recognition may
+            miss speech at chunk boundaries. If a transcript changes while
+            processing, the result is saved separately for review.
+          </p>
+          <div className="inline-actions">
+            <button
+              className="quiet-button"
+              disabled={busy}
+              onClick={() => setConsent(null)}
+            >
+              Not now
+            </button>
+            <button
+              className="primary"
+              disabled={
+                busy ||
+                !available ||
+                (!pending && status.partial && !incomplete)
+              }
+              onClick={() =>
+                void act({
+                  operation: 'finalizeRecordingTranscript',
+                  scope,
+                  id: document,
+                  recording_id: recording.id,
+                  locale,
+                  accept_incomplete: incomplete,
+                  confirmed: true,
+                  new_attempt: !pending,
+                  consent_id: consent,
+                }).then((accepted) => {
+                  if (accepted) setConsent(null);
+                })
+              }
+            >
+              {pending
+                ? 'Confirm request reconciliation'
+                : 'Confirm Azure transcription'}
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 const uploadLabels: Record<RecordingUploadStatus['state'], string> = {
   queued: 'Upload queued',
   uploading: 'Uploading',
@@ -419,10 +558,12 @@ export function RecordingPanel({
   scope,
   document,
   beforeStart,
+  jobs,
 }: {
   scope: number;
   document: string;
   beforeStart: () => Promise<boolean>;
+  jobs: DesktopState['jobs'];
 }) {
   const { state, error, busy, acting, act, offset, setOffset } = useAudioState(
     scope,
@@ -517,7 +658,7 @@ export function RecordingPanel({
           <strong>Meeting audio</strong>
           <p className="quiet-note">
             Encrypted on this device. Saved audio uploads only with your
-            consent; Azure meeting transcription is not connected yet.
+            consent. Transcription requires a separate Azure confirmation.
           </p>
         </div>
         <button
@@ -757,6 +898,18 @@ export function RecordingPanel({
                     act={act}
                   />
                 )}
+                {upload?.state === 'complete' && (
+                  <TranscriptionControls
+                    scope={scope}
+                    document={document}
+                    recording={recording}
+                    status={upload}
+                    available={state.upload_available}
+                    busy={acting}
+                    act={act}
+                    jobs={jobs}
+                  />
+                )}
                 {confirmation?.id === recording.id &&
                   confirmation.action === 'recover' && (
                     <div className="delete-confirm">
@@ -795,8 +948,8 @@ export function RecordingPanel({
                     <div className="delete-confirm">
                       <span>
                         {upload
-                          ? 'Delete local and remote audio? Deletion is queued until remote cleanup is confirmed; notes stay. This cannot be undone.'
-                          : "Delete this device's only audio copy? Notes stay. This cannot be undone."}
+                          ? 'Delete local and remote audio and stop its unfinished transcription? Deletion is queued until cleanup is confirmed. Notes and published transcripts stay; processing drafts are erased. This cannot be undone.'
+                          : "Delete this device's only audio copy? Notes and published transcripts stay. This cannot be undone."}
                       </span>
                       <button
                         className="secondary"

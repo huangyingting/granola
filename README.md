@@ -6,12 +6,11 @@ includes a **secure offline-first desktop editor with account synchronization, P
 Granola code, branding, credentials, or private services.
 
 **This is a developer preview, not production-ready software or a completed P0 gate.**
-The server can transcribe short WAV clips with Azure Speech and produce cited,
-structured meeting summaries with Azure OpenAI. Explicit saved-recording uploads
-connect the Windows helper to private server storage, not yet to meeting transcription.
+The server can transcribe short WAV clips and separately confirmed uploaded
+recordings with Azure Speech, and produce cited meeting summaries with Azure OpenAI.
 The Electron editor supports browser login, isolated cloud workspaces, background
-synchronization and explicit conflict recovery. Complete-meeting transcription,
-live transcription and interactive AI workflows remain in progress.
+synchronization and explicit conflict recovery. Live transcription and interactive
+AI workflows remain in progress; chunk-boundary recognition quality is not certified.
 Real Windows audio behavior still requires the hardware checks below.
 
 ## Implemented
@@ -73,6 +72,11 @@ Real Windows audio behavior still requires the hardware checks below.
 - Azure Speech Fast Transcription and Azure OpenAI structured summaries. Inputs
   freeze their revisions; generated summaries never overwrite notes. Citations
   must resolve to the supplied immutable evidence. Provider errors are explicit.
+- Complete-recording transcription from ready, immutable private audio. Fenced
+  per-chunk results survive worker replacement; retries skip completed chunks and
+  refuse changed speech configurations. Track/epoch/chunk provenance, measured
+  clock mapping and known capture gaps remain available. Concurrent manual
+  transcript edits win; generated candidates require explicit review/application.
 - Revision-pinned transcript pages backed by indexed immutable PostgreSQL segments.
   Synchronization atomically caches the first bounded page with the document and
   cursor; the desktop loads additional pages on demand into its encrypted cache.
@@ -123,8 +127,29 @@ The encrypted journal stores no media, tokens or signed URLs, and private plans
 are not sent to the renderer.
 
 A verified remote copy does not remove local audio or start Azure transcription.
+Choose **Transcribe saved audio**, select English or simplified Mandarin Chinese,
+and separately confirm Azure processing and any incomplete capture. The encrypted
+request body/base/key is saved before enqueue; **Reconcile transcription request**
+replays that same request after a lost reply, rather than creating another run.
+Server jobs may continue after the app closes or disconnects.
+
+**AI activity** shows durable chunk progress, explicit cancellation and resumption
+of failed processing. Interrupted requests without saved results may have reached
+Azure and may be charged again; this is not exactly-once billing. Cancelled jobs,
+expired processing drafts and changed configurations never silently resend audio.
+Starting a fresh run requires another explicit confirmation. Failed processing
+drafts expire after 24 hours; completed, cancelled or unauthorized drafts are erased.
+
+If manual transcript edits win during recognition, expand **Generated transcript**
+to review a separate immutable candidate, then explicitly apply it against the
+current canonical revision. Earlier revisions remain in history; notes are not
+replaced. Opened candidate and capture-evidence pages are encrypted and readable
+offline after restart. Microphone/system labels identify capture sources, not
+people. Missing capture clocks are explicitly marked instead of claiming alignment.
+
 For a recording with upload intent, **Delete audio only** journals deletion of
-both copies. A document-scoped server tombstone prevents an uncertain, late
+both copies, cancels unfinished source processing and erases unpublished processing
+drafts. Notes and published transcripts remain. A document-scoped server tombstone prevents an uncertain, late
 creation from resurrecting it. Local audio stays until remote cleanup is
 confirmed; offline or failed deletion stays visible and retryable. Confirmation
 reflects the service's last successful cleanup sweep, not deletion from independent
@@ -147,10 +172,10 @@ The main-process client core also implements bounded HTTPS transport and durable
 synchronization: frozen requests replay before pulls, snapshot pagination survives
 restarts, missing-document reconciliation preserves unsubmitted edits, and
 workspace revocation purges only the affected cache. Cursors, changed documents
-and encrypted transcript/job artifacts commit together. The v1/v2/v3/v4 local vault is
-migrated transactionally to v5 without resetting keys, drafts, recording intents or retries.
+and encrypted transcript/job artifacts commit together. The v1/v2/v3/v4/v5 local vault is
+migrated transactionally to v6 without resetting keys, drafts, recording intents or retries.
 Legacy full-transcript caches remain readable offline. Older previews reject this
-version rather than mistaking a cached transcript page for the complete revision. Real
+version rather than misinterpreting paged evidence or recording jobs. Real
 HTTP/PostgreSQL/SQLite tests cover lost responses, two-device conflicts, expiry,
 deletion and revocation.
 
@@ -158,10 +183,13 @@ The transcript viewer shows its current segment range and replaces, rather than
 accumulates, rendered pages. Opened pages remain available offline after restart;
 unopened pages require a connection and a failed fetch leaves the current page
 visible with an explicit error. Switching workspaces, revocation or deletion fences
-late page responses. This storage/viewing foundation does not yet connect saved
-recordings to complete-meeting transcription.
+late page responses. Server exports retain capture labels and incomplete-source
+notices; full capture timelines remain available through the UI/API, not embedded
+in text exports. Desktop note exports still export written notes only.
 
-Before starting an updated server, run `pnpm db:migrate`. PostgreSQL migration 004
+Stop older API/worker instances before running `pnpm db:migrate`, then start the
+updated binaries together. Migration 005 adds recording jobs, temporary per-chunk
+processing, candidate versions and paged capture timelines. PostgreSQL migration 004
 preserves existing segment IDs, order and revisions while normalizing legacy JSON
 arrays into indexed segment rows. Stored revisions are bounded to 100,000 segments
 and 8,000,000 UTF-8 text bytes; each API page contains at most 50 segments and
@@ -301,8 +329,9 @@ unsupported or unconfirmed rather than claiming an unavailable remote logout.
 ### Optional private recording storage
 
 Set the `S3_*` variables shown in `.env.example` and provision a **private,
-unversioned** bucket. The API checks bucket access policy, ACL and versioning
-before accepting traffic. Production requires an HTTPS object endpoint and
+unversioned** bucket. Configure the same private storage for the API and the
+recording-transcription worker; both check access policy, ACL and versioning at
+startup. Production requires an HTTPS object endpoint and
 explicit `AES256` or `aws:kms` server-side encryption; KMS also requires
 `S3_KMS_KEY_ID`. Omit both static credential variables to use the server workload
 identity. Credentials stay on the server; desktop clients receive only bounded,
@@ -340,7 +369,8 @@ declared chunk is verified. Interrupted captures require explicit
 100 retained recordings, 10,000 retained chunks and 5 GiB of declared audio;
 temporary objects and per-chunk attempts are also bounded.
 
-Audio-only deletion preserves written notes. Deletion returns `202` and remains
+Audio-only deletion preserves written notes and published transcripts, but cancels
+unfinished source jobs and erases their processing drafts. Deletion returns `202` and remains
 observable through its status endpoint; cleanup protects outstanding
 authorizations/in-flight checks, retries failures and resweeps tombstones for
 late PUTs. `cleanup_confirmed` describes the last successful sweep, not an
@@ -351,8 +381,10 @@ approved object origin/staging path and immutable checksum, excludes API
 credentials, rejects redirects, and reconciles already-verified chunks after a
 lost response without rereading local media. Durable encrypted desktop intent,
 consent/progress/pause/retry and immutable native manifest/seal orchestration are
-connected. Complete-meeting transcription remains unconnected. Local recordings
-are never removed by the transfer core.
+connected. Separately consented transcription reads and revalidates verified private
+WAVs one at a time, never concatenates WAV headers or truncates to the short-clip
+limit, and zeroes each media buffer after processing. Provider calls do not hold
+database transactions. Local recordings are never removed by the transfer core.
 
 ### Server API
 
@@ -373,10 +405,14 @@ letters, digits, dots, colons, underscores or hyphens.
 | GET                  | `/v1/documents/{id}/jobs`                                            | Private job history with `limit`/`offset`                                                                                          |
 | GET                  | `/v1/sync/snapshot`, `/v1/sync/changes`                              | Owner-scoped workspace bootstrap and ordered incremental metadata                                                                  |
 | PUT / GET            | `/v1/documents/{id}/transcript`                                      | Save `{base_revision,segments}`; read current or `?revision=N`                                                                     |
+| GET                  | `/v1/documents/{id}/transcript/pages`                                | Immutable bounded page with `revision` and `offset`                                                                                |
+| GET                  | `/v1/documents/{id}/transcript/timeline`                             | Bounded known capture events/gaps with `revision` and `offset`                                                                     |
+| POST                 | `/v1/documents/{id}/transcript/apply`                                | Idempotent `{base_revision,source_revision,confirmed:true}`; copy an immutable version without overwriting newer edits             |
 | POST                 | `/v1/documents/{id}/transcription-runs?base_revision=0&locale=en-US` | Raw `audio/wav` body, returns a durable job                                                                                        |
 | POST                 | `/v1/documents/{id}/summary-runs`                                    | `{note_revision,transcript_revision,language:"en"}`; returns a durable job                                                         |
 | GET                  | `/v1/jobs/{id}`                                                      | Status, independent result, failure, and input-staleness flag                                                                      |
 | POST                 | `/v1/jobs/{id}/cancel`                                               | Explicit cancellation, with terminal-state arbitration                                                                             |
+| POST                 | `/v1/jobs/{id}/retry`                                                | `{confirmed:true}`; resume a failed recording job's unexpired processing, not a new run                                            |
 | GET                  | `/v1/jobs/{id}/events`                                               | SSE; numeric `Last-Event-ID` for replay                                                                                            |
 | GET                  | `/v1/models`, `/v1/templates`                                        | Fixed deployment capability catalog, never keys or arbitrary provider URLs                                                         |
 | GET                  | `/v1/recording-capabilities`                                         | Authenticated storage availability, allowed upload origin and bounded chunk limits                                                 |
@@ -384,6 +420,7 @@ letters, digits, dots, colons, underscores or hyphens.
 | GET                  | `/v1/recordings/{id}`                                                | Upload progress, immutable seal digest and readiness                                                                               |
 | POST / GET           | `/v1/recordings/{id}/chunks`                                         | Register immutable native WAV descriptor; page with `offset`                                                                       |
 | POST                 | `/v1/recordings/{id}/seal`                                           | Freeze exact track/chunk order, ends, timeline/gaps and incomplete acceptance                                                      |
+| POST                 | `/v1/recordings/{id}/finalize-transcript`                            | Idempotent `{base_revision,locale,seal_sha256,accept_incomplete}`; requires ready private audio and separate incomplete acceptance |
 | GET                  | `/v1/audio-chunks/{id}`                                              | Private immutable descriptor and verification state                                                                                |
 | POST                 | `/v1/audio-chunks/{id}/upload`                                       | Empty object; issue/replay bounded staging authorization                                                                           |
 | POST                 | `/v1/audio-chunks/{id}/complete`                                     | `{upload_id}`; verify actual bytes and publish immutable private object                                                            |
@@ -405,8 +442,10 @@ permissions. Structural citation validation is not proof of semantic accuracy.
 
 Use `base_revision` for optimistic updates; an optional `If-Match: "N"` must
 agree. Conflicts never silently replace user edits. Summary results remain
-separate even when their inputs become stale. Transcription completion fails if
-a manual transcript edit arrived while recognition was running.
+separate even when their inputs become stale. Short-clip transcription fails if
+a manual transcript edit wins. Complete-recording jobs instead preserve a separate
+candidate, never silently replace that edit, and publish their actual allocated
+revision rather than assuming `base+1`.
 
 Send an `Idempotency-Key` with note and metadata saves to safely retry after a
 lost response. A replay returns the current document and `applied_revision`
@@ -433,11 +472,13 @@ context; eight pending jobs and two SSE subscriptions per user. Clips stage
 temporarily in PostgreSQL and are removed on terminal completion or cancellation;
 the running worker expires unprocessed clips after 24 hours and prunes replay
 events older than seven days. SSE currently streams lifecycle/completion events, not
-model-token previews. To retry a terminal failure, create a new run with a new
-idempotency key.
+model-token previews. Short-clip failures require a new run/key. Recording jobs
+can explicitly resume unexpired staged results with their original configuration;
+cancelled/completed jobs cannot be resumed. Recording tracks remain bounded to four
+hours each (the desktop capture preview stops at one hour), with at most two tracks.
 
 This first slice uses PostgreSQL polling/leases as the durable scheduler rather
-than introducing unused Redis/BullMQ infrastructure. Complete-meeting finalization, realtime STT, chat,
+than introducing unused Redis/BullMQ infrastructure. Realtime STT, chat,
 interactive desktop AI, budget reservation/settlement and token streaming remain later
 implementation work. Successful jobs expose provider usage, but this is not a
 billing ledger; retries can incur duplicate provider charges.

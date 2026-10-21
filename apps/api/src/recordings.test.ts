@@ -1,5 +1,14 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vitest';
 import {
   S3Client,
   CreateBucketCommand,
@@ -20,6 +29,15 @@ import {
   type StorageConfig,
 } from '@windows-ai-notes/storage';
 import { makeSilentWav } from '@windows-ai-notes/ai/wav';
+import type { AiProviders } from '@windows-ai-notes/ai';
+import {
+  ServiceError,
+  jobSchema,
+  segmentsSchema,
+  transcriptPageSchema,
+  transcriptTimelinePageSchema,
+} from '@windows-ai-notes/contracts/server';
+import { runOnce } from '@windows-ai-notes/worker';
 import {
   remoteRecordingSchema,
   remoteChunkSchema,
@@ -71,6 +89,8 @@ describe.skipIf(!databaseUrl || !endpoint)(
       db = new Database(url.href);
       await db.migrate();
       await db.assertReady();
+    }, 30_000);
+    beforeEach(async () => {
       blobs = new RecordingBlobs(config);
       app = await createServer(
         db,
@@ -78,10 +98,12 @@ describe.skipIf(!databaseUrl || !endpoint)(
         blobs,
       );
       await app.ready();
-    }, 30_000);
-    afterAll(async () => {
+    });
+    afterEach(async () => {
       await app?.close();
       blobs?.close();
+    });
+    afterAll(async () => {
       await db?.close();
       if (admin) {
         if (schemaCreated)
@@ -110,7 +132,7 @@ describe.skipIf(!databaseUrl || !endpoint)(
       await s3.send(new DeleteBucketCommand({ Bucket: bucket }));
       s3.destroy();
     });
-    async function context() {
+    async function context(twoTracks = false) {
       const subject = randomUUID();
       const actor = await db.provision(
         'urn:windows-ai-notes:development',
@@ -143,6 +165,17 @@ describe.skipIf(!databaseUrl || !endpoint)(
         ],
       };
       const key = randomUUID();
+      if (twoTracks)
+        input.tracks.push({
+          spec: {
+            track_id: randomUUID(),
+            kind: 'loopback',
+            capture_scope: 'endpoint',
+            device_selection_policy: 'explicit',
+            device_id: 'synthetic-output',
+          },
+          actual_device_id: 'synthetic-output',
+        });
       const response = await app.inject({
         method: 'POST',
         url: `/v1/documents/${doc.id}/recordings`,
@@ -152,11 +185,11 @@ describe.skipIf(!databaseUrl || !endpoint)(
       expect(response.statusCode).toBe(201);
       const recording = remoteRecordingSchema.parse(response.json());
       const wav = makeSilentWav();
-      const chunk = (sequence = 0): UploadChunk => ({
+      const chunk = (sequence = 0, trackIndex = 0): UploadChunk => ({
         chunk: {
           format_version: 1,
           recording_id: input.id,
-          track_id: input.tracks[0]!.spec.track_id,
+          track_id: input.tracks[trackIndex]!.spec.track_id,
           chunk_id: randomUUID(),
           capture_epoch: randomUUID(),
           sequence,
@@ -326,6 +359,770 @@ describe.skipIf(!databaseUrl || !endpoint)(
         gaps: [],
       };
     }
+    describe('complete-recording transcription with the real private store', () => {
+      afterEach(async () => {
+        vi.restoreAllMocks();
+        await db.pool.query(
+          "UPDATE jobs SET state='cancelled',lease_token=lease_token+1 WHERE state IN ('queued','running','retry_wait')",
+        );
+        await db.pool.query(
+          "DELETE FROM recording_transcription_runs WHERE job_id IN (SELECT id FROM jobs WHERE state='cancelled')",
+        );
+      });
+      function provider(
+        transcribe: AiProviders['transcribe'] = async () => ({
+          segments: [
+            {
+              id: randomUUID(),
+              start_ms: 100,
+              end_ms: 700,
+              text: 'Synthetic recognized speech.',
+            },
+          ],
+          usage: { input_tokens: 0, output_tokens: 0, audio_ms: 1000 },
+        }),
+      ): AiProviders {
+        return {
+          provider: 'fixture',
+          configurationVersion: 'recording-fixture-v1',
+          transcribe,
+          summarize: async () => {
+            throw new Error(
+              'A recording job must not call the summary provider.',
+            );
+          },
+        };
+      }
+      async function ready(
+        c: Context,
+        count = 2,
+        duration = 1000,
+        partial = false,
+      ) {
+        const wav = makeSilentWav(duration);
+        const uploads: UploadChunk[] = [];
+        for (let track = 0; track < c.input.tracks.length; track++)
+          for (let sequence = 0; sequence < count; sequence++) {
+            const upload = c.chunk(sequence, track);
+            Object.assign(upload.chunk, {
+              sample_start: sequence * duration * 16,
+              sample_count: duration * 16,
+              clock_start_ms: sequence * (duration + 3000),
+              clock_end_ms: sequence * (duration + 3000) + duration,
+              pcm_sha256: createHash('sha256')
+                .update(wav.subarray(44))
+                .digest('hex'),
+            });
+            upload.size_bytes = wav.length;
+            upload.sha256 = createHash('sha256').update(wav).digest('hex');
+            await register(c, upload);
+            const grant = await authorize(c, upload.chunk.chunk_id);
+            await put(grant, wav);
+            expect(
+              (await complete(c, upload.chunk.chunk_id, grant.id)).statusCode,
+            ).toBe(200);
+            uploads.push(upload);
+          }
+        const frozen: RecordingSeal = {
+          native_state: partial ? 'failed' : 'sealed',
+          accept_incomplete: partial,
+          tracks: c.input.tracks.map(({ spec }) => ({
+            track_id: spec.track_id,
+            end_sample: count * duration * 16,
+            chunk_ids: uploads
+              .filter((upload) => upload.chunk.track_id === spec.track_id)
+              .map((upload) => upload.chunk.chunk_id),
+          })),
+          events: [
+            {
+              event_type: 'capture.started',
+              clock_ms: 0,
+              capture_epoch: uploads[0]!.chunk.capture_epoch,
+              code: null,
+            },
+          ],
+          gaps:
+            count > 1
+              ? c.input.tracks.map(({ spec }) => ({
+                  track_id: spec.track_id,
+                  start_ms: duration,
+                  end_ms: duration + 3000,
+                  reason: 'paused' as const,
+                }))
+              : [],
+        };
+        await db.recordings.seal(c.user_id, c.input.id, frozen, randomUUID());
+        return { uploads, frozen, wav };
+      }
+      async function enqueue(c: Context, key = randomUUID(), accept = false) {
+        const source = await db.recordings.get(c.user_id, c.input.id);
+        const response = await app.inject({
+          method: 'POST',
+          url: `/v1/recordings/${c.input.id}/finalize-transcript`,
+          headers: { ...c.headers, 'idempotency-key': key },
+          payload: {
+            base_revision: 0,
+            locale: 'en-US',
+            seal_sha256: source.seal_sha256,
+            accept_incomplete: accept,
+          },
+        });
+        expect(response.statusCode).toBe(202);
+        return jobSchema.parse(response.json());
+      }
+      it('processes audio beyond the short-clip window and publishes every long transcript segment with immutable provenance', async () => {
+        const c = await context();
+        const source = await ready(c, 3, 30_000);
+        const job = await enqueue(c);
+        const buffers: Buffer[] = [];
+        const transcribe = vi.fn<AiProviders['transcribe']>(async (bytes) => {
+          buffers.push(bytes);
+          expect(bytes.length).toBe(960_044);
+          return {
+            segments: Array.from({ length: 400 }, (_, index) => ({
+              id: randomUUID(),
+              start_ms: index * 50,
+              end_ms: index * 50 + 40,
+              text: `Phrase ${index}: ${'speech '.repeat(15)}`,
+            })),
+            usage: { input_tokens: 0, output_tokens: 0, audio_ms: 30_000 },
+          };
+        });
+        await runOnce(db, provider(transcribe), undefined, blobs);
+        const done = await db.job(c.user_id, job.id);
+        expect(done).toMatchObject({
+          state: 'succeeded',
+          progress: { completed_chunks: 3, total_chunks: 3 },
+          result: {
+            kind: 'recording_transcription',
+            applied: true,
+            segment_count: 1200,
+            processed_chunks: 3,
+            usage: { audio_ms: 90_000 },
+          },
+        });
+        expect(transcribe).toHaveBeenCalledTimes(3);
+        expect(
+          buffers.every((bytes) => bytes.every((value) => value === 0)),
+        ).toBe(true);
+        const entries = [];
+        let offset = 0;
+        while (true) {
+          const page = await db.transcripts.page(
+            c.user_id,
+            c.doc.id,
+            1,
+            offset,
+          );
+          entries.push(...page.segments);
+          if (!page.has_more) break;
+          offset += page.segments.length;
+        }
+        expect(entries).toHaveLength(1200);
+        expect(new Set(entries.map((entry) => entry.id)).size).toBe(1200);
+        expect(new Set(entries.map((entry) => entry.origin?.chunk_id))).toEqual(
+          new Set(source.uploads.map((upload) => upload.chunk.chunk_id)),
+        );
+        expect(entries[800]!.start_ms).toBe(66_000);
+        await expect(db.transcript(c.user_id, c.doc.id)).rejects.toMatchObject({
+          code: 'transcript_pagination_required',
+        });
+        expect(
+          (
+            await db.pool.query(
+              'SELECT count(*)::integer count FROM recording_transcription_runs WHERE job_id=$1',
+              [job.id],
+            )
+          ).rows[0].count,
+        ).toBe(0);
+      });
+      it('resumes durable completed chunks after retry and records uncertain requests without claiming exactly-once billing', async () => {
+        const c = await context();
+        await ready(c, 3);
+        const job = await enqueue(c);
+        let requests = 0;
+        const transcribe = vi.fn<AiProviders['transcribe']>(async () => {
+          requests++;
+          if (requests === 2)
+            throw new ServiceError(
+              'provider_rate_limited',
+              'Synthetic provider throttle.',
+              503,
+              true,
+            );
+          return {
+            segments: [
+              {
+                id: randomUUID(),
+                start_ms: 0,
+                end_ms: 500,
+                text: `Request ${requests}.`,
+              },
+            ],
+            usage: { input_tokens: 0, output_tokens: 0, audio_ms: 1000 },
+          };
+        });
+        await runOnce(db, provider(transcribe), undefined, blobs);
+        expect(await db.job(c.user_id, job.id)).toMatchObject({
+          state: 'retry_wait',
+          progress: { completed_chunks: 1 },
+        });
+        const first = segmentsSchema.parse(
+          (
+            await db.pool.query<{ segments: unknown }>(
+              'SELECT segments FROM recording_transcription_chunks WHERE job_id=$1',
+              [job.id],
+            )
+          ).rows[0]!.segments,
+        );
+        await db.pool.query('UPDATE jobs SET available_at=now() WHERE id=$1', [
+          job.id,
+        ]);
+        await runOnce(db, provider(transcribe), undefined, blobs);
+        expect(transcribe).toHaveBeenCalledTimes(4);
+        expect(await db.job(c.user_id, job.id)).toMatchObject({
+          state: 'succeeded',
+          result: { uncertain_requests: 1, usage: { audio_ms: 3000 } },
+        });
+        expect(
+          (await db.transcripts.page(c.user_id, c.doc.id, 1)).segments[0],
+        ).toEqual(first[0]);
+      });
+      it('preserves microphone/system source epochs and known pause gaps in separately paged capture evidence', async () => {
+        const c = await context(true);
+        const source = await ready(c, 2, 1000, true);
+        const denied = await app.inject({
+          method: 'POST',
+          url: `/v1/recordings/${c.input.id}/finalize-transcript`,
+          headers: { ...c.headers, 'idempotency-key': randomUUID() },
+          payload: {
+            base_revision: 0,
+            locale: 'en-US',
+            seal_sha256: (await db.recordings.get(c.user_id, c.input.id))
+              .seal_sha256,
+            accept_incomplete: false,
+          },
+        });
+        expect(denied.statusCode).toBe(409);
+        await enqueue(c, randomUUID(), true);
+        await runOnce(db, provider(), undefined, blobs);
+        const page = await db.transcripts.page(c.user_id, c.doc.id, 1);
+        expect(page.recording).toMatchObject({
+          partial: true,
+          timeline_count: 3,
+        });
+        expect(
+          new Set(page.segments.map((segment) => segment.origin?.kind)),
+        ).toEqual(new Set(['microphone', 'loopback']));
+        expect(
+          new Set(
+            page.segments.map((segment) => segment.origin?.capture_epoch),
+          ),
+        ).toEqual(
+          new Set(source.uploads.map((upload) => upload.chunk.capture_epoch)),
+        );
+        expect(page.segments.map((segment) => segment.start_ms)).toEqual([
+          100, 100, 4100, 4100,
+        ]);
+        const evidence = await app.inject({
+          url: `/v1/documents/${c.doc.id}/transcript/timeline?revision=1&offset=0`,
+          headers: c.headers,
+        });
+        expect(
+          transcriptTimelinePageSchema
+            .parse(evidence.json())
+            .entries.filter((entry) => entry.kind === 'gap'),
+        ).toHaveLength(2);
+        const exported = await app.inject({
+          url: `/v1/documents/${c.doc.id}/export?format=text&timestamps=false`,
+          headers: c.headers,
+        });
+        expect(exported.statusCode).toBe(200);
+        expect(exported.body).toContain('Incomplete recording:');
+        expect(exported.body).toContain('[Microphone]');
+        expect(exported.body).toContain('[System audio]');
+        await db.recordings.remove(c.user_id, c.input.id);
+        expect(
+          (await db.transcripts.timeline(c.user_id, c.doc.id, 1, 0)).entries,
+        ).toHaveLength(3);
+        await db.pool.query(
+          'UPDATE transcript_revisions SET timeline_count=4 WHERE document_id=$1 AND revision=1',
+          [c.doc.id],
+        );
+        try {
+          await expect(
+            db.transcripts.header(c.user_id, c.doc.id, 1),
+          ).rejects.toMatchObject({ code: 'transcript_integrity_error' });
+        } finally {
+          await db.pool.query(
+            'UPDATE transcript_revisions SET timeline_count=3 WHERE document_id=$1 AND revision=1',
+            [c.doc.id],
+          );
+        }
+      });
+      it('marks unavailable capture-clock mapping explicitly and rejects out-of-chunk provider phrases', async () => {
+        const c = await context();
+        const upload = c.chunk();
+        upload.chunk.clock_end_ms = 0;
+        await register(c, upload);
+        const grant = await authorize(c, upload.chunk.chunk_id);
+        await put(grant, c.wav);
+        expect(
+          (await complete(c, upload.chunk.chunk_id, grant.id)).statusCode,
+        ).toBe(200);
+        await db.recordings.seal(
+          c.user_id,
+          c.input.id,
+          seal(c, [upload]),
+          randomUUID(),
+        );
+        await enqueue(c);
+        await runOnce(db, provider(), undefined, blobs);
+        expect(
+          (await db.transcript(c.user_id, c.doc.id)).segments[0],
+        ).toMatchObject({
+          start_ms: 0,
+          end_ms: 0,
+          origin: {
+            time_basis: 'unmapped_clock',
+            start_offset_ms: 100,
+            end_offset_ms: 700,
+          },
+        });
+        const other = await context();
+        await ready(other, 1);
+        const job = await enqueue(other);
+        await runOnce(
+          db,
+          provider(async () => ({
+            segments: [
+              {
+                id: randomUUID(),
+                start_ms: 1001,
+                end_ms: 1002,
+                text: 'Outside the source audio.',
+              },
+            ],
+            usage: { input_tokens: 0, output_tokens: 0, audio_ms: 1000 },
+          })),
+          undefined,
+          blobs,
+        );
+        expect(await db.job(other.user_id, job.id)).toMatchObject({
+          state: 'failed',
+          error: { code: 'invalid_transcript' },
+        });
+        expect(
+          (await db.document(other.user_id, other.doc.id)).transcript_revision,
+        ).toBe(0);
+      });
+      it('refuses an empty sealed recording without reserving a provider job', async () => {
+        const c = await context();
+        await db.recordings.seal(
+          c.user_id,
+          c.input.id,
+          seal(c, []),
+          randomUUID(),
+        );
+        const source = await db.recordings.get(c.user_id, c.input.id);
+        const result = await app.inject({
+          method: 'POST',
+          url: `/v1/recordings/${c.input.id}/finalize-transcript`,
+          headers: { ...c.headers, 'idempotency-key': randomUUID() },
+          payload: {
+            base_revision: 0,
+            locale: 'en-US',
+            seal_sha256: source.seal_sha256,
+            accept_incomplete: false,
+          },
+        });
+        expect(result.statusCode).toBe(400);
+        expect(result.json()).toMatchObject({ code: 'empty_audio' });
+        expect(await db.jobs(c.user_id, c.doc.id)).toEqual([]);
+      });
+      it('keeps a generated candidate when manual edits win, and only applies it through an explicit idempotent revision decision', async () => {
+        const c = await context();
+        await ready(c, 1);
+        const job = await enqueue(c);
+        await db.editTranscript(c.user_id, c.doc.id, 0, [
+          {
+            id: randomUUID(),
+            start_ms: 0,
+            end_ms: 1,
+            text: 'Manual text must remain.',
+          },
+        ]);
+        await runOnce(db, provider(), undefined, blobs);
+        const done = await db.job(c.user_id, job.id);
+        expect(done).toMatchObject({
+          state: 'succeeded',
+          input_stale: true,
+          result: { applied: false, transcript_revision: 2 },
+        });
+        expect(
+          (await db.transcript(c.user_id, c.doc.id)).segments[0]!.text,
+        ).toBe('Manual text must remain.');
+        expect(
+          await db.transcripts.header(c.user_id, c.doc.id, 2),
+        ).toMatchObject({ is_candidate: true, based_on_revision: 0 });
+        await db.editTranscript(c.user_id, c.doc.id, 1, [
+          {
+            id: randomUUID(),
+            start_ms: 0,
+            end_ms: 1,
+            text: 'Even newer manual text.',
+          },
+        ]);
+        await expect(
+          db.transcripts.apply(c.user_id, c.doc.id, 1, 2, randomUUID()),
+        ).rejects.toMatchObject({ code: 'revision_conflict' });
+        const key = randomUUID();
+        for (let attempt = 0; attempt < 2; attempt++) {
+          const result = await app.inject({
+            method: 'POST',
+            url: `/v1/documents/${c.doc.id}/transcript/apply`,
+            headers: { ...c.headers, 'idempotency-key': key },
+            payload: { base_revision: 3, source_revision: 2, confirmed: true },
+          });
+          expect(result.statusCode).toBe(200);
+          expect(transcriptPageSchema.parse(result.json())).toMatchObject({
+            revision: 4,
+            is_candidate: false,
+            recording: { id: c.input.id },
+          });
+        }
+        expect(
+          (await db.transcript(c.user_id, c.doc.id, 1)).segments[0]!.text,
+        ).toBe('Manual text must remain.');
+        expect(
+          (await db.document(c.user_id, c.doc.id)).transcript_revision,
+        ).toBe(4);
+      });
+      it.each(['cancel', 'audio-delete', 'document-delete', 'revoke'] as const)(
+        'fences late provider results after %s and erases staged speech',
+        async (action) => {
+          const c = await context();
+          await ready(c, 1);
+          const job = await enqueue(c);
+          let finish!: (
+            result: Awaited<ReturnType<AiProviders['transcribe']>>,
+          ) => void;
+          const transcribe = vi.fn<AiProviders['transcribe']>(
+            () =>
+              new Promise((resolve) => {
+                finish = resolve;
+              }),
+          );
+          const running = runOnce(db, provider(transcribe), undefined, blobs);
+          await vi.waitFor(() => expect(transcribe).toHaveBeenCalledTimes(1));
+          if (action === 'cancel') await db.cancel(c.user_id, job.id);
+          if (action === 'audio-delete')
+            await db.recordings.remove(c.user_id, c.input.id);
+          if (action === 'document-delete')
+            await db.deleteDocument(c.user_id, c.doc.id);
+          if (action === 'revoke')
+            await db.pool.query(
+              'UPDATE memberships SET active=false WHERE workspace_id=$1 AND user_id=$2',
+              [c.workspace_id, c.user_id],
+            );
+          finish({
+            segments: [
+              {
+                id: randomUUID(),
+                start_ms: 0,
+                end_ms: 500,
+                text: 'Must never publish.',
+              },
+            ],
+            usage: { input_tokens: 0, output_tokens: 0, audio_ms: 1000 },
+          });
+          await running;
+          expect(
+            (
+              await db.pool.query(
+                'SELECT transcript_revision FROM documents WHERE id=$1',
+                [c.doc.id],
+              )
+            ).rows[0].transcript_revision,
+          ).toBe(0);
+          expect(
+            (
+              await db.pool.query(
+                'SELECT count(*)::integer count FROM recording_transcription_chunks WHERE job_id=$1',
+                [job.id],
+              )
+            ).rows[0].count,
+          ).toBe(0);
+        },
+      );
+      it('replays frozen consent after manual edits and rejects changed keys, unready sources and other owners', async () => {
+        const c = await context(),
+          other = await context();
+        const route = `/v1/recordings/${c.input.id}/finalize-transcript`;
+        const wrong = {
+          base_revision: 0,
+          locale: 'en-US',
+          seal_sha256: '0'.repeat(64),
+          accept_incomplete: false,
+        };
+        expect(
+          (
+            await app.inject({
+              method: 'POST',
+              url: route,
+              headers: { ...c.headers, 'idempotency-key': randomUUID() },
+              payload: wrong,
+            })
+          ).statusCode,
+        ).toBe(409);
+        await ready(c, 1);
+        const key = randomUUID(),
+          job = await enqueue(c, key);
+        await db.editTranscript(c.user_id, c.doc.id, 0, [
+          {
+            id: randomUUID(),
+            start_ms: 0,
+            end_ms: 1,
+            text: 'Newer manual evidence.',
+          },
+        ]);
+        expect((await enqueue(c, key)).id).toBe(job.id);
+        const source = await db.recordings.get(c.user_id, c.input.id);
+        const frozen = { ...wrong, seal_sha256: source.seal_sha256 };
+        expect(
+          (
+            await app.inject({
+              method: 'POST',
+              url: route,
+              headers: { ...c.headers, 'idempotency-key': key },
+              payload: { ...frozen, locale: 'zh-CN' },
+            })
+          ).statusCode,
+        ).toBe(409);
+        expect(
+          (
+            await app.inject({
+              method: 'POST',
+              url: route,
+              headers: { ...other.headers, 'idempotency-key': randomUUID() },
+              payload: frozen,
+            })
+          ).statusCode,
+        ).toBe(404);
+        expect(
+          (
+            await app.inject({
+              method: 'POST',
+              url: route,
+              headers: { ...c.headers, 'idempotency-key': randomUUID() },
+              payload: frozen,
+            })
+          ).statusCode,
+        ).toBe(409);
+      });
+      it('refuses mixed speech configurations and resumes the same failed job only through explicit confirmation', async () => {
+        const c = await context();
+        await ready(c, 2);
+        const job = await enqueue(c);
+        let calls = 0;
+        const transcribe = vi.fn<AiProviders['transcribe']>(async () => {
+          if (++calls === 2)
+            throw new ServiceError(
+              'provider_unavailable',
+              'Synthetic explicit failure.',
+              502,
+            );
+          return {
+            segments: [
+              {
+                id: randomUUID(),
+                start_ms: 0,
+                end_ms: 500,
+                text: `Saved output ${calls}.`,
+              },
+            ],
+            usage: { input_tokens: 0, output_tokens: 0, audio_ms: 1000 },
+          };
+        });
+        await runOnce(db, provider(transcribe), undefined, blobs);
+        expect(await db.job(c.user_id, job.id)).toMatchObject({
+          state: 'failed',
+          progress: { completed_chunks: 1 },
+        });
+        const retry = () =>
+          app.inject({
+            method: 'POST',
+            url: `/v1/jobs/${job.id}/retry`,
+            headers: c.headers,
+            payload: { confirmed: true },
+          });
+        expect((await retry()).statusCode).toBe(200);
+        await runOnce(
+          db,
+          {
+            ...provider(transcribe),
+            configurationVersion: 'changed-configuration',
+          },
+          undefined,
+          blobs,
+        );
+        expect(transcribe).toHaveBeenCalledTimes(2);
+        expect(await db.job(c.user_id, job.id)).toMatchObject({
+          state: 'failed',
+          error: { code: 'provider_configuration_changed' },
+        });
+        expect((await retry()).statusCode).toBe(200);
+        expect((await retry()).statusCode).toBe(200);
+        await runOnce(db, provider(transcribe), undefined, blobs);
+        expect(transcribe).toHaveBeenCalledTimes(3);
+        expect(await db.job(c.user_id, job.id)).toMatchObject({
+          state: 'succeeded',
+          result: { processed_chunks: 2, uncertain_requests: 1 },
+        });
+        expect((await retry()).statusCode).toBe(409);
+      });
+      it('does not resend audio after temporary processing evidence expires', async () => {
+        const c = await context();
+        await ready(c, 1);
+        const job = await enqueue(c);
+        const transcribe = vi.fn<AiProviders['transcribe']>(async () => {
+          throw new ServiceError(
+            'provider_unavailable',
+            'Synthetic explicit failure.',
+            502,
+          );
+        });
+        await runOnce(db, provider(transcribe), undefined, blobs);
+        await db.pool.query(
+          "UPDATE jobs SET updated_at=now()-interval '25 hours' WHERE id=$1",
+          [job.id],
+        );
+        await db.cleanup();
+        const response = await app.inject({
+          method: 'POST',
+          url: `/v1/jobs/${job.id}/retry`,
+          headers: c.headers,
+          payload: { confirmed: true },
+        });
+        expect(response.statusCode).toBe(410);
+        expect(transcribe).toHaveBeenCalledTimes(1);
+        expect(await db.job(c.user_id, job.id)).toMatchObject({
+          state: 'failed',
+          error: { code: 'provider_unavailable' },
+        });
+      });
+      it('fences an expired worker while its replacement preserves the completed prefix and publishes one revision', async () => {
+        const c = await context();
+        await ready(c, 3);
+        const job = await enqueue(c);
+        let release!: (
+          value: Awaited<ReturnType<AiProviders['transcribe']>>,
+        ) => void;
+        let calls = 0;
+        const late = {
+          segments: [
+            {
+              id: randomUUID(),
+              start_ms: 0,
+              end_ms: 500,
+              text: 'Expired worker must not publish.',
+            },
+          ],
+          usage: { input_tokens: 0, output_tokens: 0, audio_ms: 1000 },
+        };
+        const old = vi.fn<AiProviders['transcribe']>(async () => {
+          if (++calls === 2)
+            return new Promise((resolve) => {
+              release = resolve;
+            });
+          return {
+            ...late,
+            segments: [{ ...late.segments[0]!, text: 'Durable first chunk.' }],
+          };
+        });
+        const original = runOnce(db, provider(old), undefined, blobs);
+        try {
+          await vi.waitFor(() => expect(old).toHaveBeenCalledTimes(2));
+          await db.pool.query(
+            "UPDATE jobs SET lease_until=now()-interval '1 second' WHERE id=$1",
+            [job.id],
+          );
+          const replacement = vi.fn<AiProviders['transcribe']>(async () => ({
+            ...late,
+            segments: [{ ...late.segments[0]!, text: 'Replacement worker.' }],
+          }));
+          await runOnce(db, provider(replacement), undefined, blobs);
+          expect(replacement).toHaveBeenCalledTimes(2);
+        } finally {
+          release(late);
+          await original;
+        }
+        expect(await db.job(c.user_id, job.id)).toMatchObject({
+          state: 'succeeded',
+          result: {
+            transcript_revision: 1,
+            processed_chunks: 3,
+            uncertain_requests: 1,
+          },
+        });
+        const result = await db.transcript(c.user_id, c.doc.id);
+        expect(result.segments[0]!.text).toBe('Durable first chunk.');
+        expect(result.segments.map((segment) => segment.text)).not.toContain(
+          'Expired worker must not publish.',
+        );
+      });
+      it('enforces the pending owner budget for independently confirmed recording jobs', async () => {
+        const c = await context();
+        await ready(c, 1);
+        for (let index = 0; index < 8; index++) await enqueue(c);
+        const source = await db.recordings.get(c.user_id, c.input.id);
+        const response = await app.inject({
+          method: 'POST',
+          url: `/v1/recordings/${c.input.id}/finalize-transcript`,
+          headers: { ...c.headers, 'idempotency-key': randomUUID() },
+          payload: {
+            base_revision: 0,
+            locale: 'en-US',
+            seal_sha256: source.seal_sha256,
+            accept_incomplete: false,
+          },
+        });
+        expect(response.statusCode).toBe(429);
+      });
+      it('rejects altered private media before calling Azure and retains the original recording for repair', async () => {
+        const c = await context();
+        const source = await ready(c, 1);
+        const job = await enqueue(c);
+        const object = (
+          await db.pool.query<{ verified_object: string }>(
+            'SELECT verified_object FROM recording_chunks WHERE recording_id=$1',
+            [c.input.id],
+          )
+        ).rows[0]!.verified_object;
+        const damaged = Buffer.from(source.wav);
+        damaged[damaged.length - 1] = 1;
+        await s3.send(
+          new PutObjectCommand({
+            Bucket: bucket,
+            Key: objectKey({ id: object, kind: 'verified' }),
+            Body: damaged,
+          }),
+        );
+        const transcribe = vi.fn<AiProviders['transcribe']>();
+        await runOnce(db, provider(transcribe), undefined, blobs);
+        expect(transcribe).not.toHaveBeenCalled();
+        expect(await db.job(c.user_id, job.id)).toMatchObject({
+          state: 'failed',
+          error: { code: 'checksum_mismatch' },
+        });
+        expect((await db.recordings.get(c.user_id, c.input.id)).state).toBe(
+          'ready',
+        );
+        expect(
+          (await db.document(c.user_id, c.doc.id)).transcript_revision,
+        ).toBe(0);
+      });
+    });
     async function expire(recording: string) {
       await db.pool.query(
         "UPDATE recording_objects SET protected_until=now()-interval '1 second',cleanup_after=now()-interval '1 second',cleanup_until=NULL WHERE recording_id=$1",

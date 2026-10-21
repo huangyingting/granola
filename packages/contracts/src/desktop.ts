@@ -5,6 +5,7 @@ import {
   jobSchema,
   cachedTranscriptSchema,
   transcriptPageSchema,
+  transcriptTimelinePageSchema,
   MAX_TRANSCRIPT_SEGMENTS,
 } from './server.js';
 import { deviceSchema, trackSchema } from './index.js';
@@ -41,6 +42,40 @@ export const desktopCommandSchema = z.discriminatedUnion('operation', [
     id: resourceId,
     revision: z.number().int().positive(),
     offset: z.number().int().min(0).max(MAX_TRANSCRIPT_SEGMENTS),
+  }),
+  z.strictObject({
+    operation: z.literal('getTranscriptTimeline'),
+    ...scoped,
+    id: resourceId,
+    revision: z.number().int().positive(),
+    offset: z.number().int().min(0).max(20_000),
+  }),
+  z.strictObject({
+    operation: z.literal('finalizeRecordingTranscript'),
+    ...scoped,
+    id: resourceId,
+    recording_id: resourceId,
+    locale: z.enum(['en-US', 'zh-CN']),
+    accept_incomplete: z.boolean(),
+    confirmed: z.literal(true),
+    new_attempt: z.boolean(),
+    consent_id: resourceId,
+  }),
+  z.strictObject({
+    operation: z.literal('controlTranscriptionJob'),
+    ...scoped,
+    id: resourceId,
+    job_id: resourceId,
+    action: z.enum(['cancel', 'retry']),
+    confirmed: z.literal(true),
+  }),
+  z.strictObject({
+    operation: z.literal('applyTranscript'),
+    ...scoped,
+    id: resourceId,
+    source_revision: z.number().int().positive(),
+    base_revision: z.number().int().nonnegative(),
+    confirmed: z.literal(true),
   }),
   z.strictObject({ operation: z.literal('listAudioDevices'), ...scoped }),
   z.strictObject({
@@ -224,6 +259,13 @@ export const desktopResponseSchema = z.union([
   z.strictObject({
     ok: z.literal(true),
     transcript_page: z.strictObject({ ...scoped, page: transcriptPageSchema }),
+  }),
+  z.strictObject({
+    ok: z.literal(true),
+    transcript_timeline: z.strictObject({
+      ...scoped,
+      page: transcriptTimelinePageSchema,
+    }),
   }),
   z.strictObject({
     ok: z.literal(true),

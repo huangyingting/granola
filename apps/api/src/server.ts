@@ -7,6 +7,8 @@ import rateLimit from '@fastify/rate-limit';
 import { z } from 'zod';
 import {
   MAX_AUDIO_BYTES,
+  MAX_TRANSCRIPT_SEGMENTS,
+  MAX_TRANSCRIPT_TEXT_BYTES,
   ServiceError,
   createDocumentSchema,
   updateDocumentSchema,
@@ -15,6 +17,7 @@ import {
   summaryRequestSchema,
   transcriptionQuerySchema,
   transcriptPageQuerySchema,
+  applyTranscriptSchema,
   resourceId,
   idempotencyKey,
   syncSnapshotQuerySchema,
@@ -150,6 +153,13 @@ export async function createServer(
     summary_model: 'deployment-default',
     speech_model: 'azure-fast-transcription',
     max_audio_seconds: 60,
+    recording_transcription: {
+      storage_configured: storage !== null,
+      max_chunk_audio_seconds: 30,
+      max_track_audio_seconds: 4 * 60 * 60,
+      max_transcript_segments: MAX_TRANSCRIPT_SEGMENTS,
+      max_transcript_text_bytes: MAX_TRANSCRIPT_TEXT_BYTES,
+    },
     max_summary_context_bytes: 48_000,
     locales: ['en-US', 'zh-CN'],
   }));
@@ -281,7 +291,10 @@ export async function createServer(
       }
     }
     const content = exportMeetingStream(
-      document,
+      {
+        ...document,
+        ...(first.recording ? { recording: first.recording } : {}),
+      },
       segments(),
       query.format,
       query.timestamps === 'true',
@@ -317,6 +330,31 @@ export async function createServer(
       id,
       query.revision,
       query.offset,
+    );
+  });
+  app.get('/v1/documents/:id/transcript/timeline', async (request) => {
+    const { id } = parse(idParams, request.params);
+    const query = parse(transcriptPageQuerySchema, request.query);
+    const selected =
+      query.revision ??
+      (await db.document(principal(request).userId, id)).transcript_revision;
+    return db.transcripts.timeline(
+      principal(request).userId,
+      id,
+      selected,
+      query.offset,
+    );
+  });
+  app.post('/v1/documents/:id/transcript/apply', async (request) => {
+    const { id } = parse(idParams, request.params);
+    const input = parse(applyTranscriptSchema, request.body);
+    const key = parse(idempotencyKey, request.headers['idempotency-key']);
+    return db.transcripts.apply(
+      principal(request).userId,
+      id,
+      input.base_revision,
+      input.source_revision,
+      key,
     );
   });
   app.put('/v1/documents/:id/transcript', async (request) => {
@@ -369,6 +407,11 @@ export async function createServer(
   app.post('/v1/jobs/:id/cancel', async (request) => {
     const { id } = parse(idParams, request.params);
     return db.cancel(principal(request).userId, id);
+  });
+  app.post('/v1/jobs/:id/retry', async (request) => {
+    const { id } = parse(idParams, request.params);
+    parse(z.strictObject({ confirmed: z.literal(true) }), request.body);
+    return db.retryRecordingTranscription(principal(request).userId, id);
   });
   app.get('/v1/jobs/:id/events', async (request, reply) => {
     const { id } = parse(idParams, request.params);

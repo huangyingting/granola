@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { captureGapSchema, captureTimelineEventSchema } from './index.js';
 import {
   notesTextSchema,
   richTextSchema,
@@ -129,6 +130,19 @@ export const segmentSchema = z
       .min(1)
       .max(10_000)
       .refine((text) => !text.includes('\0')),
+    origin: z
+      .strictObject({
+        recording_id: resourceId,
+        track_id: z.uuid(),
+        kind: z.enum(['microphone', 'loopback']),
+        capture_epoch: z.uuid(),
+        chunk_id: z.uuid(),
+        start_offset_ms: z.number().int().min(0).max(30_000),
+        end_offset_ms: z.number().int().min(0).max(30_000),
+        time_basis: z.enum(['chunk_clock_linear', 'unmapped_clock']),
+      })
+      .refine((origin) => origin.end_offset_ms >= origin.start_offset_ms)
+      .optional(),
   })
   .refine(
     (value) => value.end_ms >= value.start_ms,
@@ -194,7 +208,59 @@ export const transcriptHeaderSchema = transcriptSchema
   .omit({ segments: true })
   .extend({
     total_segments: z.number().int().min(0).max(MAX_TRANSCRIPT_SEGMENTS),
+    is_candidate: z.boolean().optional(),
+    based_on_revision: revision.optional(),
+    recording: z
+      .strictObject({
+        id: resourceId,
+        seal_sha256: z.string().regex(/^[a-f0-9]{64}$/),
+        partial: z.boolean(),
+        tracks: z
+          .array(
+            z.strictObject({
+              track_id: z.uuid(),
+              kind: z.enum(['microphone', 'loopback']),
+            }),
+          )
+          .min(1)
+          .max(2),
+        timeline_count: z.number().int().min(0).max(20_000),
+      })
+      .optional(),
   });
+export const transcriptTimelineEntrySchema = z.union([
+  z.strictObject({
+    kind: z.literal('event'),
+    value: captureTimelineEventSchema,
+  }),
+  z.strictObject({ kind: z.literal('gap'), value: captureGapSchema }),
+]);
+export const transcriptTimelinePageSchema = z
+  .strictObject({
+    document_id: resourceId,
+    revision: revision.min(1),
+    offset: z.number().int().min(0).max(20_000),
+    total: z.number().int().min(0).max(20_000),
+    entries: z.array(transcriptTimelineEntrySchema).max(50),
+    has_more: z.boolean(),
+  })
+  .refine(
+    (page) =>
+      page.offset + page.entries.length <= page.total &&
+      page.has_more === page.offset + page.entries.length < page.total &&
+      (!page.has_more || page.entries.length > 0),
+  );
+export const applyTranscriptSchema = z.strictObject({
+  base_revision: revision,
+  source_revision: revision.min(1),
+  confirmed: z.literal(true),
+});
+export const finalizeTranscriptSchema = z.strictObject({
+  base_revision: revision,
+  locale,
+  seal_sha256: z.string().regex(/^[a-f0-9]{64}$/),
+  accept_incomplete: z.boolean(),
+});
 export const transcriptPageSchema = transcriptHeaderSchema
   .extend({
     offset: z.number().int().min(0).max(MAX_TRANSCRIPT_SEGMENTS),
@@ -309,6 +375,15 @@ export const jobInputSchema = z.discriminatedUnion('kind', [
     locale,
     duration_ms: z.number().positive().max(60_000),
   }),
+  z.strictObject({
+    kind: z.literal('recording_transcription'),
+    recording_id: resourceId,
+    seal_sha256: z.string().regex(/^[a-f0-9]{64}$/),
+    base_transcript_revision: revision,
+    locale,
+    accept_incomplete: z.boolean(),
+    chunk_count: z.number().int().positive().max(10_000),
+  }),
 ]);
 export const usageSchema = z.strictObject({
   input_tokens: z.number().int().nonnegative(),
@@ -345,17 +420,41 @@ export const resultSchema = z.discriminatedUnion('kind', [
     configuration_version: z.string(),
     usage: usageSchema,
   }),
+  z.strictObject({
+    kind: z.literal('recording_transcription'),
+    recording_id: resourceId,
+    transcript_revision: revision.min(1),
+    segment_count: z.number().int().min(0).max(MAX_TRANSCRIPT_SEGMENTS),
+    processed_chunks: z.number().int().min(1).max(10_000),
+    uncertain_requests: z.number().int().nonnegative(),
+    applied: z.boolean(),
+    partial: z.boolean(),
+    provider: z.enum(['azure', 'fixture']),
+    configuration_version: z.string(),
+    usage: usageSchema,
+  }),
 ]);
 export const jobSchema = z.strictObject({
   id: resourceId,
   document_id: resourceId,
-  kind: z.enum(['summary', 'transcription']),
+  kind: z.enum(['summary', 'transcription', 'recording_transcription']),
   state: jobStateSchema,
   attempt: z.number().int().nonnegative(),
   input_stale: z.boolean(),
   result: resultSchema.nullable(),
   error: failureSchema.nullable(),
   created_at: z.string(),
+  recording_id: resourceId.nullable().optional(),
+  progress: z
+    .strictObject({
+      completed_chunks: z.number().int().min(0).max(10_000),
+      total_chunks: z.number().int().min(1).max(10_000),
+      audio_ms: z.number().min(0).max(28_800_000),
+      uncertain_requests: z.number().int().nonnegative(),
+    })
+    .refine((value) => value.completed_chunks <= value.total_chunks)
+    .nullable()
+    .optional(),
 });
 export const jobEventSchema = z.strictObject({
   job_id: resourceId,

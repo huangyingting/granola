@@ -1,5 +1,10 @@
 import { z } from 'zod';
-import { trackSchema, uploadChunkSchema } from './index.js';
+import {
+  trackSchema,
+  uploadChunkSchema,
+  captureTimelineEventSchema,
+  captureGapSchema,
+} from './index.js';
 import { resourceId } from './server.js';
 
 export const MAX_RECORDING_CHUNKS = 10_000;
@@ -49,28 +54,8 @@ export const recordingSealSchema = z
       )
       .min(1)
       .max(2),
-    events: z
-      .array(
-        z.strictObject({
-          event_type: z.string().min(1).max(80),
-          clock_ms: z.number().finite().min(0).max(14_400_000),
-          capture_epoch: resourceId.nullable(),
-          code: z.string().max(80).nullable(),
-        }),
-      )
-      .max(10_000),
-    gaps: z
-      .array(
-        z
-          .strictObject({
-            track_id: resourceId,
-            start_ms: z.number().finite().min(0).max(14_400_000),
-            end_ms: z.number().finite().min(0).max(14_400_000),
-            reason: z.enum(['paused', 'device_lost', 'interrupted', 'unknown']),
-          })
-          .refine((gap) => gap.end_ms >= gap.start_ms),
-      )
-      .max(10_000),
+    events: z.array(captureTimelineEventSchema).max(10_000),
+    gaps: z.array(captureGapSchema).max(10_000),
   })
   .refine((seal) => {
     const ids = seal.tracks.flatMap((track) => track.chunk_ids);

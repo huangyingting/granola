@@ -869,6 +869,8 @@ h1 {
 }
 .transcript-segment > span {
   flex-shrink: 0;
+  max-width: 34%;
+  white-space: normal;
   font-size: 10px;
   color: #a4aebc;
 }
@@ -878,12 +880,12 @@ h1 {
   margin-top: 16px;
   line-height: 1.8;
 }
-.job-card > div {
+.job-card > .job-heading {
   display: flex;
   align-items: center;
   justify-content: space-between;
 }
-.job-card > div > span {
+.job-card > .job-heading > span {
   text-transform: capitalize;
   font-size: 10px;
 }

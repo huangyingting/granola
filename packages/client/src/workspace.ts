@@ -1,4 +1,6 @@
 import { z } from 'zod';
+import { createHash, randomUUID } from 'node:crypto';
+import { canonicalJson } from '@windows-ai-notes/contracts/content';
 import { LocalError, LocalStore } from '@windows-ai-notes/local';
 import {
   oidcClientConfigurationSchema,
@@ -8,6 +10,9 @@ import {
   transcriptPageSchema,
   makeTranscriptPage,
   type TranscriptPage,
+  transcriptTimelinePageSchema,
+  finalizeTranscriptSchema,
+  idempotencyKey,
 } from '@windows-ai-notes/contracts/server';
 import type {
   DesktopChange,
@@ -33,6 +38,12 @@ const accountSchema = z.strictObject({
 });
 type Account = z.infer<typeof accountSchema>;
 type ConnectionError = NonNullable<DesktopConnection['error']>;
+const finalizationIntentSchema = z.strictObject({
+  body: finalizeTranscriptSchema,
+  key: idempotencyKey,
+  consent_id: resourceId,
+  job_id: resourceId.nullable(),
+});
 
 export class WorkspaceController {
   private account: Account | null;
@@ -59,6 +70,7 @@ export class WorkspaceController {
   private offset = 0;
   private readonly selection = new Map<string, string | null>();
   private readonly transcriptReads = new Set<AbortController>();
+  private readonly finalizationWrites = new Set<string>();
   constructor(
     private readonly local: LocalStore,
     private readonly openBrowser: (url: string) => Promise<void>,
@@ -166,13 +178,14 @@ export class WorkspaceController {
       authorize: () => {
         this.assertScope(scope);
         if (
+          this.auth ||
           this.profile !== profile ||
           this.api !== api ||
           this.session?.summary().status !== 'active'
         )
           throw new ClientError(
             'workspace_changed',
-            'The upload workspace or authenticated account changed.',
+            'The workspace or authenticated account changed.',
           );
       },
     };
@@ -337,6 +350,12 @@ export class WorkspaceController {
               `transcript-page:${revision}:${offset}`,
               transcriptPageSchema,
             );
+    const provenance = (page: TranscriptPage) =>
+      canonicalJson({
+        candidate: page.is_candidate ?? false,
+        base: page.based_on_revision ?? null,
+        recording: page.recording ?? null,
+      });
     const check = (page: TranscriptPage) => {
       if (
         page.document_id !== id ||
@@ -345,7 +364,8 @@ export class WorkspaceController {
         (first &&
           (page.source !== first.source ||
             ('total_segments' in first &&
-              page.total_segments !== first.total_segments)))
+              page.total_segments !== first.total_segments) ||
+            ('offset' in first && provenance(page) !== provenance(first))))
       )
         throw new ClientError(
           'invalid_server_response',
@@ -421,6 +441,365 @@ export class WorkspaceController {
         this.account.active_workspace,
       );
     }
+  }
+  async transcriptTimeline(
+    scope: number,
+    id: string,
+    revision: number,
+    offset: number,
+  ) {
+    this.assertScope(scope);
+    const profile = this.profile;
+    const draft = this.local.get(profile, id);
+    if (draft.status === 'deleted_remote' || draft.remote_revision === 0)
+      throw new ClientError(
+        'transcript_unavailable',
+        'This meeting has no available cloud capture evidence.',
+      );
+    const name = `transcript-timeline:${revision}:${offset}`;
+    const cached = this.local.getArtifact(
+      profile,
+      id,
+      name,
+      transcriptTimelinePageSchema,
+    );
+    const first = this.cachedTranscript(profile, id, revision);
+    const check = (page: z.infer<typeof transcriptTimelinePageSchema>) => {
+      if (
+        page.document_id !== id ||
+        page.revision !== revision ||
+        page.offset !== offset ||
+        (first &&
+          'recording' in first &&
+          first.recording &&
+          page.total !== first.recording.timeline_count)
+      )
+        throw new ClientError(
+          'invalid_server_response',
+          'The capture timeline does not match this transcript revision.',
+        );
+      return page;
+    };
+    if (cached) return check(cached);
+    const context = this.recordingUploadContext();
+    if (!context)
+      throw new ClientError(
+        'transcript_not_cached',
+        'This capture timeline page is not cached. Reconnect to download it.',
+      );
+    if (this.transcriptReads.size >= 4)
+      throw new ClientError(
+        'transcript_busy',
+        'Wait for the current transcript requests to finish.',
+      );
+    const controller = new AbortController();
+    this.transcriptReads.add(controller);
+    try {
+      const page = await context.api.transcriptTimeline(
+        id,
+        revision,
+        offset,
+        controller.signal,
+      );
+      context.authorize();
+      if (controller.signal.aborted)
+        throw new ClientError(
+          'request_cancelled',
+          'The capture timeline request was cancelled.',
+        );
+      check(page);
+      this.local.putArtifact(profile, id, name, page);
+      return page;
+    } catch (error) {
+      this.artifactRevocation(error, context.profile, context.api);
+      throw error;
+    } finally {
+      this.transcriptReads.delete(controller);
+    }
+  }
+  private artifactRevocation(error: unknown, profile: string, api: ApiClient) {
+    if (
+      !this.disposed &&
+      profile === this.profile &&
+      api === this.api &&
+      error instanceof ClientError &&
+      error.status === 403 &&
+      ['identity_not_provisioned', 'workspace_access_revoked'].includes(
+        error.code,
+      )
+    )
+      this.revoke(error);
+  }
+  private cacheJob(
+    profile: string,
+    id: string,
+    job: z.infer<typeof jobSchema>,
+  ) {
+    if (job.document_id !== id)
+      throw new ClientError(
+        'invalid_server_response',
+        'The service returned another meeting job.',
+      );
+    const history = this.local.getArtifact(
+      profile,
+      id,
+      'job-history',
+      z.strictObject({ jobs: z.array(jobSchema).max(20) }),
+    );
+    this.local.atomic(() => {
+      this.local.putArtifact(profile, id, `job:${job.id}`, job);
+      this.local.putArtifact(profile, id, 'job-history', {
+        jobs: [
+          job,
+          ...(history?.jobs ?? []).filter((item) => item.id !== job.id),
+        ].slice(0, 20),
+      });
+    });
+    this.emit('data');
+    this.schedule(0);
+  }
+  async finalizeRecording(
+    command: Extract<
+      DesktopCommand,
+      { operation: 'finalizeRecordingTranscript' }
+    >,
+  ) {
+    this.assertScope(command.scope);
+    const context = this.recordingUploadContext();
+    if (!context)
+      throw new ClientError(
+        'workspace_not_connected',
+        'Connect the original cloud workspace before starting transcription.',
+      );
+    const profile = context.profile,
+      id = command.id;
+    const upload = this.local.recordingUpload(
+      profile,
+      id,
+      command.recording_id,
+    );
+    if (!upload?.plan || upload.state !== 'complete')
+      throw new ClientError(
+        'recording_incomplete',
+        'Finish and verify the saved audio upload before transcribing it.',
+      );
+    const name = `recording-finalization:${command.recording_id}`;
+    let intent = this.local.getArtifact(
+      profile,
+      id,
+      name,
+      finalizationIntentSchema,
+    );
+    if (!intent && !command.new_attempt)
+      throw new ClientError(
+        'transcription_request_missing',
+        'There is no saved local request to reconcile. Refresh AI activity to inspect the existing server job.',
+      );
+    const mutex = `${profile}:${command.recording_id}`;
+    if (this.finalizationWrites.has(mutex))
+      throw new ClientError(
+        'transcription_busy',
+        'Wait for the current transcription request to finish.',
+      );
+    this.finalizationWrites.add(mutex);
+    const controller = new AbortController();
+    this.transcriptReads.add(controller);
+    try {
+      const previous = intent;
+      if (
+        previous?.job_id &&
+        command.new_attempt &&
+        previous.consent_id !== command.consent_id
+      ) {
+        const job = await context.api.request(
+          `/v1/jobs/${previous.job_id}`,
+          jobSchema,
+          { signal: controller.signal },
+        );
+        context.authorize();
+        if (job.document_id !== id || job.recording_id !== command.recording_id)
+          throw new ClientError(
+            'invalid_server_response',
+            'The previous transcription does not belong to this recording.',
+          );
+        if (['queued', 'running', 'retry_wait'].includes(job.state))
+          throw new ClientError(
+            'job_in_progress',
+            'Cancel or finish the existing transcription before starting a new one.',
+          );
+        intent = null;
+      }
+      if (!intent) {
+        intent = finalizationIntentSchema.parse({
+          body: {
+            base_revision: this.local.details(profile, id).transcript_revision,
+            locale: command.locale,
+            seal_sha256: createHash('sha256')
+              .update(canonicalJson(upload.plan.seal))
+              .digest('hex'),
+            accept_incomplete: command.accept_incomplete,
+          },
+          key: `finalize:${randomUUID()}`,
+          consent_id: command.consent_id,
+          job_id: null,
+        });
+        this.local.putArtifact(profile, id, name, intent);
+      } else if (
+        command.new_attempt &&
+        (intent.body.locale !== command.locale ||
+          intent.body.accept_incomplete !== command.accept_incomplete)
+      )
+        throw new ClientError(
+          'transcription_intent_frozen',
+          `Reconcile the saved ${intent.body.locale} transcription request before changing its language or capture acceptance.`,
+        );
+      const job = await context.api.finalizeRecording(
+        command.recording_id,
+        intent.body,
+        intent.key,
+        controller.signal,
+      );
+      context.authorize();
+      if (controller.signal.aborted)
+        throw new ClientError(
+          'request_cancelled',
+          'The request was cancelled; its saved idempotency key was preserved.',
+        );
+      if (
+        job.kind !== 'recording_transcription' ||
+        job.recording_id !== command.recording_id ||
+        job.document_id !== id
+      )
+        throw new ClientError(
+          'invalid_server_response',
+          'The service returned an inconsistent recording transcription.',
+        );
+      this.local.putArtifact(profile, id, name, { ...intent, job_id: job.id });
+      this.cacheJob(profile, id, job);
+    } catch (error) {
+      this.artifactRevocation(error, context.profile, context.api);
+      throw error;
+    } finally {
+      this.transcriptReads.delete(controller);
+      this.finalizationWrites.delete(mutex);
+    }
+    return this.snapshot();
+  }
+  async controlTranscription(
+    command: Extract<DesktopCommand, { operation: 'controlTranscriptionJob' }>,
+  ) {
+    this.assertScope(command.scope);
+    const context = this.recordingUploadContext();
+    if (!context)
+      throw new ClientError(
+        'workspace_not_connected',
+        'Reconnect before changing server transcription jobs.',
+      );
+    this.local.get(context.profile, command.id);
+    const controller = new AbortController();
+    this.transcriptReads.add(controller);
+    try {
+      const job = await context.api.request(
+        `/v1/jobs/${command.job_id}`,
+        jobSchema,
+        { signal: controller.signal },
+      );
+      context.authorize();
+      if (
+        job.document_id !== command.id ||
+        job.kind !== 'recording_transcription'
+      )
+        throw new ClientError(
+          'invalid_desktop_request',
+          'This transcription does not belong to the selected meeting.',
+        );
+      const result =
+        command.action === 'cancel'
+          ? (
+              await context.api.request(
+                `/v1/jobs/${job.id}/cancel`,
+                z.strictObject({
+                  already_terminal: z.boolean(),
+                  job: jobSchema,
+                }),
+                { method: 'POST', body: {}, signal: controller.signal },
+              )
+            ).job
+          : await context.api.request(`/v1/jobs/${job.id}/retry`, jobSchema, {
+              method: 'POST',
+              body: { confirmed: true },
+              signal: controller.signal,
+            });
+      context.authorize();
+      if (controller.signal.aborted)
+        throw new ClientError(
+          'request_cancelled',
+          'The transcription control request was cancelled.',
+        );
+      this.cacheJob(context.profile, command.id, result);
+    } catch (error) {
+      this.artifactRevocation(error, context.profile, context.api);
+      throw error;
+    } finally {
+      this.transcriptReads.delete(controller);
+    }
+    return this.snapshot();
+  }
+  async applyTranscript(
+    command: Extract<DesktopCommand, { operation: 'applyTranscript' }>,
+  ) {
+    this.assertScope(command.scope);
+    const context = this.recordingUploadContext();
+    if (!context)
+      throw new ClientError(
+        'workspace_not_connected',
+        'Reconnect before applying a transcript.',
+      );
+    const profile = context.profile,
+      id = command.id;
+    const name = `transcript-application:${command.source_revision}:${command.base_revision}`;
+    let key = this.local.getArtifact(profile, id, name, idempotencyKey);
+    if (!key) {
+      key = `apply:${randomUUID()}`;
+      this.local.putArtifact(profile, id, name, key);
+    }
+    const controller = new AbortController();
+    this.transcriptReads.add(controller);
+    try {
+      const page = await context.api.request(
+        `/v1/documents/${id}/transcript/apply`,
+        transcriptPageSchema,
+        {
+          method: 'POST',
+          body: {
+            base_revision: command.base_revision,
+            source_revision: command.source_revision,
+            confirmed: true,
+          },
+          key,
+          signal: controller.signal,
+        },
+      );
+      context.authorize();
+      if (controller.signal.aborted)
+        throw new ClientError(
+          'request_cancelled',
+          'The transcript decision was cancelled; its saved request key was preserved.',
+        );
+      if (page.document_id !== id || page.is_candidate || page.offset !== 0)
+        throw new ClientError(
+          'invalid_server_response',
+          'The service returned an inconsistent applied transcript.',
+        );
+      this.local.putArtifact(profile, id, `transcript:${page.revision}`, page);
+      await this.synchronize();
+    } catch (error) {
+      this.artifactRevocation(error, context.profile, context.api);
+      throw error;
+    } finally {
+      this.transcriptReads.delete(controller);
+    }
+    return this.snapshot();
   }
   private schedule(delay: number) {
     if (

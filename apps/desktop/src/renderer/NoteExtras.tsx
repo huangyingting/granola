@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react';
+import type { z } from 'zod';
 import { richTextToPlainText } from '@windows-ai-notes/contracts/content';
 import {
   makeTranscriptPage,
   type TranscriptPage,
+  transcriptTimelinePageSchema,
 } from '@windows-ai-notes/contracts/server';
 import type {
   DesktopState,
@@ -10,8 +12,128 @@ import type {
   EditableDraft,
 } from '@windows-ai-notes/contracts/desktop';
 
-function Transcript({ state, id }: { state: DesktopState; id: string }) {
+function time(milliseconds: number) {
+  return `${Math.floor(milliseconds / 60_000)}:${String(Math.floor(milliseconds / 1000) % 60).padStart(2, '0')}`;
+}
+function CaptureTimeline({
+  scope,
+  id,
+  revision,
+  total,
+}: {
+  scope: number;
+  id: string;
+  revision: number;
+  total: number;
+}) {
+  const [page, setPage] = useState<z.infer<
+    typeof transcriptTimelinePageSchema
+  > | null>(null);
+  const [previous, setPrevious] = useState<number[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  async function load(offset: number, back = false) {
+    setBusy(true);
+    setError('');
+    try {
+      const response = await window.notes.invoke({
+        operation: 'getTranscriptTimeline',
+        scope,
+        id,
+        revision,
+        offset,
+      });
+      if (!response.ok) throw new Error(response.error.message);
+      if (
+        !('transcript_timeline' in response) ||
+        response.transcript_timeline.scope !== scope
+      )
+        throw new Error('The capture evidence did not match this workspace.');
+      setPrevious((positions) =>
+        back ? positions.slice(0, -1) : page ? [...positions, page.offset] : [],
+      );
+      setPage(response.transcript_timeline.page);
+    } catch (failure) {
+      setError(
+        failure instanceof Error
+          ? failure.message
+          : 'Capture evidence could not be loaded.',
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <details
+      onToggle={(event) => {
+        if (event.currentTarget.open && !page && !busy) void load(0);
+      }}
+    >
+      <summary>
+        Capture evidence <span>{total} events and gaps</span>
+      </summary>
+      {page?.entries.map((entry, index) => (
+        <p className="quiet-note" key={page.offset + index}>
+          {entry.kind === 'gap'
+            ? `${time(entry.value.start_ms)}-${time(entry.value.end_ms)}: ${entry.value.reason.replaceAll('_', ' ')}`
+            : `${time(entry.value.clock_ms)}: ${entry.value.event_type.replaceAll('.', ' ')}`}
+        </p>
+      ))}
+      {busy && <p role="status">Loading capture evidence...</p>}
+      {error && (
+        <p role="alert" className="account-alert">
+          {error}
+        </p>
+      )}
+      <div className="inline-actions">
+        {previous.length > 0 && (
+          <button
+            className="quiet-button"
+            disabled={busy}
+            onClick={() => void load(previous[previous.length - 1]!, true)}
+          >
+            Previous evidence page
+          </button>
+        )}
+        {page?.has_more && (
+          <button
+            className="quiet-button"
+            disabled={busy}
+            onClick={() => void load(page.offset + page.entries.length)}
+          >
+            Next evidence page
+          </button>
+        )}
+        {error && (
+          <button
+            className="quiet-button"
+            disabled={busy}
+            onClick={() => void load(page?.offset ?? 0)}
+          >
+            Retry capture evidence
+          </button>
+        )}
+      </div>
+      <p className="quiet-note">
+        Only recorded events and known gaps are shown. This is not proof that
+        every spoken word was captured.
+      </p>
+    </details>
+  );
+}
+function Transcript({
+  state,
+  id,
+  revision = state.transcript_revision,
+  candidate = false,
+}: {
+  state: DesktopState;
+  id: string;
+  revision?: number;
+  candidate?: boolean;
+}) {
   function initial(): TranscriptPage | null {
+    if (revision !== state.transcript_revision) return null;
     const value = state.transcript;
     if (!value) return null;
     if ('offset' in value) return value;
@@ -30,6 +152,7 @@ function Transcript({ state, id }: { state: DesktopState; id: string }) {
   const [previous, setPrevious] = useState<number[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [applyBase, setApplyBase] = useState<number | null>(null);
   useEffect(() => {
     setPage((current) => current ?? initial());
   }, [state.transcript]);
@@ -44,7 +167,7 @@ function Transcript({ state, id }: { state: DesktopState; id: string }) {
         operation: 'getTranscriptPage',
         scope: state.scope,
         id,
-        revision: state.transcript_revision,
+        revision,
         offset,
       });
       if (!response.ok) throw new Error(response.error.message);
@@ -73,13 +196,60 @@ function Transcript({ state, id }: { state: DesktopState; id: string }) {
       setLoading(false);
     }
   }
+  async function apply() {
+    if (applyBase === null) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const response = await window.notes.invoke({
+        operation: 'applyTranscript',
+        scope: state.scope,
+        id,
+        source_revision: revision,
+        base_revision: applyBase,
+        confirmed: true,
+      });
+      if (!response.ok) throw new Error(response.error.message);
+      setApplyBase(null);
+    } catch (failure) {
+      setError(
+        failure instanceof Error
+          ? failure.message
+          : 'The transcript could not be applied.',
+      );
+    } finally {
+      setLoading(false);
+    }
+  }
+  const alreadyApplied =
+    state.transcript &&
+    'based_on_revision' in state.transcript &&
+    state.transcript.based_on_revision === revision;
   return (
-    <details>
+    <details
+      onToggle={(event) => {
+        if (event.currentTarget.open && !page && !loading)
+          void load(0, 'first');
+      }}
+    >
       <summary>
-        Transcript <span>Revision {state.transcript_revision}</span>
+        {candidate ? 'Generated transcript' : 'Transcript'}{' '}
+        <span>Revision {revision}</span>
       </summary>
       {page ? (
         <>
+          {page.recording && (
+            <p className="quiet-note">
+              {page.recording.tracks
+                .map((track) =>
+                  track.kind === 'microphone' ? 'Microphone' : 'System audio',
+                )
+                .join(' + ')}
+              . Sources are not speaker identities.
+              {page.recording.partial &&
+                ' Incomplete recording: missing audio was explicitly accepted.'}
+            </p>
+          )}
           <p className="quiet-note" role="status">
             {page.total_segments === 0
               ? 'This transcript revision has no segments.'
@@ -88,11 +258,11 @@ function Transcript({ state, id }: { state: DesktopState; id: string }) {
           {page.segments.map((segment) => (
             <p className="transcript-segment" key={segment.id}>
               <span>
-                {Math.floor(segment.start_ms / 60_000)}:
-                {String(Math.floor(segment.start_ms / 1000) % 60).padStart(
-                  2,
-                  '0',
-                )}
+                {time(segment.start_ms)}
+                {segment.origin &&
+                  ` / ${segment.origin.kind === 'microphone' ? 'Microphone' : 'System audio'}`}
+                {segment.origin?.time_basis === 'unmapped_clock' &&
+                  ' / unmapped capture clock'}
               </span>
               {segment.text}
             </p>
@@ -121,6 +291,56 @@ function Transcript({ state, id }: { state: DesktopState; id: string }) {
               </button>
             )}
           </div>
+          {!!page.recording?.timeline_count && (
+            <CaptureTimeline
+              scope={state.scope}
+              id={id}
+              revision={revision}
+              total={page.recording.timeline_count}
+            />
+          )}
+          {candidate && page.is_candidate && !alreadyApplied && (
+            <div className="audio-configuration">
+              {applyBase === null ? (
+                <button
+                  className="secondary"
+                  disabled={loading || !state.connection.user_id}
+                  onClick={() => setApplyBase(state.transcript_revision)}
+                >
+                  Apply generated transcript
+                </button>
+              ) : (
+                <>
+                  <p>
+                    Replace canonical transcript revision {applyBase} with this
+                    generated version? Earlier revisions stay in history.
+                    Meeting notes are not replaced.
+                  </p>
+                  <div className="inline-actions">
+                    <button
+                      className="quiet-button"
+                      disabled={loading}
+                      onClick={() => setApplyBase(null)}
+                    >
+                      Keep current transcript
+                    </button>
+                    <button
+                      className="primary"
+                      disabled={loading}
+                      onClick={() => void apply()}
+                    >
+                      Confirm transcript replacement
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+          {candidate && alreadyApplied && (
+            <p className="quiet-note">
+              This generated version is already applied.
+            </p>
+          )}
         </>
       ) : (
         <>
@@ -151,6 +371,107 @@ function Transcript({ state, id }: { state: DesktopState; id: string }) {
         have not opened require a connection.
       </p>
     </details>
+  );
+}
+function RecordingJobActions({
+  state,
+  id,
+  job,
+}: {
+  state: DesktopState;
+  id: string;
+  job: DesktopState['jobs'][number];
+}) {
+  const [choice, setChoice] = useState<'cancel' | 'retry' | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const active = ['queued', 'running', 'retry_wait'].includes(job.state);
+  async function act() {
+    if (!choice) return;
+    setBusy(true);
+    setError('');
+    try {
+      const response = await window.notes.invoke({
+        operation: 'controlTranscriptionJob',
+        scope: state.scope,
+        id,
+        job_id: job.id,
+        action: choice,
+        confirmed: true,
+      });
+      if (!response.ok) throw new Error(response.error.message);
+      setChoice(null);
+    } catch (failure) {
+      setError(
+        failure instanceof Error
+          ? failure.message
+          : 'The transcription job could not be changed.',
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <>
+      {job.progress && (
+        <>
+          <progress
+            aria-label="Recording transcription progress"
+            value={job.progress.completed_chunks}
+            max={job.progress.total_chunks}
+          />
+          <p className="quiet-note">
+            {job.progress.completed_chunks} / {job.progress.total_chunks} chunks
+            durably processed.
+            {job.progress.uncertain_requests > 0 &&
+              ` ${job.progress.uncertain_requests} earlier requests have uncertain provider billing.`}
+          </p>
+        </>
+      )}
+      <div className="inline-actions">
+        {(active || job.state === 'failed') && (
+          <button
+            className="secondary"
+            disabled={busy || !state.connection.user_id}
+            onClick={() => setChoice(active ? 'cancel' : 'retry')}
+          >
+            {active ? 'Cancel transcription' : 'Resume saved processing'}
+          </button>
+        )}
+      </div>
+      {choice && (
+        <div className="audio-configuration">
+          <p>
+            {choice === 'cancel'
+              ? 'Stop future requests and erase unpublished processing drafts? Requests already sent may still be billed. Saved audio and published transcripts remain.'
+              : 'Resume completed chunks with the original speech configuration? Interrupted requests without saved results may be sent and charged again. Expired drafts require a separately confirmed new transcription.'}
+          </p>
+          <div className="inline-actions">
+            <button
+              className="quiet-button"
+              disabled={busy}
+              onClick={() => setChoice(null)}
+            >
+              Go back
+            </button>
+            <button
+              className="secondary"
+              disabled={busy}
+              onClick={() => void act()}
+            >
+              {choice === 'cancel'
+                ? 'Confirm transcription cancellation'
+                : 'Confirm processing resume'}
+            </button>
+          </div>
+        </div>
+      )}
+      {error && (
+        <p role="alert" className="account-alert">
+          {error}
+        </p>
+      )}
+    </>
   );
 }
 
@@ -290,11 +611,13 @@ export function NoteExtras({
               </summary>
               {state.jobs.map((job) => (
                 <article className="job-card" key={job.id}>
-                  <div>
+                  <div className="job-heading">
                     <strong>
                       {job.kind === 'summary'
                         ? 'Meeting summary'
-                        : 'Transcription'}
+                        : job.kind === 'recording_transcription'
+                          ? 'Recording transcription'
+                          : 'Transcription'}
                     </strong>
                     <span>{job.state.replaceAll('_', ' ')}</span>
                   </div>
@@ -310,11 +633,38 @@ export function NoteExtras({
                   {job.result?.kind === 'summary' && (
                     <p>{job.result.summary.overview.text}</p>
                   )}
+                  {job.kind === 'recording_transcription' && (
+                    <RecordingJobActions
+                      state={state}
+                      id={draft.id}
+                      job={job}
+                    />
+                  )}
+                  {job.result?.kind === 'recording_transcription' && (
+                    <>
+                      <p className="quiet-note">
+                        {job.result.applied
+                          ? 'Published transcript'
+                          : 'Saved separately: review before replacing your transcript'}
+                        .{' '}
+                        {job.result.partial &&
+                          'The source recording is incomplete.'}
+                      </p>
+                      {!job.result.applied && (
+                        <Transcript
+                          state={state}
+                          id={draft.id}
+                          revision={job.result.transcript_revision}
+                          candidate
+                        />
+                      )}
+                    </>
+                  )}
                 </article>
               ))}
               <p className="quiet-note">
-                Cached activity is read-only. A summary never silently replaces
-                your notes.
+                Showing last synced activity. Connect for server job controls. A
+                summary never silently replaces your notes.
               </p>
             </details>
           )}

@@ -75,6 +75,7 @@ function App() {
       if ('audio_devices' in response) return null;
       if ('audio_state' in response) return null;
       if ('transcript_page' in response) return null;
+      if ('transcript_timeline' in response) return null;
       if (
         !discardEditor &&
         ['bootstrap', 'search'].includes(command.operation) &&
@@ -856,6 +857,7 @@ function Note({
           scope={state.scope}
           document={draft.id}
           beforeStart={save}
+          jobs={state.jobs}
         />
       )}
       <input

@@ -3,16 +3,20 @@ import { createAzureProviders } from '@windows-ai-notes/ai';
 import { loadAzureConfig } from '@windows-ai-notes/ai/config';
 import { Database, requireDatabaseUrl } from '@windows-ai-notes/db';
 import { runOnce } from './worker.js';
+import { loadStorageConfig, RecordingBlobs } from '@windows-ai-notes/storage';
 
 async function main() {
   const providers = createAzureProviders(loadAzureConfig());
   const db = new Database(requireDatabaseUrl());
+  const config = loadStorageConfig();
+  const storage = config ? new RecordingBlobs(config) : null;
   const shutdown = new AbortController();
   process.once('SIGTERM', () => shutdown.abort());
   process.once('SIGINT', () => shutdown.abort());
   let nextCleanup = 0;
   try {
     await db.assertReady();
+    await storage?.assertReady();
     console.log(
       JSON.stringify({ code: 'worker_ready', provider: providers.provider }),
     );
@@ -22,7 +26,7 @@ async function main() {
           await db.cleanup();
           nextCleanup = Date.now() + 60_000;
         }
-        if (!(await runOnce(db, providers, shutdown.signal)))
+        if (!(await runOnce(db, providers, shutdown.signal, storage)))
           await delay(500, undefined, { signal: shutdown.signal });
       } catch (error) {
         if (shutdown.signal.aborted) break;
@@ -36,12 +40,13 @@ async function main() {
       }
     }
   } finally {
+    storage?.close();
     await db.close();
   }
 }
 main().catch(() => {
   console.error(
-    'worker_start_failed: check Azure configuration and database migrations. Secrets were not logged.',
+    'worker_start_failed: check Azure/storage configuration and database migrations. Secrets were not logged.',
   );
   process.exitCode = 1;
 });

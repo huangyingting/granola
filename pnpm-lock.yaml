@@ -218,6 +218,9 @@ importers:
       '@windows-ai-notes/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@windows-ai-notes/storage':
+        specifier: workspace:*
+        version: link:../../packages/storage
 
   packages/ai:
     dependencies:
@@ -255,6 +258,9 @@ importers:
       '@windows-ai-notes/storage':
         specifier: workspace:*
         version: link:../storage
+      '@windows-ai-notes/worker':
+        specifier: workspace:*
+        version: link:../../apps/worker
 
   packages/contracts:
     dependencies:

@@ -7,6 +7,7 @@ import {
   ServiceError,
   resourceId,
   idempotencyKey,
+  finalizeTranscriptSchema,
 } from '@windows-ai-notes/contracts/server';
 import {
   createRecordingSchema,
@@ -127,6 +128,22 @@ export function registerRecordingRoutes(
     const { id } = parse(idParams, request.params);
     const { offset } = parse(pageQuery, request.query);
     return db.recordings.chunks(principal(request).userId, id, offset);
+  });
+  app.post('/v1/recordings/:id/finalize-transcript', async (request, reply) => {
+    storage();
+    const { id } = parse(idParams, request.params);
+    const input = parse(finalizeTranscriptSchema, request.body);
+    const key = parse(idempotencyKey, request.headers['idempotency-key']);
+    return reply
+      .code(202)
+      .send(
+        await db.enqueueRecordingTranscription(
+          principal(request).userId,
+          id,
+          input,
+          key,
+        ),
+      );
   });
   app.post('/v1/recordings/:id/chunks', async (request, reply) => {
     const { id } = parse(idParams, request.params);

@@ -9,11 +9,14 @@ import {
   type Segment,
 } from '@windows-ai-notes/contracts/server';
 import type { Database } from '@windows-ai-notes/db';
+import type { RecordingBlobs } from '@windows-ai-notes/storage';
+import { transcribeRecording } from './recording.js';
 
 export async function runOnce(
   db: Database,
   providers: AiProviders,
   shutdown = new AbortController().signal,
+  storage: RecordingBlobs | null = null,
 ): Promise<boolean> {
   const job = await db.claim();
   if (!job) return false;
@@ -39,41 +42,52 @@ export async function runOnce(
   })();
   try {
     const signal = AbortSignal.any([shutdown, providerAbort.signal]);
-    let result: JobResult;
-    let transcript: Segment[] | undefined;
-    if (job.input.kind === 'summary') {
-      const generated = await providers.summarize(job.input.snapshot, signal);
-      result = {
-        kind: 'summary',
-        summary: validateSummary(generated.summary, job.input.snapshot),
-        provider: providers.provider,
-        configuration_version: providers.configurationVersion,
-        prompt_version: PROMPT_VERSION,
-        usage: generated.usage,
-      };
-    } else {
-      if (!job.audio)
+    if (job.input.kind === 'recording_transcription') {
+      if (!storage)
         throw new ServiceError(
-          'recording_incomplete',
-          'The queued audio clip is missing.',
-          409,
+          'storage_not_configured',
+          'The worker needs private recording storage before it can transcribe saved audio.',
+          503,
         );
-      const generated = await providers.transcribe(
-        job.audio,
-        job.input.locale,
-        signal,
-      );
-      transcript = segmentsSchema.parse(generated.segments);
-      result = {
-        kind: 'transcription',
-        transcript_revision: job.input.base_transcript_revision + 1,
-        segment_count: transcript.length,
-        provider: providers.provider,
-        configuration_version: providers.configurationVersion,
-        usage: generated.usage,
-      };
+      await transcribeRecording(db, job, providers, storage, signal);
+      await db.finishRecording(job);
+    } else {
+      let result: JobResult;
+      let transcript: Segment[] | undefined;
+      if (job.input.kind === 'summary') {
+        const generated = await providers.summarize(job.input.snapshot, signal);
+        result = {
+          kind: 'summary',
+          summary: validateSummary(generated.summary, job.input.snapshot),
+          provider: providers.provider,
+          configuration_version: providers.configurationVersion,
+          prompt_version: PROMPT_VERSION,
+          usage: generated.usage,
+        };
+      } else {
+        if (!job.audio)
+          throw new ServiceError(
+            'recording_incomplete',
+            'The queued audio clip is missing.',
+            409,
+          );
+        const generated = await providers.transcribe(
+          job.audio,
+          job.input.locale,
+          signal,
+        );
+        transcript = segmentsSchema.parse(generated.segments);
+        result = {
+          kind: 'transcription',
+          transcript_revision: job.input.base_transcript_revision + 1,
+          segment_count: transcript.length,
+          provider: providers.provider,
+          configuration_version: providers.configurationVersion,
+          usage: generated.usage,
+        };
+      }
+      await db.finish(job, resultSchema.parse(result), null, transcript);
     }
-    await db.finish(job, resultSchema.parse(result), null, transcript);
   } catch (error) {
     const failure = shutdown.aborted
       ? new ServiceError(

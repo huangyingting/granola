@@ -10,6 +10,12 @@ import {
   updateNotesSchema,
   makeTranscriptPage,
   type Segment,
+  type Job,
+  transcriptHeaderSchema,
+  transcriptTimelineEntrySchema,
+  jobSchema,
+  finalizeTranscriptSchema,
+  applyTranscriptSchema,
 } from '@windows-ai-notes/contracts/server';
 import { canonicalJson } from '@windows-ai-notes/contracts/content';
 import { oidcFixture } from './oidc.fixture.js';
@@ -18,10 +24,10 @@ type Document = z.infer<typeof documentSchema>;
 type Change = {
   seq: string;
   document_id: string;
-  kind: 'document' | 'transcript' | 'deleted';
+  kind: 'document' | 'transcript' | 'job' | 'deleted';
   revision: number;
   transcript_revision: number;
-  job_id: null;
+  job_id: string | null;
   created_at: string;
 };
 
@@ -35,14 +41,26 @@ export async function desktopFixture() {
   const changes: { workspace: string; value: Change }[] = [];
   const transcripts = new Map<
     string,
-    {
-      document_id: string;
-      revision: number;
-      source: 'manual';
+    Omit<z.infer<typeof transcriptHeaderSchema>, 'total_segments'> & {
       segments: Segment[];
     }
   >();
-  const replays = new Map<string, { hash: string; value: Document | null }>();
+  const timelines = new Map<
+    string,
+    z.infer<typeof transcriptTimelineEntrySchema>[]
+  >();
+  const jobs = new Map<string, Job>();
+  const recordings = new Map<
+    string,
+    {
+      document_id: string;
+      id: string;
+      track_id: string;
+      seal_sha256: string;
+      partial: boolean;
+    }
+  >();
+  const replays = new Map<string, { hash: string; value: unknown }>();
   const tombstones = new Set<string>();
   const state = {
     active: true,
@@ -50,11 +68,17 @@ export async function desktopFixture() {
     user,
     workspace,
     documents,
+    jobs,
+    lose_finalization_response: false,
     workspaces: [{ id: workspace, name: 'Synthetic cloud workspace' }],
     failures: [] as unknown[],
   };
   const keys = createRemoteJWKSet(new URL('keys', issuer.state.issuer));
-  function record(document: Document, kind: Change['kind'] = 'document') {
+  function record(
+    document: Document,
+    kind: Change['kind'] = 'document',
+    jobId: string | null = null,
+  ) {
     changes.push({
       workspace: document.workspace_id,
       value: {
@@ -63,7 +87,7 @@ export async function desktopFixture() {
         kind,
         revision: document.revision,
         transcript_revision: document.transcript_revision,
-        job_id: null,
+        job_id: jobId,
         created_at: new Date().toISOString(),
       },
     });
@@ -122,6 +146,123 @@ export async function desktopFixture() {
     record(document, 'deleted');
     documents.delete(id);
     tombstones.add(id);
+  }
+  function transcript(id: string, text: string) {
+    const document = documents.get(id);
+    if (!document) throw new Error('Missing synthetic transcript document.');
+    const revision =
+      Math.max(
+        0,
+        ...[...transcripts.values()]
+          .filter((value) => value.document_id === id)
+          .map((value) => value.revision),
+      ) + 1;
+    transcripts.set(`${id}:${revision}`, {
+      document_id: id,
+      revision,
+      source: 'manual',
+      segments: [{ id: randomUUID(), start_ms: 0, end_ms: 1000, text }],
+    });
+    const next = { ...document, transcript_revision: revision };
+    documents.set(id, next);
+    record(next, 'transcript');
+  }
+  function publishCandidate(id: string) {
+    const job = jobs.get(id);
+    const source = job?.recording_id ? recordings.get(job.recording_id) : null;
+    const document = job ? documents.get(job.document_id) : null;
+    if (!job || !source || !document)
+      throw new Error('Missing synthetic recording transcription.');
+    const revision =
+      Math.max(
+        0,
+        ...[...transcripts.values()]
+          .filter((value) => value.document_id === document.id)
+          .map((value) => value.revision),
+      ) + 1;
+    const epoch = randomUUID();
+    const timeline: z.infer<typeof transcriptTimelineEntrySchema>[] = [
+      {
+        kind: 'event',
+        value: {
+          event_type: 'capture.started',
+          clock_ms: 0,
+          capture_epoch: epoch,
+          code: null,
+        },
+      },
+      {
+        kind: 'gap',
+        value: {
+          track_id: source.track_id,
+          start_ms: 500,
+          end_ms: 900,
+          reason: 'paused',
+        },
+      },
+    ];
+    transcripts.set(`${document.id}:${revision}`, {
+      document_id: document.id,
+      revision,
+      source: 'azure_speech_fast',
+      is_candidate: true,
+      based_on_revision: 1,
+      recording: {
+        id: source.id,
+        seal_sha256: source.seal_sha256,
+        partial: source.partial,
+        tracks: [{ track_id: source.track_id, kind: 'microphone' }],
+        timeline_count: timeline.length,
+      },
+      segments: [
+        {
+          id: randomUUID(),
+          start_ms: 0,
+          end_ms: 400,
+          text: 'Synthetic generated recording evidence.',
+          origin: {
+            recording_id: source.id,
+            track_id: source.track_id,
+            kind: 'microphone',
+            capture_epoch: epoch,
+            chunk_id: randomUUID(),
+            start_offset_ms: 0,
+            end_offset_ms: 400,
+            time_basis: 'chunk_clock_linear',
+          },
+        },
+      ],
+    });
+    timelines.set(`${document.id}:${revision}`, timeline);
+    jobs.set(
+      id,
+      jobSchema.parse({
+        ...job,
+        state: 'succeeded',
+        attempt: 1,
+        input_stale: true,
+        progress: {
+          completed_chunks: 1,
+          total_chunks: 1,
+          audio_ms: 1000,
+          uncertain_requests: 0,
+        },
+        result: {
+          kind: 'recording_transcription',
+          recording_id: source.id,
+          transcript_revision: revision,
+          segment_count: 1,
+          processed_chunks: 1,
+          uncertain_requests: 0,
+          applied: false,
+          partial: source.partial,
+          provider: 'fixture',
+          configuration_version: 'synthetic-recording-v1',
+          usage: { input_tokens: 0, output_tokens: 0, audio_ms: 1000 },
+        },
+      }),
+    );
+    record(document, 'job', id);
   }
   function send(response: ServerResponse, value: unknown, status = 200) {
     response.writeHead(status, { 'Content-Type': 'application/json' });
@@ -197,9 +338,21 @@ export async function desktopFixture() {
       const parts = path.split('/');
       const id = parts[3] ?? '';
       const existing = documents.get(id);
+      if (request.method === 'GET' && parts[2] === 'jobs') {
+        const job = jobs.get(id);
+        return job
+          ? send(response, job)
+          : error(response, 'job_not_found', 404);
+      }
       if (request.method === 'GET' && parts[2] === 'documents') {
         if (!existing) return error(response, 'document_not_found', 404);
-        if (parts[4] === 'jobs') return send(response, { jobs: [] });
+        if (parts[4] === 'jobs')
+          return send(response, {
+            jobs: [...jobs.values()]
+              .reverse()
+              .filter((job) => job.document_id === id)
+              .slice(0, 20),
+          });
         if (parts[4] === 'transcript') {
           if (!state.transcript_online)
             return error(response, 'service_unavailable', 503);
@@ -208,15 +361,25 @@ export async function desktopFixture() {
           );
           if (!transcript) return error(response, 'transcript_not_found', 404);
           const offset = Number(url.searchParams.get('offset') ?? 0);
+          if (parts[5] === 'timeline') {
+            const entries = timelines.get(`${id}:${transcript.revision}`) ?? [];
+            return send(response, {
+              document_id: id,
+              revision: transcript.revision,
+              offset,
+              total: entries.length,
+              entries: entries.slice(offset, offset + 50),
+              has_more: offset + 50 < entries.length,
+            });
+          }
+          const { segments, ...header } = transcript;
           return send(
             response,
             parts[5] === 'pages'
               ? makeTranscriptPage(
                   {
-                    document_id: id,
-                    revision: transcript.revision,
-                    source: transcript.source,
-                    total_segments: transcript.segments.length,
+                    ...header,
+                    total_segments: segments.length,
                   },
                   offset,
                   transcript.segments.slice(offset),
@@ -245,6 +408,115 @@ export async function desktopFixture() {
         if (hash !== replay.hash)
           return error(response, 'idempotency_conflict', 409);
         return send(response, replay.value, replay.value ? 200 : 204);
+      }
+      if (
+        request.method === 'POST' &&
+        parts[2] === 'recordings' &&
+        parts[4] === 'finalize-transcript'
+      ) {
+        const source = recordings.get(id),
+          value = finalizeTranscriptSchema.parse(body);
+        const document = source ? documents.get(source.document_id) : null;
+        if (!source || !document)
+          return error(response, 'recording_not_found', 404);
+        if (
+          source.seal_sha256 !== value.seal_sha256 ||
+          (source.partial && !value.accept_incomplete)
+        )
+          return error(response, 'recording_source_changed', 409);
+        if (document.transcript_revision !== value.base_revision)
+          return error(response, 'revision_conflict', 409);
+        const job = jobSchema.parse({
+          id: randomUUID(),
+          document_id: document.id,
+          recording_id: source.id,
+          kind: 'recording_transcription',
+          state: 'queued',
+          attempt: 0,
+          input_stale: false,
+          result: null,
+          error: null,
+          created_at: new Date().toISOString(),
+          progress: {
+            completed_chunks: 0,
+            total_chunks: 1,
+            audio_ms: 0,
+            uncertain_requests: 0,
+          },
+        });
+        jobs.set(job.id, job);
+        replays.set(key, { hash, value: job });
+        record(document, 'job', job.id);
+        if (state.lose_finalization_response) {
+          state.lose_finalization_response = false;
+          response.destroy();
+          return;
+        }
+        return send(response, job, 202);
+      }
+      if (request.method === 'POST' && parts[2] === 'jobs') {
+        const job = jobs.get(id),
+          document = job ? documents.get(job.document_id) : null;
+        if (!job || !document) return error(response, 'job_not_found', 404);
+        if (parts[4] === 'cancel') {
+          const terminal = ['succeeded', 'failed', 'cancelled'].includes(
+            job.state,
+          );
+          const next = terminal ? job : { ...job, state: 'cancelled' as const };
+          jobs.set(id, next);
+          record(document, 'job', id);
+          return send(response, { already_terminal: terminal, job: next });
+        }
+        if (parts[4] === 'retry') {
+          z.strictObject({ confirmed: z.literal(true) }).parse(body);
+          if (job.state !== 'failed')
+            return error(response, 'job_not_retryable', 409);
+          const next = { ...job, state: 'queued' as const, error: null };
+          jobs.set(id, next);
+          record(document, 'job', id);
+          return send(response, next);
+        }
+      }
+      if (
+        request.method === 'POST' &&
+        existing &&
+        parts[4] === 'transcript' &&
+        parts[5] === 'apply'
+      ) {
+        const value = applyTranscriptSchema.parse(body);
+        if (existing.transcript_revision !== value.base_revision)
+          return error(response, 'revision_conflict', 409);
+        const source = transcripts.get(`${id}:${value.source_revision}`);
+        if (!source) return error(response, 'transcript_not_found', 404);
+        const revision =
+          Math.max(
+            0,
+            ...[...transcripts.values()]
+              .filter((entry) => entry.document_id === id)
+              .map((entry) => entry.revision),
+          ) + 1;
+        const next = {
+          ...source,
+          revision,
+          is_candidate: false,
+          based_on_revision: value.source_revision,
+        };
+        transcripts.set(`${id}:${revision}`, next);
+        timelines.set(
+          `${id}:${revision}`,
+          timelines.get(`${id}:${value.source_revision}`) ?? [],
+        );
+        const document = { ...existing, transcript_revision: revision };
+        documents.set(id, document);
+        record(document, 'transcript');
+        const { segments, ...header } = next;
+        const page = makeTranscriptPage(
+          { ...header, total_segments: segments.length },
+          0,
+          segments,
+        );
+        replays.set(key, { hash, value: page });
+        return send(response, page);
       }
       let next: Document | null;
       if (request.method === 'POST' && path === '/v1/documents') {
@@ -314,6 +586,21 @@ export async function desktopFixture() {
     seed,
     change,
     remove,
+    transcript,
+    publishCandidate,
+    registerRecording(
+      document_id: string,
+      value: {
+        id: string;
+        track_id: string;
+        seal_sha256: string;
+        partial: boolean;
+      },
+    ) {
+      if (!documents.has(document_id))
+        throw new Error('Missing synthetic recording document.');
+      recordings.set(value.id, { ...value, document_id });
+    },
     url: `http://127.0.0.1:${address.port}`,
     async close() {
       const closed = once(server, 'close');

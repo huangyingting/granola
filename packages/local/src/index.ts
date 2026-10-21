@@ -188,7 +188,8 @@ export class LocalStore {
             version !== 2 &&
             version !== 3 &&
             version !== 4 &&
-            version !== 5
+            version !== 5 &&
+            version !== 6
           )
             throw new LocalError(
               'local_version_unsupported',
@@ -200,7 +201,9 @@ export class LocalStore {
               'drafts',
               'outbox',
               ...(version !== 1 ? ['snapshot_candidates'] : []),
-              ...(version === 4 || version === 5 ? ['recording_uploads'] : []),
+              ...(version === 4 || version === 5 || version === 6
+                ? ['recording_uploads']
+                : []),
             ].every((name) => tables.some((row) => row.name === name))
           )
             throw new LocalError(
@@ -298,7 +301,7 @@ export class LocalStore {
             .get()
         )
           this.putValue('root', 'key-check', 'windows-ai-notes-local-v1');
-        this.database.exec('PRAGMA user_version=5');
+        this.database.exec('PRAGMA user_version=6');
       });
     } catch (error) {
       try {

@@ -354,6 +354,30 @@ export class RecordingStore {
       };
     });
   }
+  async transcriptionSource(
+    user: string,
+    id: string,
+    sealHash: string,
+    tx: Transaction,
+  ) {
+    const row = await this.access(user, id, tx);
+    const snapshot = await this.snapshot(row, tx);
+    if (snapshot.state !== 'ready' || row.seal_hash !== sealHash)
+      throw new ServiceError(
+        'recording_incomplete',
+        'The requested immutable recording seal is not ready.',
+        409,
+        true,
+      );
+    const seal = recordingSealSchema.parse(row.seal);
+    if (!seal.tracks.some((track) => track.end_sample > 0))
+      throw new ServiceError(
+        'empty_audio',
+        'This recording contains no audio to transcribe.',
+        400,
+      );
+    return { ...snapshot, seal };
+  }
   async seal(user: string, id: string, value: RecordingSeal, key: string) {
     const seal = recordingSealSchema.parse(value);
     return this.database.transaction(async (tx) => {
@@ -635,6 +659,7 @@ export class RecordingStore {
     );
   }
   private async erase(tx: Transaction, id: string) {
+    await this.database.recordingTranscriptions.eraseRecording(tx, id);
     await tx.query(
       "UPDATE recordings SET deleted_at=coalesce(deleted_at,now()),tracks='[]'::jsonb,seal=NULL,seal_hash=NULL,seal_key=NULL WHERE id=$1",
       [id],

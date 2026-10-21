@@ -54,6 +54,53 @@ describe('meeting content', () => {
       expect(richTextToPlainText(content)).toBe(text);
     }
   });
+  it('keeps incomplete-source notices, capture labels and unmapped clocks in full exports, even with no recognized speech', async () => {
+    for (const format of ['markdown', 'text'] as const)
+      for (const empty of [false, true]) {
+        const meeting = {
+          title: 'Synthetic recording',
+          notes: 'Independent notes.',
+          tags: [],
+          recording: {
+            partial: true,
+            tracks: [{ kind: 'microphone' as const }],
+          },
+        };
+        const segments = empty
+          ? []
+          : [
+              {
+                start_ms: 0,
+                text: 'Source speech.',
+                origin: {
+                  kind: 'microphone' as const,
+                  time_basis: 'unmapped_clock' as const,
+                },
+              },
+            ];
+        async function* entries() {
+          yield* segments;
+        }
+        let output = '';
+        for await (const part of exportMeetingStream(
+          meeting,
+          entries(),
+          format,
+          false,
+        ))
+          output += part;
+        expect(output).toBe(
+          exportMeeting({ ...meeting, segments }, format, false),
+        );
+        expect(output).toContain('Incomplete recording:');
+        expect(output).toContain('Capture sources are not speaker identities.');
+        expect(output).toContain(
+          empty
+            ? 'No speech segments were recognized.'
+            : '[Microphone; unmapped capture clock] Source speech',
+        );
+      }
+  });
   it('supports bounded basic formatting and derives canonical evidence text', () => {
     const content = richTextSchema.parse({
       type: 'doc',

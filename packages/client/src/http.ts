@@ -5,6 +5,8 @@ import {
   transcriptSchema,
   transcriptPageSchema,
   transcriptPageQuerySchema,
+  transcriptTimelinePageSchema,
+  finalizeTranscriptSchema,
   resourceId,
   syncChangesSchema,
   syncSnapshotSchema,
@@ -300,6 +302,45 @@ export class ApiClient {
         'The service returned an inconsistent transcript page.',
       );
     return page;
+  }
+  async transcriptTimeline(
+    id: string,
+    revision: number,
+    offset: number,
+    signal: AbortSignal,
+  ) {
+    const page = await this.request(
+      `/v1/documents/${resourceId.parse(id)}/transcript/timeline?revision=${z.number().int().positive().parse(revision)}&offset=${z.number().int().min(0).max(20_000).parse(offset)}`,
+      transcriptTimelinePageSchema,
+      { signal },
+    );
+    if (
+      page.document_id !== id ||
+      page.revision !== revision ||
+      page.offset !== offset
+    )
+      throw new ClientError(
+        'invalid_server_response',
+        'The service returned an inconsistent capture timeline.',
+      );
+    return page;
+  }
+  finalizeRecording(
+    id: string,
+    body: z.infer<typeof finalizeTranscriptSchema>,
+    key: string,
+    signal: AbortSignal,
+  ) {
+    return this.request(
+      `/v1/recordings/${resourceId.parse(id)}/finalize-transcript`,
+      jobSchema,
+      {
+        method: 'POST',
+        body: finalizeTranscriptSchema.parse(body),
+        key,
+        signal,
+      },
+    );
   }
   jobs(id: string, signal: AbortSignal) {
     return this.request(
