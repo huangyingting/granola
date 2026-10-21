@@ -58,12 +58,11 @@ test('persists rich text across restart, isolates the renderer and keeps local f
       name: 'Meeting notes',
       exact: true,
     });
-    await editor.press('ControlOrMeta+A');
-    await page.getByRole('button', { name: 'Bold', exact: true }).click();
-    await expect(editor.locator('strong')).toContainText(secret);
-    await editor.press('End');
     await editor.press('Shift+Enter');
     await editor.pressSequentially(secondLine);
+    await editor.press('ControlOrMeta+A');
+    await page.getByRole('button', { name: 'Bold', exact: true }).click();
+    await expect(editor.locator('strong').first()).toContainText(secret);
     await page
       .getByRole('textbox', { name: 'Meeting tags' })
       .fill('Planning, Review');
@@ -83,7 +82,7 @@ test('persists rich text across restart, isolates the renderer and keeps local f
     const exported = await readFile(exportPath, 'utf8');
     expect(exported).toContain('# Synthetic design review');
     expect(exported).toContain('**');
-    expect(exported).toContain(secondLine.replace('.', '\\.'));
+    expect(exported).toContain(secondLine.replace(/[.-]/gu, '\\$&'));
     expect(
       await page.evaluate(() => ({
         node: typeof (window as unknown as { require?: unknown }).require,
