@@ -1,6 +1,6 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import {
-  PROMPT_VERSION,
+  summaryPromptVersion,
   SUMMARY_USAGE_RESERVATION,
   summaryEvidence,
   type AiProviders,
@@ -79,7 +79,7 @@ export async function runOnce(
           summary: validateSummary(generated.summary, job.input.snapshot),
           provider: providers.provider,
           configuration_version: providers.configurationVersion,
-          prompt_version: PROMPT_VERSION,
+          prompt_version: summaryPromptVersion(snapshot),
           usage: generated.usage,
         };
       } else {

@@ -98,6 +98,12 @@ test('recovers one consented summary, inspects frozen evidence, persists review 
     await page
       .getByRole('combobox', { name: 'Summary language' })
       .selectOption('zh');
+    await expect(
+      page.getByRole('combobox', { name: 'Summary template' }),
+    ).toBeEnabled();
+    await page
+      .getByRole('combobox', { name: 'Summary template' })
+      .selectOption('decisions-actions-v1');
     await page
       .getByRole('checkbox', {
         name: 'I agree to Azure processing for this summary.',
@@ -121,6 +127,12 @@ test('recovers one consented summary, inspects frozen evidence, persists review 
     await expect(
       page.getByRole('combobox', { name: 'Summary language' }),
     ).toHaveValue('zh');
+    await expect(
+      page.getByRole('combobox', { name: 'Summary template' }),
+    ).toHaveValue('decisions-actions-v1');
+    await expect(
+      page.getByRole('combobox', { name: 'Summary template' }),
+    ).toBeDisabled();
     await page
       .getByRole('checkbox', {
         name: 'Recover the original authorized request, submitting it if its receipt was lost.',
@@ -136,6 +148,10 @@ test('recovers one consented summary, inspects frozen evidence, persists review 
     const job = [...fixture.state.jobs.values()][0]!;
     fixture.change(remote.id, 'Newer human cloud notes remain authoritative.');
     fixture.publishSummary(job.id);
+    expect(fixture.state.jobs.get(job.id)?.result).toMatchObject({
+      kind: 'summary',
+      prompt_version: 'decisions-actions-v1',
+    });
     await synchronize(application);
     await expect(
       page.getByText('Synthetic generated summary for review.', {
@@ -318,6 +334,12 @@ test('recovers one consented summary, inspects frozen evidence, persists review 
     await expect(
       page.getByRole('textbox', { name: 'Summary review text' }),
     ).toHaveCount(0);
+    await expect(
+      page.getByText('Synthetic generated summary for review.', {
+        exact: true,
+      }),
+    ).toHaveCount(0);
+    await expect(page.locator('.summary-panel .summary-result')).toHaveCount(0);
     await close(application);
     application = null;
   } finally {

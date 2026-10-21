@@ -325,6 +325,9 @@ export class WorkspaceController {
             consent_id: summaryIntent.consent_id,
             job_id: summaryIntent.job_id,
             rejected: summaryIntent.rejected,
+            ...(summaryIntent.body.template_id === undefined
+              ? {}
+              : { template_id: summaryIntent.body.template_id }),
           }
         : null,
       transcript_revision: details?.transcript_revision ?? 0,

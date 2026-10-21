@@ -280,10 +280,17 @@ evidence of clean-machine install/upgrade/rollback compatibility.
 ## Desktop cited summaries
 
 **Generate summary** first asks for separate Azure processing consent and English
-or Chinese output. Main synchronizes saved notes, pins their note/transcript
+or Chinese output, plus a versioned template from the authenticated server catalog.
+The server owns both `meeting-summary-v1` (balanced) and `decisions-actions-v1`
+(confirmed decisions and explicit follow-ups); clients cannot supply arbitrary
+prompts or provider configuration. Main validates the selected capability before
+saving a new request, synchronizes saved notes, pins their note/transcript
 revisions and encrypts a private request key before submitting. **Recover saved
-summary request** reuses that exact key and input after a lost reply or restart;
-an unresolved receipt cannot be replaced with a fresh billable request. A known
+summary request** reuses that exact key and input after a lost reply or restart.
+Its original language and template cannot be changed during recovery, and recovery
+does not depend on fetching the current catalog. Legacy default requests retain
+their original body and durable hash without inserting a default template field.
+An unresolved receipt cannot be replaced with a fresh billable request. A known
 pre-enqueue input rejection instead permits a newly confirmed request after the
 meeting is corrected. Refresh/cancel controls reconcile durable server jobs;
 closing the app does not stop an accepted job or erase uncertain provider usage.
@@ -307,9 +314,9 @@ source locators. Review Markdown/plain-text export does not require changing the
 notes; its native save dialog and final write recheck authorization and the review
 revision. Exported files are **unencrypted**.
 
-This uses the existing fixed `meeting-summary-v1` template and bounded 48,000-byte
-context. Long-meeting extraction, selectable administrator-owned templates,
-current-meeting chat and token-streamed generation are not implemented yet.
+Completed results record their exact immutable prompt version. Summary context
+is still bounded to 48,000 bytes. Long-meeting extraction, current-meeting chat
+and token-streamed generation are not implemented yet.
 
 ## Server setup
 

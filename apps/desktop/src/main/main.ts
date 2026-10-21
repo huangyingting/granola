@@ -359,6 +359,20 @@ async function start() {
             ok: true,
             state: await workspace().applyTranscript(command),
           });
+        if (command.operation === 'getSummaryTemplates') {
+          const catalog = await workspace().summaries.templates(
+            command.scope,
+            command.id,
+          );
+          return desktopResponseSchema.parse({
+            ok: true,
+            summary_templates: {
+              scope: command.scope,
+              document_id: command.id,
+              catalog,
+            },
+          });
+        }
         if (
           command.operation === 'startSummary' ||
           command.operation === 'controlSummary' ||

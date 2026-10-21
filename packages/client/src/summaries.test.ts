@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -247,7 +247,27 @@ describe.skipIf(!databaseUrl)(
       await expect(controller.summaries.start(request)).rejects.toMatchObject({
         code: 'service_unavailable',
       });
+      expect(submissions[0]!.body).toEqual({
+        note_revision: document.revision,
+        transcript_revision: document.transcript_revision,
+        language: 'en',
+      });
       expect(await db.jobs(actor.user_id, document.id)).toHaveLength(1);
+      const stored = await db.pool.query<{ request_hash: string }>(
+        'SELECT request_hash FROM jobs WHERE document_id=$1',
+        [document.id],
+      );
+      expect(stored.rows[0]!.request_hash).toBe(
+        createHash('sha256')
+          .update(
+            JSON.stringify({
+              note_revision: document.revision,
+              transcript_revision: document.transcript_revision,
+              language: 'en',
+            }),
+          )
+          .digest('hex'),
+      );
       expect(controller.snapshot().summary_submission).toEqual({
         language: 'en',
         consent_id: request.consent_id,
@@ -309,6 +329,102 @@ describe.skipIf(!databaseUrl)(
         language: 'zh',
       });
       expect(await db.jobs(actor.user_id, document.id)).toHaveLength(2);
+    });
+    it('validates the authenticated template catalog before saving intent and preserves a chosen version across lost replies and restart', async () => {
+      const document = await connect();
+      expect(
+        (await app.inject({ method: 'GET', url: '/v1/templates' })).statusCode,
+      ).toBe(401);
+      expect(
+        (
+          await controller.summaries.templates(controller.scope, document.id)
+        ).templates.map((item) => item.id),
+      ).toEqual(['meeting-summary-v1', 'decisions-actions-v1']);
+      const original = globalThis.fetch;
+      let supported = false,
+        lose = true,
+        catalogs = 0;
+      const submissions: { key: string | null; body: unknown }[] = [];
+      vi.stubGlobal('fetch', async (...args: Parameters<typeof fetch>) => {
+        if (String(args[0]).endsWith('/v1/templates')) {
+          catalogs++;
+          if (!supported)
+            return new Response(
+              JSON.stringify({
+                templates: [
+                  { id: 'meeting-summary-v1', name: 'Meeting summary' },
+                ],
+              }),
+              { headers: { 'content-type': 'application/json' } },
+            );
+        }
+        const summary = String(args[0]).endsWith('/summary-runs');
+        if (summary)
+          submissions.push({
+            key: new Headers(args[1]?.headers).get('idempotency-key'),
+            body: JSON.parse(String(args[1]?.body)),
+          });
+        const response = await original(...args);
+        if (summary && lose) {
+          lose = false;
+          await response.arrayBuffer();
+          throw new TypeError('Synthetic lost versioned-template receipt.');
+        }
+        return response;
+      });
+      const request = {
+        ...command(document.id),
+        template_id: 'decisions-actions-v1' as const,
+      };
+      await expect(controller.summaries.start(request)).rejects.toMatchObject({
+        code: 'unsupported_summary_template',
+      });
+      expect(submissions).toEqual([]);
+      expect(
+        local.getArtifact(
+          controller.profile,
+          document.id,
+          'summary-submission',
+          summaryIntentSchema,
+        ),
+      ).toBeNull();
+      expect(await db.jobs(actor.user_id, document.id)).toEqual([]);
+      supported = true;
+      await expect(controller.summaries.start(request)).rejects.toMatchObject({
+        code: 'service_unavailable',
+      });
+      expect(controller.snapshot().summary_submission).toMatchObject({
+        template_id: 'decisions-actions-v1',
+        job_id: null,
+      });
+      controller.dispose();
+      local.close();
+      local = new LocalStore(join(directory, 'notes.sqlite'), key);
+      controller = open();
+      const beforeRecovery = catalogs;
+      await expect(
+        controller.summaries.start({
+          ...request,
+          scope: controller.scope,
+          template_id: 'meeting-summary-v1',
+        }),
+      ).rejects.toMatchObject({ code: 'summary_intent_frozen' });
+      await controller.summaries.start({
+        ...request,
+        scope: controller.scope,
+        new_attempt: false,
+      });
+      expect(catalogs).toBe(beforeRecovery);
+      expect(submissions).toHaveLength(2);
+      expect(submissions[1]).toEqual(submissions[0]);
+      expect(await db.jobs(actor.user_id, document.id)).toHaveLength(1);
+      const id = await finish(document.id, (snapshot) =>
+        expect(snapshot.template_id).toBe('decisions-actions-v1'),
+      );
+      expect((await db.job(actor.user_id, id)).result).toMatchObject({
+        kind: 'summary',
+        prompt_version: 'decisions-actions-v1',
+      });
     });
     it('locates only cited frozen evidence after note and transcript edits, and purges it when revocation is observed', async () => {
       const document = await connect('Original frozen note evidence.');

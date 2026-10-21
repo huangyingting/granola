@@ -28,6 +28,10 @@ import {
 } from '@windows-ai-notes/contracts/generation';
 import { canonicalJson } from '@windows-ai-notes/contracts/content';
 import { oidcFixture } from './oidc.fixture.js';
+import {
+  DEFAULT_SUMMARY_TEMPLATE,
+  SUMMARY_TEMPLATES,
+} from '@windows-ai-notes/contracts/templates';
 
 type Document = z.infer<typeof documentSchema>;
 type Change = {
@@ -356,7 +360,7 @@ export async function desktopFixture() {
         },
         provider: 'fixture',
         configuration_version: 'synthetic-summary-v1',
-        prompt_version: 'meeting-summary-v1',
+        prompt_version: snapshot.template_id ?? DEFAULT_SUMMARY_TEMPLATE,
         usage: { input_tokens: 100, output_tokens: 80, audio_ms: 0 },
       },
     });
@@ -406,6 +410,8 @@ export async function desktopFixture() {
         return error(response, 'identity_not_provisioned', 403);
       if (path === '/v1/me') return send(response, { id: user });
       if (path === '/v1/usage') return send(response, state.usage);
+      if (path === '/v1/templates')
+        return send(response, { templates: SUMMARY_TEMPLATES });
       if (path === '/v1/workspaces')
         return send(response, { workspaces: state.workspaces });
       if (path === '/v1/sync/snapshot') {
@@ -571,6 +577,9 @@ export async function desktopFixture() {
           note_revision: value.note_revision,
           transcript_revision: value.transcript_revision,
           language: value.language,
+          ...(value.template_id === undefined
+            ? {}
+            : { template_id: value.template_id }),
           notes: existing.notes,
           segments: structuredClone(
             transcripts.get(`${id}:${value.transcript_revision}`)?.segments ??

@@ -12,6 +12,10 @@ import {
 import { deviceSchema, trackSchema } from './index.js';
 import { audioStateSchema } from './recording.js';
 import {
+  summaryTemplateIdSchema,
+  summaryTemplateCatalogSchema,
+} from './templates.js';
+import {
   summaryReviewSchema,
   summarySourceSchema,
   summarySubmissionSchema,
@@ -44,10 +48,16 @@ const summaryScoped = { ...scoped, id: resourceId, job_id: resourceId };
 export const desktopCommandSchema = z.discriminatedUnion('operation', [
   z.strictObject({ operation: z.literal('bootstrap') }),
   z.strictObject({
+    operation: z.literal('getSummaryTemplates'),
+    ...scoped,
+    id: resourceId,
+  }),
+  z.strictObject({
     operation: z.literal('startSummary'),
     ...scoped,
     id: resourceId,
     language: z.enum(['en', 'zh']),
+    template_id: summaryTemplateIdSchema.optional(),
     confirmed: z.literal(true),
     new_attempt: z.boolean(),
     consent_id: resourceId,
@@ -314,6 +324,14 @@ export const desktopChangeSchema = z.strictObject({
   kind: z.enum(['data', 'scope', 'revoked', 'status', 'audio']),
 });
 export const desktopResponseSchema = z.union([
+  z.strictObject({
+    ok: z.literal(true),
+    summary_templates: z.strictObject({
+      ...scoped,
+      document_id: resourceId,
+      catalog: summaryTemplateCatalogSchema,
+    }),
+  }),
   z.strictObject({
     ok: z.literal(true),
     summary_review: z.strictObject({ ...scoped, review: summaryReviewSchema }),

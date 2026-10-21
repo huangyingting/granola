@@ -19,6 +19,10 @@ import {
   type SummaryReview,
 } from '@windows-ai-notes/contracts/generation';
 import type { DesktopCommand } from '@windows-ai-notes/contracts/desktop';
+import {
+  DEFAULT_SUMMARY_TEMPLATE,
+  summaryTemplateCatalogSchema,
+} from '@windows-ai-notes/contracts/templates';
 import { ApiClient, ClientError } from './http.js';
 
 export const summaryIntentSchema = z.strictObject({
@@ -138,6 +142,13 @@ export class DesktopSummaries {
       this.hooks.reads.delete(read);
     }
   }
+  async templates(scope: number, id: string) {
+    return this.remote(scope, id, (context, signal) =>
+      context.api.request('/v1/templates', summaryTemplateCatalogSchema, {
+        signal,
+      }),
+    );
+  }
   async start(command: Command<'startSummary'>) {
     if (command.confirmed !== true)
       throw problem(
@@ -199,6 +210,18 @@ export class DesktopSummaries {
           }
         }
         if (!intent) {
+          const template = command.template_id ?? DEFAULT_SUMMARY_TEMPLATE;
+          const catalog = await context.api.request(
+            '/v1/templates',
+            summaryTemplateCatalogSchema,
+            { signal },
+          );
+          context.authorize();
+          if (!catalog.templates.some((item) => item.id === template))
+            throw problem(
+              'unsupported_summary_template',
+              'Choose a summary template supported by the connected service.',
+            );
           await this.hooks.synchronize();
           context.authorize();
           const draft = this.local.get(context.profile, command.id);
@@ -225,6 +248,9 @@ export class DesktopSummaries {
               note_revision: document.revision,
               transcript_revision: document.transcript_revision,
               language: command.language,
+              ...(template === DEFAULT_SUMMARY_TEMPLATE
+                ? {}
+                : { template_id: template }),
             },
             key: `summary:${randomUUID()}`,
             consent_id: command.consent_id,
@@ -242,10 +268,14 @@ export class DesktopSummaries {
             'summary_request_rejected',
             'The service rejected this input before creating a job. Review the meeting and confirm a new summary request.',
           );
-        else if (intent.body.language !== command.language)
+        else if (
+          intent.body.language !== command.language ||
+          (intent.body.template_id ?? DEFAULT_SUMMARY_TEMPLATE) !==
+            (command.template_id ?? DEFAULT_SUMMARY_TEMPLATE)
+        )
           throw problem(
             'summary_intent_frozen',
-            'Recover the saved request in its original language before changing the summary language.',
+            'Recover the saved request with its original language and template before changing summary settings.',
           );
         let job: z.infer<typeof jobSchema>;
         try {

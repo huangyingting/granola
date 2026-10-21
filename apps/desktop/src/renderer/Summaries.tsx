@@ -6,6 +6,13 @@ import type {
 } from '@windows-ai-notes/contracts/desktop';
 import type { Summary } from '@windows-ai-notes/contracts/server';
 import {
+  DEFAULT_SUMMARY_TEMPLATE,
+  SUMMARY_TEMPLATES,
+  summaryTemplateIdSchema,
+  type SummaryTemplateCatalog,
+  type SummaryTemplateId,
+} from '@windows-ai-notes/contracts/templates';
+import {
   summaryCitations,
   summaryReviewSchema,
   type SummaryReview,
@@ -43,6 +50,12 @@ export function SummaryPanel(props: Props) {
     null,
   );
   const [language, setLanguage] = useState<'en' | 'zh'>('en');
+  const [template, setTemplate] = useState<SummaryTemplateId>(
+    DEFAULT_SUMMARY_TEMPLATE,
+  );
+  const [templates, setTemplates] = useState<
+    SummaryTemplateCatalog['templates'] | null
+  >(null);
   const [consent, setConsent] = useState(false);
   const consentId = useRef(crypto.randomUUID());
   const [busy, setBusy] = useState(false);
@@ -129,6 +142,8 @@ export function SummaryPanel(props: Props) {
     (!submission.job_id || !jobs.some((item) => item.id === submission.job_id));
   const running = jobs.some((item) => pending(item.state));
   const summary = job?.result?.kind === 'summary' ? job.result.summary : null;
+  const templateVersion =
+    job?.result?.kind === 'summary' ? job.result.prompt_version : null;
   const citations = summary ? summaryCitations(summary) : [];
 
   async function action(run: () => Promise<void>) {
@@ -158,6 +173,40 @@ export function SummaryPanel(props: Props) {
     setConsent(false);
     consentId.current = crypto.randomUUID();
     setLanguage(kind === 'recover' ? submission!.language : language);
+    setTemplates(null);
+    if (kind === 'recover') {
+      setTemplate(submission!.template_id ?? DEFAULT_SUMMARY_TEMPLATE);
+      return;
+    }
+    const version = view.current;
+    void action(async () => {
+      const response = await window.notes.invoke({
+        operation: 'getSummaryTemplates',
+        scope: state.scope,
+        id: draft.id,
+      });
+      if (version !== view.current) return;
+      if (!response.ok) throw new Error(response.error.message);
+      if (
+        !('summary_templates' in response) ||
+        response.summary_templates.scope !== state.scope ||
+        response.summary_templates.document_id !== draft.id
+      )
+        throw new Error(
+          'The template catalog belongs to another meeting view.',
+        );
+      const supported = response.summary_templates.catalog.templates.filter(
+        (item) => summaryTemplateIdSchema.safeParse(item.id).success,
+      );
+      if (!supported.length)
+        throw new Error(
+          "This app does not support the service's summary template versions. Update the app before generating.",
+        );
+      const selected =
+        supported.find((item) => item.id === template) ?? supported[0]!;
+      setTemplate(summaryTemplateIdSchema.parse(selected.id));
+      setTemplates(supported);
+    });
   }
   async function start() {
     if (!consent || !(await beforeStart()) || !(await reviewFlush.current()))
@@ -167,6 +216,9 @@ export function SummaryPanel(props: Props) {
       scope: state.scope,
       id: draft.id,
       language,
+      ...(template === DEFAULT_SUMMARY_TEMPLATE
+        ? {}
+        : { template_id: template }),
       confirmed: true,
       new_attempt: confirmation === 'new',
       consent_id:
@@ -205,14 +257,6 @@ export function SummaryPanel(props: Props) {
     setSource(response.summary_source.source);
   }
   function fact(item: Summary['overview'], index: number) {
-    if (unavailable)
-      return (
-        <section className="summary-panel" aria-label="Meeting summary">
-          <p className="quiet-note">
-            This meeting is no longer available. Its summary view was cleared.
-          </p>
-        </section>
-      );
     return (
       <div className="summary-fact" key={index}>
         <p>{item.text}</p>
@@ -240,6 +284,14 @@ export function SummaryPanel(props: Props) {
       </div>
     );
   }
+  if (unavailable)
+    return (
+      <section className="summary-panel" aria-label="Meeting summary">
+        <p className="quiet-note">
+          This meeting is no longer available. Its summary view was cleared.
+        </p>
+      </section>
+    );
   return (
     <section className="summary-panel" aria-label="Meeting summary">
       <div className="summary-heading">
@@ -286,6 +338,38 @@ export function SummaryPanel(props: Props) {
       {confirmation && (
         <div className="summary-consent">
           <label>
+            Summary template{' '}
+            <select
+              aria-label="Summary template"
+              disabled={busy || confirmation === 'recover' || !templates}
+              value={template}
+              onChange={(event) => {
+                const selected = summaryTemplateIdSchema.safeParse(
+                  event.target.value,
+                );
+                if (selected.success) setTemplate(selected.data);
+                else setError('Choose a supported summary template.');
+              }}
+            >
+              {(confirmation === 'recover'
+                ? SUMMARY_TEMPLATES
+                : (templates ?? [])
+              ).map((item) => (
+                <option key={item.id} value={item.id}>
+                  {item.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          {confirmation === 'new' && !templates && !error && (
+            <p className="quiet-note">Loading service templates...</p>
+          )}
+          {templates?.find((item) => item.id === template)?.description && (
+            <p className="quiet-note">
+              {templates.find((item) => item.id === template)!.description}
+            </p>
+          )}
+          <label>
             Summary language{' '}
             <select
               aria-label="Summary language"
@@ -318,7 +402,12 @@ export function SummaryPanel(props: Props) {
           <div className="summary-actions">
             <button
               className="primary"
-              disabled={busy || !consent || !connected}
+              disabled={
+                busy ||
+                !consent ||
+                !connected ||
+                (confirmation === 'new' && !templates)
+              }
               onClick={() => void action(start)}
             >
               {busy
@@ -359,6 +448,14 @@ export function SummaryPanel(props: Props) {
       )}
       {job && (
         <div className="summary-result">
+          {templateVersion && (
+            <p className="quiet-note">
+              Template:{' '}
+              {SUMMARY_TEMPLATES.find((item) => item.id === templateVersion)
+                ?.name ?? 'Summary'}{' '}
+              ({templateVersion})
+            </p>
+          )}
           <div className="summary-heading">
             <span className="summary-status" role="status">
               {job.state.replaceAll('_', ' ')}

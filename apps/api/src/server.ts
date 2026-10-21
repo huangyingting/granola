@@ -5,6 +5,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import Fastify from 'fastify';
 import rateLimit from '@fastify/rate-limit';
 import { z } from 'zod';
+import { SUMMARY_TEMPLATES } from '@windows-ai-notes/contracts/templates';
 import {
   MAX_AUDIO_BYTES,
   MAX_TRANSCRIPT_SEGMENTS,
@@ -181,7 +182,7 @@ export async function createServer(
     locales: ['en-US', 'zh-CN'],
   }));
   app.get('/v1/templates', async () => ({
-    templates: [{ id: 'meeting-summary-v1', name: 'Meeting summary' }],
+    templates: SUMMARY_TEMPLATES,
   }));
   app.get('/v1/sync/snapshot', async (request) => {
     const query = parse(syncSnapshotQuerySchema, request.query);

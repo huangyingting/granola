@@ -1,11 +1,13 @@
 import { z } from 'zod';
 import { citationSchema, resourceId, type Summary } from './server.js';
+import { summaryTemplateIdSchema } from './templates.js';
 
 export const summarySubmissionSchema = z.strictObject({
   language: z.enum(['en', 'zh']),
   consent_id: resourceId,
   job_id: resourceId.nullable(),
   rejected: z.boolean().default(false),
+  template_id: summaryTemplateIdSchema.optional(),
 });
 export const summaryReviewSchema = z.strictObject({
   document_id: resourceId,

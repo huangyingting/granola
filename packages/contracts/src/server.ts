@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { summaryTemplateIdSchema } from './templates.js';
 import { captureGapSchema, captureTimelineEventSchema } from './index.js';
 import {
   notesTextSchema,
@@ -326,6 +327,7 @@ export const summaryRequestSchema = z.strictObject({
   note_revision: revision.min(1),
   transcript_revision: revision,
   language: z.enum(['en', 'zh']).default('en'),
+  template_id: summaryTemplateIdSchema.optional(),
 });
 export const transcriptionQuerySchema = z.strictObject({
   base_revision: z.coerce.number().int().nonnegative(),
@@ -363,6 +365,7 @@ export const summarySnapshotSchema = z.strictObject({
   notes: z.string().max(40_000),
   segments: segmentsSchema,
   language: z.enum(['en', 'zh']),
+  template_id: summaryTemplateIdSchema.optional(),
 });
 export const jobInputSchema = z.discriminatedUnion('kind', [
   z.strictObject({

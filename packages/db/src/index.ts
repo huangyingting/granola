@@ -606,6 +606,9 @@ export class Database {
           note_revision: input.note_revision,
           transcript_revision: input.transcript_revision,
           language: input.language,
+          ...(input.template_id === undefined
+            ? {}
+            : { template_id: input.template_id }),
         };
         if (!snapshot.notes.trim() && snapshot.segments.length === 0)
           throw new ServiceError(
