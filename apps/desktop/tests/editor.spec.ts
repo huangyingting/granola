@@ -39,6 +39,44 @@ async function close(application: ElectronApplication) {
   await closed;
 }
 
+test('discovers audio endpoints through the bundled helper without starting capture', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'windows-notes-device-ui-'));
+  let application: ElectronApplication | null = null;
+  try {
+    application = await launch(directory);
+    const page = await application.firstWindow();
+    await page
+      .getByRole('button', { name: 'Audio devices', exact: true })
+      .click();
+    await expect(
+      page.getByRole('heading', {
+        name: 'Know what is listening.',
+        exact: true,
+      }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole('button', { name: 'Refresh audio devices', exact: true }),
+    ).toBeEnabled();
+    await expect(
+      page.getByRole('heading', { name: 'Microphones', exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByText('Checking devices does not start recording.', {
+        exact: false,
+      }),
+    ).toBeVisible();
+    expect(
+      (await readdir(join(directory, 'recordings'))).filter(
+        (name) => name !== 'audio-host.lock',
+      ),
+    ).toEqual([]);
+    await close(application);
+    application = null;
+  } finally {
+    if (application) await application.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 test('pages meeting summaries and saves the selected editor even when a search excludes it', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'windows-notes-paging-ui-'));
   let application: ElectronApplication | null = null;

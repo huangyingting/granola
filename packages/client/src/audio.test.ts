@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { MAX_AUDIO_RANGE_BYTES } from '@windows-ai-notes/contracts';
-import { AudioHostClient } from './audio.js';
+import { AudioHostClient, audioHostEnvironment } from './audio.js';
 
 const fixture = fileURLToPath(
   new URL('../fixtures/audio-host.mjs', import.meta.url),
@@ -26,6 +26,26 @@ async function descriptor(client: AudioHostClient) {
 }
 
 describe('bounded main-process native audio transport', () => {
+  it('passes only OS/runtime location variables, never model keys, login credentials or startup hooks', () => {
+    expect(
+      audioHostEnvironment({
+        SystemRoot: 'synthetic-system',
+        Path: 'synthetic-path',
+        TEMP: 'synthetic-temp',
+        DOTNET_ROOT: 'synthetic-runtime',
+        AZURE_OPENAI_API_KEY: 'synthetic-model-key',
+        AUTHORIZATION: 'synthetic-access-token',
+        DATABASE_URL: 'synthetic-database',
+        NODE_OPTIONS: '--require=synthetic-hook',
+        DOTNET_STARTUP_HOOKS: 'synthetic-hook',
+      }),
+    ).toEqual({
+      SystemRoot: 'synthetic-system',
+      Path: 'synthetic-path',
+      TEMP: 'synthetic-temp',
+      DOTNET_ROOT: 'synthetic-runtime',
+    });
+  });
   it('streams deterministic WAV ranges and verifies the upload checksum without forwarding media to event observers', async () => {
     const events: string[] = [];
     const client = open('range', events);

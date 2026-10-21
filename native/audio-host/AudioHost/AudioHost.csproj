@@ -4,10 +4,20 @@
     <TargetFramework>net10.0-windows</TargetFramework>
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
+    <ProtectedDataVersion>10.0.0</ProtectedDataVersion>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../AudioHost.Core/AudioHost.Core.csproj" />
     <PackageReference Include="NAudio.Wasapi" Version="2.2.1" />
-    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.0" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="$(ProtectedDataVersion)" />
+    <None Include="../licenses/*.txt" Link="licenses/%(Filename)%(Extension)" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
+  <Target Name="BundleRuntimeNotices" AfterTargets="Publish" Condition="'$(SelfContained)' == 'true'">
+    <ItemGroup>
+      <_AudioRuntimePack Include="@(ResolvedRuntimePack)" Condition="'%(ResolvedRuntimePack.FrameworkName)' == 'Microsoft.NETCore.App'" />
+    </ItemGroup>
+    <Error Condition="'@(_AudioRuntimePack)' == ''" Text="The self-contained runtime notice source is missing." />
+    <Copy SourceFiles="@(_AudioRuntimePack->'%(PackageDirectory)/LICENSE.TXT');@(_AudioRuntimePack->'%(PackageDirectory)/THIRD-PARTY-NOTICES.TXT')" DestinationFolder="$(PublishDir)licenses/dotnet/" />
+    <Copy SourceFiles="$(NuGetPackageRoot)system.security.cryptography.protecteddata/$(ProtectedDataVersion)/THIRD-PARTY-NOTICES.TXT" DestinationFiles="$(PublishDir)licenses/ProtectedData-THIRD-PARTY-NOTICES.txt" />
+  </Target>
 </Project>

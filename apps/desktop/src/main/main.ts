@@ -21,6 +21,11 @@ import { LocalError, LocalStore } from '@windows-ai-notes/local';
 import { ClientError } from '@windows-ai-notes/client/http';
 import { WorkspaceController } from '@windows-ai-notes/client/workspace';
 import {
+  AudioHostClient,
+  AudioHostError,
+} from '@windows-ai-notes/client/audio';
+import type { AudioEvent } from '@windows-ai-notes/contracts';
+import {
   exportMeeting,
   richTextToPlainText,
 } from '@windows-ai-notes/contracts/content';
@@ -38,6 +43,54 @@ let failure: { code: string; message: string } | null = null;
 let closeNonce: string | null = null;
 let allowClose = false;
 let dataDirectory = '';
+let deviceRequest: Promise<
+  Extract<AudioEvent, { event_type: 'devices' }>['payload']['devices']
+> | null = null;
+
+function listAudioDevices() {
+  if (deviceRequest) return deviceRequest;
+  const operation = (async () => {
+    if (process.platform !== 'win32')
+      throw new LocalError(
+        'platform_unsupported',
+        'The audio helper requires Windows.',
+      );
+    const executable = app.isPackaged
+      ? join(process.resourcesPath, 'audio-host', 'AudioHost.exe')
+      : join(
+          app.getAppPath(),
+          '../../artifacts/audio-host/win-x64/AudioHost.exe',
+        );
+    if (!existsSync(executable))
+      throw new LocalError(
+        'audio_host_missing',
+        app.isPackaged
+          ? 'The bundled audio helper is missing. Reinstall a complete application package; no external helper was used.'
+          : 'Build the audio helper with pnpm audio:publish before checking audio devices.',
+      );
+    const client = new AudioHostClient(
+      executable,
+      ['--data-dir', join(dataDirectory, 'recordings')],
+      () => {},
+    );
+    try {
+      const event = await client.request({ command: 'list_devices' });
+      if (event.event_type !== 'devices')
+        throw new AudioHostError(
+          'audio_protocol_error',
+          'The audio helper did not return a device list.',
+          false,
+        );
+      return event.payload.devices;
+    } finally {
+      await client.close();
+    }
+  })().finally(() => {
+    deviceRequest = null;
+  });
+  deviceRequest = operation;
+  return operation;
+}
 
 function localKey(directory: string): Buffer {
   if (
@@ -101,7 +154,11 @@ function state(): DesktopState {
   return workspace().snapshot();
 }
 function safeError(error: unknown) {
-  if (error instanceof LocalError || error instanceof ClientError)
+  if (
+    error instanceof LocalError ||
+    error instanceof ClientError ||
+    error instanceof AudioHostError
+  )
     return { code: error.code, message: error.message };
   console.error(
     JSON.stringify({
@@ -220,6 +277,16 @@ async function start() {
             : { ok: true, state: state() };
         }
         const db = database();
+        if (command.operation === 'listAudioDevices') {
+          const active = workspace();
+          active.assertScope(command.scope);
+          const devices = await listAudioDevices();
+          active.assertScope(command.scope);
+          return desktopResponseSchema.parse({
+            ok: true,
+            audio_devices: { scope: command.scope, devices },
+          });
+        }
         if (command.operation === 'export') {
           const active = workspace();
           active.assertScope(command.scope);

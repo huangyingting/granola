@@ -64,6 +64,13 @@ pnpm install --frozen-lockfile
 pnpm desktop
 ```
 
+The **Audio devices** screen uses only the fixed-path bundled Windows helper to
+list microphones and system-output endpoints; checking devices does not record
+audio. System audio is device-level, not isolated to one meeting app. Helper
+failures are shown inline; the application never downloads or searches PATH for
+an alternative executable. For a source checkout, install the .NET SDK selected
+by `global.json` and run `pnpm audio:publish` before opening that screen.
+
 No API credentials are needed for the offline editor. Edits display **Saved locally**
 only after SQLite acknowledges the save. Document changes, exports and window
 close wait for queued edits; invalid or failed saves keep the editor open.
@@ -122,10 +129,19 @@ still scans and decrypts candidates in the main process; large-library latency
 and full transcript/job payloads remain performance release gates.
 
 ```sh
+pnpm audio:publish
 pnpm desktop:build
 pnpm desktop:test
 pnpm desktop:package:unsigned
 ```
+
+The installer includes the self-contained x64 audio helper and its .NET runtime;
+an external .NET installation is not required. The helper inherits only
+OS/runtime location variables, never model keys, login credentials or startup
+hooks. Bundled JavaScript dependency notices are generated from actual bundle
+inputs into `resources/THIRD_PARTY_NOTICES.txt`; native library and runtime
+notices are included under `resources/audio-host/licenses`. Missing bundled
+license texts fail the desktop build.
 
 Windows CI exercises the actual Electron renderer and DPAPI, local restart
 persistence, invalid-save close protection, renderer isolation, key-loss recovery,

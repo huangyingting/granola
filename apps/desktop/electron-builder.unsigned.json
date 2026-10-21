@@ -11,6 +11,14 @@
     "package.json"
   ],
   "asar": true,
+  "extraResources": [
+    { "from": "dist/THIRD_PARTY_NOTICES.txt", "to": "THIRD_PARTY_NOTICES.txt" },
+    {
+      "from": "../../artifacts/audio-host/win-x64",
+      "to": "audio-host",
+      "filter": ["**/*", "!**/*.pdb"]
+    }
+  ],
   "forceCodeSigning": false,
   "npmRebuild": false,
   "win": { "target": ["nsis"] },

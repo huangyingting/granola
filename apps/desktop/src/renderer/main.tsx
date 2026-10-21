@@ -17,6 +17,7 @@ import type {
 import './style.css';
 import { Account } from './Account.js';
 import { NoteExtras } from './NoteExtras.js';
+import { AudioDevices } from './AudioDevices.js';
 
 declare global {
   interface Window {
@@ -36,7 +37,9 @@ function App() {
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [query, setQuery] = useState('');
-  const [page, setPage] = useState<'notes' | 'storage' | 'account'>('notes');
+  const [page, setPage] = useState<'notes' | 'storage' | 'account' | 'audio'>(
+    'notes',
+  );
   const [switching, setSwitching] = useState(false);
   const flush = useRef<() => Promise<boolean>>(async () => true);
   const latest = useRef<DesktopState | null>(null);
@@ -68,6 +71,7 @@ function App() {
         return null;
       }
       if ('closing' in response) return null;
+      if ('audio_devices' in response) return null;
       if (
         !discardEditor &&
         ['bootstrap', 'search'].includes(command.operation) &&
@@ -336,6 +340,17 @@ function App() {
         </button>
         <button
           className="storage-button"
+          disabled={!state || blocked}
+          onClick={() => {
+            void flush.current().then((saved) => {
+              if (saved) setPage('audio');
+            });
+          }}
+        >
+          Audio devices <span aria-hidden="true">&#x2197;</span>
+        </button>
+        <button
+          className="storage-button"
           disabled={blocked}
           onClick={() => {
             void flush.current().then((saved) => {
@@ -352,9 +367,11 @@ function App() {
           <span>
             {page === 'account'
               ? 'ACCOUNT & WORKSPACES'
-              : page === 'storage'
-                ? 'Your space, your control'
-                : 'MEETING WORKSPACE'}
+              : page === 'audio'
+                ? 'AUDIO DEVICES'
+                : page === 'storage'
+                  ? 'Your space, your control'
+                  : 'MEETING WORKSPACE'}
           </span>
           <span className={`privacy-chip ${state ? '' : 'locked'}`}>
             {state ? 'Encrypted on this device' : 'Storage unavailable'}
@@ -406,6 +423,8 @@ function App() {
             switchScope={switchScope}
             blocked={blocked}
           />
+        ) : page === 'audio' && state ? (
+          <AudioDevices scope={state.scope} />
         ) : page === 'storage' ? (
           <section className="privacy-page">
             <span className="eyebrow">LOCAL FIRST</span>

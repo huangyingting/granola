@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { richTextSchema, tagsSchema } from './content.js';
 import { resourceId, jobSchema, transcriptSchema } from './server.js';
+import { deviceSchema } from './index.js';
 
 export const editableSchema = z.strictObject({
   title: z
@@ -27,6 +28,7 @@ export type DraftSummary = z.infer<typeof draftSummarySchema>;
 const scoped = { scope: z.number().int().positive() };
 export const desktopCommandSchema = z.discriminatedUnion('operation', [
   z.strictObject({ operation: z.literal('bootstrap') }),
+  z.strictObject({ operation: z.literal('listAudioDevices'), ...scoped }),
   z.strictObject({
     operation: z.literal('create'),
     ...scoped,
@@ -151,6 +153,13 @@ export const desktopResponseSchema = z.union([
     error: z.strictObject({ code: z.string(), message: z.string() }),
   }),
   z.strictObject({ ok: z.literal(true), closing: z.literal(true) }),
+  z.strictObject({
+    ok: z.literal(true),
+    audio_devices: z.strictObject({
+      ...scoped,
+      devices: z.array(deviceSchema).max(100),
+    }),
+  }),
 ]);
 export type DesktopCommand = z.infer<typeof desktopCommandSchema>;
 export type DesktopState = z.infer<typeof desktopStateSchema>;

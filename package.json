@@ -16,6 +16,7 @@
     "audio:probe": "node tools/audio-probe/dist/index.js",
     "test:native": "dotnet test native/audio-host/AudioHost.Tests/AudioHost.Tests.csproj --configuration Release",
     "build:native": "dotnet build native/audio-host/AudioHost/AudioHost.csproj --configuration Release",
+    "audio:publish": "dotnet restore native/audio-host/AudioHost/AudioHost.csproj --locked-mode && dotnet publish native/audio-host/AudioHost/AudioHost.csproj --configuration Release --runtime win-x64 --self-contained true --no-restore --output artifacts/audio-host/win-x64",
     "api": "node --env-file-if-exists=.env apps/api/dist/main.js",
     "worker": "node --env-file-if-exists=.env apps/worker/dist/main.js",
     "db:migrate": "node --env-file-if-exists=.env packages/db/dist/cli.js migrate",

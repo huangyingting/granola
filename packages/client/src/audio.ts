@@ -1,5 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
+import { dirname, isAbsolute } from 'node:path';
 import {
   audioEventSchema,
   audioRequestSchema,
@@ -27,6 +28,45 @@ const expectedEvents: Record<
   list_recording_chunks: 'recording.chunks',
   read_chunk: 'recording.chunk_range',
 };
+
+export function audioHostEnvironment(
+  source: NodeJS.ProcessEnv,
+): NodeJS.ProcessEnv {
+  const allowed = new Set([
+    'SYSTEMROOT',
+    'WINDIR',
+    'PATH',
+    'PATHEXT',
+    'SYSTEMDRIVE',
+    'PROGRAMFILES',
+    'PROGRAMFILES(X86)',
+    'PROGRAMW6432',
+    'TEMP',
+    'TMP',
+    'TMPDIR',
+    'HOME',
+    'USERPROFILE',
+    'HOMEDRIVE',
+    'HOMEPATH',
+    'LOCALAPPDATA',
+    'APPDATA',
+    'PROGRAMDATA',
+    'DOTNET_ROOT',
+    'DOTNET_ROOT_X64',
+    'DOTNET_ROOT(X86)',
+    'DOTNET_CLI_TELEMETRY_OPTOUT',
+    'DOTNET_NOLOGO',
+    'LANG',
+    'LC_ALL',
+    'LC_CTYPE',
+    'TZ',
+  ]);
+  return Object.fromEntries(
+    Object.entries(source).filter(
+      ([key, value]) => value !== undefined && allowed.has(key.toUpperCase()),
+    ),
+  );
+}
 
 type RequestFields<T = AudioRequest> = T extends AudioRequest
   ? Omit<T, 'protocol_version' | 'request_id'>
@@ -69,7 +109,12 @@ export class AudioHostClient {
     onEvent: (event: AudioEvent) => void,
   ) {
     this.failure.catch(() => undefined);
-    this.child = spawn(executable, args, { stdio: 'pipe', windowsHide: true });
+    this.child = spawn(executable, args, {
+      stdio: 'pipe',
+      windowsHide: true,
+      env: audioHostEnvironment(process.env),
+      ...(isAbsolute(executable) ? { cwd: dirname(executable) } : {}),
+    });
     this.exited = new Promise((resolve) => {
       this.child.once('error', (error) => {
         this.fail(error);
