@@ -1,0 +1,12 @@
+{
+  "name": "@windows-ai-notes/contracts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "dependencies": {
+    "zod": "^4.1.0"
+  }
+}

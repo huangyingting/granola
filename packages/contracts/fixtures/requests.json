@@ -1,0 +1,91 @@
+[
+  {
+    "valid": true,
+    "request": {
+      "protocol_version": 1,
+      "request_id": "9c73575e-426d-4f72-98ed-7b4479f890ab",
+      "command": "list_devices"
+    }
+  },
+  {
+    "valid": true,
+    "request": {
+      "protocol_version": 1,
+      "request_id": "9c73575e-426d-4f72-98ed-7b4479f890ab",
+      "command": "start_recording",
+      "recording_id": "75048e79-2b45-440f-8609-b80a37635b4a",
+      "tracks": [
+        {
+          "track_id": "ece5191a-347b-40a2-8d09-82565aa396a1",
+          "kind": "loopback",
+          "capture_scope": "endpoint",
+          "device_selection_policy": "default",
+          "device_id": "default"
+        }
+      ]
+    }
+  },
+  {
+    "valid": true,
+    "request": {
+      "protocol_version": 1,
+      "request_id": "9c73575e-426d-4f72-98ed-7b4479f890ab",
+      "command": "pause_recording",
+      "recording_id": "75048e79-2b45-440f-8609-b80a37635b4a"
+    }
+  },
+  {
+    "valid": false,
+    "request": {
+      "protocol_version": 2,
+      "request_id": "9c73575e-426d-4f72-98ed-7b4479f890ab",
+      "command": "list_devices"
+    }
+  },
+  {
+    "valid": false,
+    "request": {
+      "protocol_version": 1,
+      "request_id": "9c73575e-426d-4f72-98ed-7b4479f890ab",
+      "command": "list_devices",
+      "path": "../../outside"
+    }
+  },
+  {
+    "valid": false,
+    "request": {
+      "protocol_version": 1,
+      "request_id": "9c73575e-426d-4f72-98ed-7b4479f890ab",
+      "command": "start_recording",
+      "recording_id": "75048e79-2b45-440f-8609-b80a37635b4a",
+      "tracks": [
+        {
+          "track_id": "ece5191a-347b-40a2-8d09-82565aa396a1",
+          "kind": "loopback",
+          "capture_scope": "process_tree",
+          "device_selection_policy": "default",
+          "device_id": "default"
+        }
+      ]
+    }
+  },
+  {
+    "valid": false,
+    "request": {
+      "protocol_version": 1,
+      "request_id": "9c73575e-426d-4f72-98ed-7b4479f890ab",
+      "command": "stop_recording",
+      "recording_id": "../../outside"
+    }
+  },
+  {
+    "valid": false,
+    "request": {
+      "protocol_version": 1,
+      "request_id": "9c73575e-426d-4f72-98ed-7b4479f890ab",
+      "command": "start_recording",
+      "recording_id": "75048e79-2b45-440f-8609-b80a37635b4a",
+      "tracks": [null]
+    }
+  }
+]

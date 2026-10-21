@@ -1,0 +1,161 @@
+using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using System.Text.Json;
+using WindowsAiNotes.Audio;
+using WindowsAiNotes.AudioHost;
+
+if (!OperatingSystem.IsWindows())
+{
+    Console.Error.WriteLine("platform_unsupported: AudioHost capture and DPAPI require Windows 11.");
+    return 1;
+}
+if (args.Length != 2 || args[0] != "--data-dir" || !Path.IsPathFullyQualified(args[1]))
+{
+    Console.Error.WriteLine("invalid_arguments: pass --data-dir with an absolute, current-user-owned directory.");
+    return 1;
+}
+
+var root = Path.GetFullPath(args[1]);
+FileStream? hostLock = null;
+var protector = new DpapiKeyProtector();
+CaptureSession? session = null;
+await using var input = Console.OpenStandardInput();
+await using var output = Console.OpenStandardOutput();
+var exitCode = 0;
+try
+{
+    Directory.CreateDirectory(root);
+    hostLock = new FileStream(Path.Combine(root, "audio-host.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+    var pending = FrameCodec.ReadAsync(input);
+    while (true)
+    {
+        if (session?.Store.Status().State == "recording")
+        {
+            var completed = session.Failure.IsCompleted ? session.Failure :
+                await Task.WhenAny(pending, session.Failure, Task.Delay(1000));
+            if (completed == session.Failure)
+            {
+                var failure = await session.Failure;
+                await session.StopAsync(failed: true, failure.Code);
+                await Emit("error", new ErrorPayload(failure.Code, failure.Message, failure.Retryable), recordingId: session.Store.RecordingId);
+                continue;
+            }
+            if (completed != pending)
+            {
+                if (session.ElapsedSeconds >= 3600)
+                {
+                    await session.StopAsync();
+                    await Emit("recording.stopped", session.Store.Status(), recordingId: session.Store.RecordingId);
+                }
+                else
+                    await Emit("recording.status", session.Store.Status(), recordingId: session.Store.RecordingId);
+                continue;
+            }
+        }
+        var payload = await pending;
+        if (payload is null) break;
+        AudioRequest? request = null;
+        try
+        {
+            request = JsonSerializer.Deserialize<AudioRequest>(payload, AudioJson.Options)
+                ?? throw new AudioException("invalid_request", "A request object is required.");
+            request.Validate();
+            switch (request.Command)
+            {
+                case "list_devices":
+                    await Emit("devices", new { Devices = DeviceCatalog.List() }, request.RequestId);
+                    break;
+                case "inspect_recording":
+                    if (session is not null && session.Store.RecordingId == request.RecordingId && session.Store.Status().State is "recording" or "paused")
+                        throw new AudioException("invalid_state", "Stop the active recording before inspecting it.");
+                    await Emit("recording.inspected", RecordingStore.Inspect(root, request.RecordingId!.Value, protector),
+                        request.RequestId, request.RecordingId);
+                    break;
+                case "start_recording":
+                    if (session is not null)
+                        throw new AudioException("invalid_state", "Use a new AudioHost process for each recording.");
+                    session = new CaptureSession(root, request.RecordingId!.Value, request.Tracks!, protector);
+                    try
+                    {
+                        session.StartEpoch();
+                    }
+                    catch
+                    {
+                        await session.StopAsync(failed: true, "start_failed");
+                        throw;
+                    }
+                    await Emit("recording.started", session.Store.Status(), request.RequestId, request.RecordingId);
+                    break;
+                default:
+                    if (session is null || session.Store.RecordingId != request.RecordingId)
+                        throw new AudioException("recording_not_found", "This process is not capturing the requested recording.");
+                    var state = session.Store.Status().State;
+                    if (request.Command == "pause_recording" && state == "recording")
+                    {
+                        await session.PauseAsync();
+                        await Emit("recording.paused", session.Store.Status(), request.RequestId, request.RecordingId);
+                    }
+                    else if (request.Command == "resume_recording" && state == "paused")
+                    {
+                        try
+                        {
+                            session.StartEpoch();
+                        }
+                        catch
+                        {
+                            await session.StopAsync(failed: true, "resume_failed");
+                            throw;
+                        }
+                        await Emit("recording.resumed", session.Store.Status(), request.RequestId, request.RecordingId);
+                    }
+                    else if (request.Command == "stop_recording" && state is "recording" or "paused" or "sealed")
+                    {
+                        if (state != "sealed") await session.StopAsync();
+                        await Emit("recording.stopped", session.Store.Status(), request.RequestId, request.RecordingId);
+                    }
+                    else
+                        throw new AudioException("invalid_state", "The command is not valid in the current recording state.");
+                    break;
+            }
+        }
+        catch (AudioException error)
+        {
+            await Emit("error", new ErrorPayload(error.Code, error.Message, error.Retryable), request?.RequestId, request?.RecordingId);
+        }
+        catch (JsonException)
+        {
+            await Emit("error", new ErrorPayload("invalid_request", "The control message does not match the protocol.", false));
+        }
+        catch (COMException)
+        {
+            await Emit("error", new ErrorPayload("device_unavailable", "Windows could not open the selected audio endpoint.", true),
+                request?.RequestId, request?.RecordingId);
+        }
+        pending = FrameCodec.ReadAsync(input);
+    }
+}
+catch (Exception error) when (error is IOException or UnauthorizedAccessException or CryptographicException or AudioException or TimeoutException)
+{
+    Console.Error.WriteLine($"host_failed: {error.GetType().Name}; inspect the recording before considering its audio complete.");
+    exitCode = 1;
+}
+finally
+{
+    if (session?.Store.Status().State is "recording" or "paused")
+    {
+        try
+        {
+            await session.StopAsync();
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or CryptographicException or AudioException or TimeoutException)
+        {
+            Console.Error.WriteLine($"seal_failed: {error.GetType().Name}; saved chunks were not deleted.");
+            exitCode = 1;
+        }
+    }
+    hostLock?.Dispose();
+}
+return exitCode;
+
+Task Emit(string eventType, object value, Guid? requestId = null, Guid? recordingId = null) =>
+    FrameCodec.WriteAsync(output, new AudioEvent(1, requestId, recordingId, eventType, value));

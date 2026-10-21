@@ -1,0 +1,60 @@
+name: P0 checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    env:
+      DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+      DOTNET_NOLOGO: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - name: Restore locked native dependencies
+        run: |
+          dotnet restore native/audio-host/AudioHost.Tests/AudioHost.Tests.csproj --locked-mode
+          dotnet restore native/audio-host/AudioHost.Windows.Tests/AudioHost.Windows.Tests.csproj --locked-mode
+      - name: Cross-build the Windows host and platform tests
+        run: dotnet build native/audio-host/AudioHost.Windows.Tests/AudioHost.Windows.Tests.csproj --configuration Release --no-restore
+      - name: Crypto, recovery, protocol and synthetic conversion
+        run: dotnet test native/audio-host/AudioHost.Tests/AudioHost.Tests.csproj --configuration Release --no-restore
+      - name: Current-user Windows DPAPI checks
+        if: runner.os == 'Windows'
+        run: dotnet test native/audio-host/AudioHost.Windows.Tests/AudioHost.Windows.Tests.csproj --configuration Release --no-build
+      - run: pnpm build
+      - run: pnpm test
+      - run: pnpm format:check
+      - name: Native formatting
+        run: |
+          dotnet format whitespace native/audio-host/AudioHost.Core/AudioHost.Core.csproj --verify-no-changes --no-restore
+          dotnet format whitespace native/audio-host/AudioHost/AudioHost.csproj --verify-no-changes --no-restore
+          dotnet format whitespace native/audio-host/AudioHost.Tests/AudioHost.Tests.csproj --verify-no-changes --no-restore
+          dotnet format whitespace native/audio-host/AudioHost.Windows.Tests/AudioHost.Windows.Tests.csproj --verify-no-changes --no-restore
+      - name: Publish unsigned self-contained Windows probe
+        if: runner.os == 'Windows'
+        run: dotnet publish native/audio-host/AudioHost/AudioHost.csproj --configuration Release --runtime win-x64 --self-contained true --no-restore --output artifacts/audio-host/win-x64
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Windows'
+        with:
+          name: audio-host-win-x64-unsigned
+          path: artifacts/audio-host/win-x64/
+          retention-days: 7

@@ -1,0 +1,26 @@
+{
+  "name": "windows-ai-notes",
+  "version": "0.1.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "packageManager": "pnpm@12.3.4",
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b",
+    "test": "vitest run",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "audio:probe": "node tools/audio-probe/dist/index.js",
+    "test:native": "dotnet test native/audio-host/AudioHost.Tests/AudioHost.Tests.csproj --configuration Release",
+    "build:native": "dotnet build native/audio-host/AudioHost/AudioHost.csproj --configuration Release"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "prettier": "^3.6.0",
+    "typescript": "^5.9.0",
+    "vitest": "^3.2.0"
+  }
+}

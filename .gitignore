@@ -1,0 +1,15 @@
+node_modules/
+dist/
+*.tsbuildinfo
+coverage/
+artifacts/
+**/bin/
+**/obj/
+.env
+.env.*
+!.env.example
+*.user
+*.wav
+*.chunk
+*.partial
+.probe-data/

@@ -1,0 +1,7 @@
+pnpm-lock.yaml
+**/packages.lock.json
+**/bin/
+**/obj/
+artifacts/
+GRANOLA-REVERSE-ENGINEERING.md
+WINDOWS-AI-NOTES-IMPLEMENTATION-PLAN.md

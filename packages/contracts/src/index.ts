@@ -1,0 +1,235 @@
+import { z } from 'zod';
+
+export const PROTOCOL_VERSION = 1;
+export const MAX_CONTROL_BYTES = 64 * 1024;
+
+const uuid = z
+  .uuid()
+  .refine(
+    (id) => id !== '00000000-0000-0000-0000-000000000000',
+    'UUID must not be empty.',
+  );
+const baseRequest = {
+  protocol_version: z.literal(PROTOCOL_VERSION),
+  request_id: uuid,
+};
+
+export const trackSchema = z
+  .object({
+    track_id: uuid,
+    kind: z.enum(['microphone', 'loopback']),
+    capture_scope: z.literal('endpoint'),
+    device_selection_policy: z.enum(['default', 'explicit']),
+    device_id: z.string().min(1).max(1024),
+  })
+  .strict()
+  .refine(
+    (track) =>
+      (track.device_selection_policy === 'default') ===
+      (track.device_id === 'default'),
+    'Default policy requires the "default" device; explicit policy requires an endpoint ID.',
+  );
+
+export const audioRequestSchema = z.discriminatedUnion('command', [
+  z.object({ ...baseRequest, command: z.literal('list_devices') }).strict(),
+  z
+    .object({
+      ...baseRequest,
+      command: z.literal('start_recording'),
+      recording_id: uuid,
+      tracks: z.array(trackSchema).min(1).max(2),
+    })
+    .strict()
+    .refine(
+      ({ tracks }) =>
+        new Set(tracks.map((track) => track.track_id)).size === tracks.length &&
+        new Set(tracks.map((track) => track.kind)).size === tracks.length,
+      'Track IDs and kinds must be unique.',
+    ),
+  ...(
+    [
+      'pause_recording',
+      'resume_recording',
+      'stop_recording',
+      'inspect_recording',
+    ] as const
+  ).map((command) =>
+    z
+      .object({
+        ...baseRequest,
+        command: z.literal(command),
+        recording_id: uuid,
+      })
+      .strict(),
+  ),
+]);
+
+export const deviceSchema = z
+  .object({
+    device_id: z.string().min(1).max(1024),
+    name: z.string().min(1).max(1024),
+    kind: z.enum(['microphone', 'loopback']),
+    is_default: z.boolean(),
+  })
+  .strict();
+
+export const chunkSchema = z
+  .object({
+    format_version: z.literal(1),
+    recording_id: uuid,
+    track_id: uuid,
+    chunk_id: uuid,
+    capture_epoch: uuid,
+    sequence: z.number().int().nonnegative(),
+    sample_start: z.number().int().nonnegative(),
+    sample_count: z.number().int().positive().max(480_000),
+    sample_rate: z.literal(16_000),
+    channels: z.literal(1),
+    bits_per_sample: z.literal(16),
+    clock_start_ms: z.number().finite().nonnegative(),
+    clock_end_ms: z.number().finite().nonnegative(),
+    pcm_sha256: z.string().regex(/^[a-f0-9]{64}$/),
+  })
+  .strict();
+
+export const recoverySchema = z
+  .object({
+    state: z.enum(['sealed', 'interrupted', 'incomplete', 'key_unavailable']),
+    verified_chunks: z.number().int().nonnegative(),
+    recovered_chunks: z.number().int().nonnegative(),
+    issues: z
+      .array(z.object({ code: z.string(), message: z.string() }).strict())
+      .max(10_000),
+    total_samples: z.number().int().nonnegative(),
+  })
+  .strict();
+
+const eventBase = {
+  protocol_version: z.literal(PROTOCOL_VERSION),
+  request_id: uuid.nullable(),
+  recording_id: uuid.nullable(),
+};
+const savedTrack = z
+  .object({
+    track_id: uuid,
+    saved_samples: z.number().int().nonnegative(),
+    device_id: z.string().min(1).max(1024),
+    kind: z.enum(['microphone', 'loopback']),
+    capture_scope: z.literal('endpoint'),
+    device_selection_policy: z.enum(['default', 'explicit']),
+  })
+  .strict();
+const statePayload = z
+  .object({
+    state: z.enum(['recording', 'paused', 'sealed', 'failed']),
+    tracks: z.array(savedTrack).max(2),
+  })
+  .strict();
+
+export const audioEventSchema = z.discriminatedUnion('event_type', [
+  z
+    .object({
+      ...eventBase,
+      event_type: z.literal('devices'),
+      payload: z.object({ devices: z.array(deviceSchema).max(100) }).strict(),
+    })
+    .strict(),
+  ...(
+    [
+      'recording.started',
+      'recording.paused',
+      'recording.resumed',
+      'recording.stopped',
+      'recording.status',
+    ] as const
+  ).map((event_type) =>
+    z
+      .object({
+        ...eventBase,
+        event_type: z.literal(event_type),
+        payload: statePayload,
+      })
+      .strict(),
+  ),
+  z
+    .object({
+      ...eventBase,
+      event_type: z.literal('recording.inspected'),
+      payload: recoverySchema,
+    })
+    .strict(),
+  z
+    .object({
+      ...eventBase,
+      event_type: z.literal('error'),
+      payload: z
+        .object({
+          code: z.string().min(1).max(80),
+          message: z.string().min(1).max(512),
+          retryable: z.boolean(),
+        })
+        .strict(),
+    })
+    .strict(),
+]);
+
+export type AudioRequest = z.infer<typeof audioRequestSchema>;
+export type AudioEvent = z.infer<typeof audioEventSchema>;
+export type Track = z.infer<typeof trackSchema>;
+
+export function encodeFrame(value: AudioRequest | AudioEvent): Buffer {
+  const body = Buffer.from(JSON.stringify(value), 'utf8');
+  if (body.length > MAX_CONTROL_BYTES) {
+    throw new Error('Control message exceeds the protocol limit.');
+  }
+  const frame = Buffer.allocUnsafe(body.length + 4);
+  frame.writeUInt32LE(body.length);
+  body.copy(frame, 4);
+  return frame;
+}
+
+export class FrameDecoder {
+  private pending = Buffer.alloc(0);
+  private failed = false;
+
+  push(bytes: Uint8Array): unknown[] {
+    if (this.failed)
+      throw new Error('Decoder is closed after a protocol error.');
+    const messages: unknown[] = [];
+    let input: Buffer<ArrayBufferLike> = Buffer.from(bytes);
+    try {
+      while (input.length > 0) {
+        const target =
+          this.pending.length < 4 ? 4 : 4 + this.pending.readUInt32LE(0);
+        const take = Math.min(target - this.pending.length, input.length);
+        this.pending = Buffer.concat([this.pending, input.subarray(0, take)]);
+        input = input.subarray(take);
+        if (this.pending.length < 4) continue;
+        const length = this.pending.readUInt32LE(0);
+        if (length === 0 || length > MAX_CONTROL_BYTES) {
+          throw new Error('Invalid control frame length.');
+        }
+        if (this.pending.length === length + 4) {
+          const text = new TextDecoder('utf-8', { fatal: true }).decode(
+            this.pending.subarray(4),
+          );
+          messages.push(JSON.parse(text) as unknown);
+          this.pending = Buffer.alloc(0);
+        }
+      }
+      return messages;
+    } catch (error) {
+      this.failed = true;
+      this.pending = Buffer.alloc(0);
+      throw error;
+    }
+  }
+
+  finish(): void {
+    if (this.failed || this.pending.length !== 0) {
+      throw new Error(
+        'Control stream ended with an incomplete or invalid frame.',
+      );
+    }
+  }
+}
