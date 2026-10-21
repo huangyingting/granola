@@ -22,6 +22,84 @@ function duration(samples: number) {
   const seconds = Math.floor(samples / 16000);
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
 }
+export function CaptureMeters({
+  active,
+  levels,
+  now,
+}: {
+  active: LocalRecording;
+  levels: AudioState['levels'];
+  now: number;
+}) {
+  return (
+    <div
+      className="capture-levels"
+      role="group"
+      aria-label="Capture level previews"
+    >
+      {active.tracks.map((track) => {
+        const name =
+          track.spec.kind === 'microphone' ? 'Microphone' : 'System audio';
+        const reading = levels?.capture.tracks.find(
+          (value) => value.track_id === track.spec.track_id,
+        )?.level;
+        const age =
+          reading && levels
+            ? now -
+              levels.received_at +
+              levels.capture.clock_ms -
+              reading.clock_ms
+            : null;
+        const recent =
+          active.state === 'recording' &&
+          reading &&
+          age !== null &&
+          age >= 0 &&
+          age <= 1000;
+        const peak = recent ? reading.peak : 0;
+        const db = peak === 0 ? -60 : Math.max(-60, 20 * Math.log10(peak));
+        const text =
+          active.state === 'paused'
+            ? 'Paused'
+            : active.state !== 'recording'
+              ? 'Not capturing'
+              : !reading
+                ? 'Waiting for audio'
+                : !recent
+                  ? 'No recent audio'
+                  : peak === 0
+                    ? 'Silence'
+                    : `${Math.round(20 * Math.log10(peak))} dBFS peak`;
+        const rms = !recent
+          ? 'No recent RMS measurement'
+          : reading.rms === 0
+            ? 'RMS silence'
+            : `${Math.round(20 * Math.log10(reading.rms))} dBFS RMS`;
+        return (
+          <div className="capture-level" key={track.spec.track_id}>
+            <strong>{name}</strong>
+            <span>{text}</span>
+            <meter
+              aria-label={`${name} level preview`}
+              aria-valuetext={`${text}; ${rms}`}
+              min={-60}
+              max={0}
+              value={db}
+              title={
+                peak >= 0.99
+                  ? 'Near full scale; check the source volume.'
+                  : `${text}; ${rms}`
+              }
+            />
+            <small>
+              {duration(track.saved_samples)} saved in sealed chunks
+            </small>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
 function useAudioState(scope: number, document: string | null) {
   const [state, setState] = useState<AudioState | null>(null);
   const [error, setError] = useState('');
@@ -112,6 +190,12 @@ export function RecordingBar({ scope }: { scope: number }) {
   const { state, error, busy, acting, act } = useAudioState(scope, null);
   const active = state?.active;
   const upload = state?.active_upload;
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    if (active?.state !== 'recording') return;
+    const timer = setInterval(() => setNow(Date.now()), 250);
+    return () => clearInterval(timer);
+  }, [active?.id, active?.state]);
   if (
     !active &&
     !upload &&
@@ -199,6 +283,11 @@ export function RecordingBar({ scope }: { scope: number }) {
           >
             Stop recording
           </button>
+          <CaptureMeters
+            active={active}
+            levels={state?.levels ?? null}
+            now={now}
+          />
         </>
       )}
       {(error || state?.error) && (

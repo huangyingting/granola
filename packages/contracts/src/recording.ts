@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { recoverySchema, trackSchema } from './index.js';
+import { captureLevelsSchema, recoverySchema, trackSchema } from './index.js';
 import { resourceId } from './server.js';
 import {
   createRecordingSchema,
@@ -156,5 +156,12 @@ export const audioStateSchema = z.strictObject({
   uploads: z.array(recordingUploadStatusSchema).max(50).default([]),
   active_upload: recordingUploadStatusSchema.nullable().default(null),
   upload_destination: z.url().nullable().default(null),
+  levels: z
+    .strictObject({
+      received_at: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+      capture: captureLevelsSchema,
+    })
+    .nullable()
+    .default(null),
 });
 export type AudioState = z.infer<typeof audioStateSchema>;

@@ -11,6 +11,7 @@ internal sealed class CaptureSession
     private readonly List<CaptureTrack> captures = [];
     private readonly Stopwatch clock = Stopwatch.StartNew();
     private readonly TaskCompletionSource<AudioException> failure = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private Guid captureEpoch;
     public RecordingStore Store { get; }
     public Task<AudioException> Failure => failure.Task;
     public double ElapsedSeconds => clock.Elapsed.TotalSeconds;
@@ -31,6 +32,7 @@ internal sealed class CaptureSession
     public void StartEpoch()
     {
         var epoch = Guid.NewGuid();
+        captureEpoch = epoch;
         Store.Transition("recording", "capture.started", clock.Elapsed.TotalMilliseconds, epoch);
         foreach (var spec in specs)
         {
@@ -38,7 +40,7 @@ internal sealed class CaptureSession
             var endpoint = DeviceCatalog.Resolve(spec, endpoints[spec.TrackId]);
             try
             {
-                captures.Add(new CaptureTrack(endpoint, spec.Kind, writers[spec.TrackId], clock, failure));
+                captures.Add(new CaptureTrack(endpoint, spec.TrackId, spec.Kind, writers[spec.TrackId], clock, failure));
             }
             catch
             {
@@ -47,6 +49,12 @@ internal sealed class CaptureSession
             }
         }
         foreach (var capture in captures) capture.Start();
+    }
+
+    public CaptureLevels ReadLevels()
+    {
+        var tracks = captures.Select(capture => capture.ReadLevel()).ToArray();
+        return new CaptureLevels(captureEpoch, clock.Elapsed.TotalMilliseconds, tracks);
     }
 
     public async Task PauseAsync()

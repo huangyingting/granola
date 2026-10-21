@@ -1,6 +1,7 @@
 import { canonicalJson } from '@windows-ai-notes/contracts/content';
 import type { AudioEvent, Track } from '@windows-ai-notes/contracts';
 import type {
+  AudioState,
   LocalRecording,
   RecordingOwner,
   RecordingUploadIntent,
@@ -52,6 +53,7 @@ function missing(error: unknown) {
 }
 
 export class RecordingController {
+  private levels: AudioState['levels'] = null;
   private client: AudioClient | null = null;
   private owner: RecordingOwner | null = null;
   private revoked = false;
@@ -155,6 +157,7 @@ export class RecordingController {
         throw error;
       } finally {
         if (this.client === client) {
+          this.levels = null;
           this.client = null;
           this.owner = null;
           this.revoked = false;
@@ -172,11 +175,60 @@ export class RecordingController {
     if (!owner || this.revoked || event.recording_id !== owner.recording_id)
       return;
     switch (event.event_type) {
+      case 'recording.levels': {
+        const recording = this.local.getRecording(
+          owner.profile,
+          owner.document_id,
+          owner.recording_id,
+        );
+        if (recording.state !== 'recording') return;
+        const previous = this.levels?.capture;
+        if (
+          event.payload.tracks.length !== recording.tracks.length ||
+          event.payload.tracks.some(
+            (track) =>
+              !recording.tracks.some(
+                (known) => known.spec.track_id === track.track_id,
+              ),
+          ) ||
+          (previous &&
+            (event.payload.capture_epoch !== previous.capture_epoch ||
+              event.payload.clock_ms <= previous.clock_ms))
+        )
+          throw new AudioHostError(
+            'audio_protocol_error',
+            'The helper returned inconsistent capture level identities or clocks.',
+            false,
+          );
+        if (
+          event.payload.tracks.some((track) => {
+            const prior = previous?.tracks.find(
+              (known) => known.track_id === track.track_id,
+            )?.level;
+            return (
+              track.level && prior && track.level.clock_ms <= prior.clock_ms
+            );
+          })
+        )
+          throw new AudioHostError(
+            'audio_protocol_error',
+            'The helper repeated or regressed measured audio level clocks.',
+            false,
+          );
+        this.levels = { received_at: Date.now(), capture: event.payload };
+        this.changed();
+        break;
+      }
       case 'recording.started':
       case 'recording.paused':
       case 'recording.resumed':
       case 'recording.stopped':
       case 'recording.status': {
+        if (
+          event.event_type !== 'recording.status' ||
+          event.payload.state !== 'recording'
+        )
+          this.levels = null;
         const previous = this.local.getRecording(
           owner.profile,
           owner.document_id,
@@ -930,6 +982,7 @@ export class RecordingController {
     return {
       document_id: document,
       active,
+      levels: active?.state === 'recording' ? this.levels : null,
       ...page,
       offset,
       busy: this.running || this.closing !== null,

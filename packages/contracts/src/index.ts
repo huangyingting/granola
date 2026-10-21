@@ -187,7 +187,47 @@ const statePayload = z
   })
   .strict();
 
+export const captureLevelsSchema = z
+  .strictObject({
+    capture_epoch: uuid,
+    clock_ms: z.number().finite().min(0).max(14_400_000),
+    tracks: z
+      .array(
+        z.strictObject({
+          track_id: uuid,
+          level: z
+            .strictObject({
+              samples: z.number().int().min(1).max(16_000),
+              peak: z.number().finite().min(0).max(1),
+              rms: z.number().finite().min(0).max(1),
+              clock_ms: z.number().finite().min(0).max(14_400_000),
+            })
+            .refine((level) => level.rms <= level.peak)
+            .nullable(),
+        }),
+      )
+      .min(1)
+      .max(2),
+  })
+  .refine(
+    (levels) =>
+      new Set(levels.tracks.map((track) => track.track_id)).size ===
+        levels.tracks.length &&
+      levels.tracks.every(
+        (track) => !track.level || track.level.clock_ms <= levels.clock_ms,
+      ),
+    'Level previews must have distinct tracks and consistent capture clocks.',
+  );
+export type CaptureLevels = z.infer<typeof captureLevelsSchema>;
+
 export const audioEventSchema = z.discriminatedUnion('event_type', [
+  z.strictObject({
+    ...eventBase,
+    request_id: z.null(),
+    recording_id: uuid,
+    event_type: z.literal('recording.levels'),
+    payload: captureLevelsSchema,
+  }),
   z
     .strictObject({
       ...eventBase,

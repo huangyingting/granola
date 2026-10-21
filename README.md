@@ -21,6 +21,9 @@ Real Windows audio behavior still requires the hardware checks below.
 - Explicit endpoint selection, pause/resume epochs, monotonic callback timestamps,
   bounded capture queues, and saved-sample counts. Queue overflow or device loss
   stops capture with an explicit failure instead of silently dropping audio.
+- Separate microphone/system PCM16 peak and RMS previews, with bounded native
+  aggregation and no audio in renderer telemetry. Missing or stale frames and
+  paused capture are not presented as measured silence; levels are not persisted.
 - Up to 30 seconds per independently encrypted AES-256-GCM chunk. Each chunk has a
   fresh random key and nonce; Windows current-user DPAPI wraps the key. The
   authenticated header binds recording/track/chunk IDs, sample ranges, format,
@@ -106,8 +109,10 @@ keeps pause/resume/stop available while you edit or navigate; stopping is not
 blocked by invalid note text. Changing accounts/workspaces requires stopping
 capture first. Closing the window waits for capture shutdown; interrupted sessions
 remain under **Saved audio** for inspection. Saved durations count only acknowledged
-encrypted chunks and may trail capture by up to 30 seconds. Audio meters and
-physical-device reliability evidence remain release work.
+encrypted chunks and may trail capture by up to 30 seconds. The bar separately
+shows source level previews and those acknowledged saved durations. Previews
+expire after one second; they do not certify recording integrity, echo removal
+or physical-device reliability.
 
 After inspection finds safe, authenticated orphan chunks, **Recover saved chunks**
 offers an inline confirmation before attaching them to the encrypted manifest.

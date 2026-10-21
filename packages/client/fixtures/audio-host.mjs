@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   audioRequestSchema,
   encodeFrame,
@@ -41,6 +41,50 @@ const upload = {
 };
 let capture = null;
 let savedSamples = 16_000;
+let captureEpoch = randomUUID();
+let levelClock = 100;
+function sendLevels(request) {
+  const payload = {
+    capture_epoch: captureEpoch,
+    clock_ms: levelClock,
+    tracks: request.tracks.map((spec) => ({
+      track_id: spec.track_id,
+      level: { samples: 800, peak: 0.5, rms: 0.25, clock_ms: levelClock - 50 },
+    })),
+  };
+  send(
+    { request_id: null, recording_id: request.recording_id },
+    'recording.levels',
+    payload,
+  );
+  if (mode.startsWith('capture-level-bad-')) {
+    const invalid = {
+      ...payload,
+      capture_epoch:
+        mode === 'capture-level-bad-epoch' ? randomUUID() : captureEpoch,
+      clock_ms:
+        mode === 'capture-level-bad-clock' ? levelClock - 1 : levelClock + 1,
+      tracks: payload.tracks.map((value) => ({
+        ...value,
+        track_id:
+          mode === 'capture-level-bad-track' ? randomUUID() : value.track_id,
+        level: {
+          ...value.level,
+          clock_ms: mode === 'capture-level-bad-reading' ? 1 : levelClock - 49,
+        },
+      })),
+    };
+    setTimeout(
+      () =>
+        send(
+          { request_id: null, recording_id: request.recording_id },
+          'recording.levels',
+          invalid,
+        ),
+      10,
+    );
+  }
+}
 const recoveryTrack = process.argv[3] ? JSON.parse(process.argv[3]) : null;
 const archiveChunks = Array.from(
   { length: mode === 'archive-chunks' ? 51 : mode === 'archive-two' ? 2 : 1 },
@@ -181,6 +225,8 @@ process.stdin.on('data', (bytes) => {
           device_selection_policy: spec.device_selection_policy,
         })),
       });
+      if (mode.startsWith('capture-level'))
+        setTimeout(() => sendLevels(request), 20);
       if (mode === 'capture-fail')
         setTimeout(
           () =>
@@ -236,6 +282,11 @@ process.stdin.on('data', (bytes) => {
           })),
         },
       );
+      if (mode.startsWith('capture-level') && state === 'recording') {
+        captureEpoch = randomUUID();
+        levelClock += 100;
+        setTimeout(() => sendLevels(capture), 20);
+      }
       if (mode === 'capture-auto-stop-paused' && state === 'paused') {
         setTimeout(
           () =>

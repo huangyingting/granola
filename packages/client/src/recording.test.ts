@@ -142,6 +142,78 @@ describe('durable desktop capture coordination with a real framed helper process
     expect(controller.capturing).toBe(true);
     await controller.stop(() => {});
   });
+  it('keeps framed level previews ephemeral, profile-scoped and separate from saved audio across pause/resume', async () => {
+    const draft = local.create('offline');
+    const { controller } = setup('capture-levels');
+    const tracks: Track[] = [
+      ...choices(),
+      {
+        track_id: randomUUID(),
+        kind: 'loopback',
+        capture_scope: 'endpoint',
+        device_selection_policy: 'explicit',
+        device_id: 'synthetic-output',
+      },
+    ];
+    await controller.start('offline', draft.id, tracks, () => {});
+    const before = local.getRecording(
+      'offline',
+      draft.id,
+      local.activeRecordingOwner()!.recording_id,
+    );
+    const update = vi.spyOn(local, 'updateRecording');
+    await vi.waitFor(() =>
+      expect(
+        controller.snapshot('offline', draft.id).levels?.capture.tracks[0]
+          ?.level,
+      ).toMatchObject({ peak: 0.5, rms: 0.25, samples: 800 }),
+    );
+    expect(update).not.toHaveBeenCalled();
+    expect(
+      controller
+        .snapshot('offline', draft.id)
+        .levels!.capture.tracks.map((track) => track.track_id),
+    ).toEqual(tracks.map((track) => track.track_id));
+    expect(local.getRecording('offline', draft.id, before.id)).toEqual(before);
+    expect(controller.snapshot('unrelated', null).levels).toBeNull();
+    const epoch = controller.snapshot('offline', null).levels!.capture
+      .capture_epoch;
+    await controller.control('offline', draft.id, before.id, 'pause', () => {});
+    expect(controller.snapshot('offline', null).levels).toBeNull();
+    await controller.control(
+      'offline',
+      draft.id,
+      before.id,
+      'resume',
+      () => {},
+    );
+    await vi.waitFor(() =>
+      expect(controller.snapshot('offline', null).levels).not.toBeNull(),
+    );
+    expect(
+      controller.snapshot('offline', null).levels!.capture.capture_epoch,
+    ).not.toBe(epoch);
+    await controller.stop(() => {});
+    expect(controller.snapshot('offline', null).levels).toBeNull();
+    const restarted = setup();
+    expect(
+      restarted.controller.snapshot('offline', draft.id).levels,
+    ).toBeNull();
+    expect(restarted.create).not.toHaveBeenCalled();
+  });
+  it.each(['track', 'clock', 'epoch', 'reading'])(
+    'rejects inconsistent %s level evidence rather than displaying a healthy signal',
+    async (mode) => {
+      const draft = local.create('offline');
+      const { controller } = setup(`capture-level-bad-${mode}`);
+      await controller.start('offline', draft.id, choices(), () => {});
+      await vi.waitFor(() => expect(controller.capturing).toBe(false));
+      const snapshot = controller.snapshot('offline', draft.id);
+      expect(snapshot.levels).toBeNull();
+      expect(snapshot.recordings[0]!.state).toBe('failed');
+      expect(snapshot.error?.code).toBe('audio_protocol_error');
+    },
+  );
   it('releases a paused helper after its unsolicited automatic-stop acknowledgement', async () => {
     const draft = local.create('offline');
     const { controller, remove } = setup('capture-auto-stop-paused');

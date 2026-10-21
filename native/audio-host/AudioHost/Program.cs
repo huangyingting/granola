@@ -23,6 +23,7 @@ CaptureSession? session = null;
 await using var input = Console.OpenStandardInput();
 await using var output = Console.OpenStandardOutput();
 var exitCode = 0;
+double lastStatusSeconds = 0;
 try
 {
     Directory.CreateDirectory(root);
@@ -33,7 +34,8 @@ try
         if (session?.Store.Status().State is "recording" or "paused")
         {
             var completed = session.Failure.IsCompleted ? session.Failure :
-                await Task.WhenAny(pending, session.Failure, Task.Delay(1000));
+                await Task.WhenAny(pending, session.Failure,
+                    Task.Delay(session.Store.Status().State == "recording" ? 250 : 1000));
             if (completed == session.Failure)
             {
                 var failure = await session.Failure;
@@ -48,8 +50,13 @@ try
                     await session.StopAsync();
                     await Emit("recording.stopped", session.Store.Status(), recordingId: session.Store.RecordingId);
                 }
-                else
+                else if (session.ElapsedSeconds - lastStatusSeconds >= 1)
+                {
                     await Emit("recording.status", session.Store.Status(), recordingId: session.Store.RecordingId);
+                    lastStatusSeconds = session.ElapsedSeconds;
+                }
+                if (session.Store.Status().State == "recording")
+                    await Emit("recording.levels", session.ReadLevels(), recordingId: session.Store.RecordingId);
                 continue;
             }
         }

@@ -25,11 +25,14 @@ internal sealed class CaptureTrack : IDisposable
     private long queuedBytes;
     private int stopping;
     private bool started;
+    private readonly PcmLevelMeter levels = new();
+    public Guid TrackId { get; }
 
-    public CaptureTrack(MMDevice endpoint, string kind, PcmChunkWriter writer, Stopwatch clock,
+    public CaptureTrack(MMDevice endpoint, Guid trackId, string kind, PcmChunkWriter writer, Stopwatch clock,
         TaskCompletionSource<AudioException> failure)
     {
         this.endpoint = endpoint;
+        TrackId = trackId;
         this.clock = clock;
         this.failure = failure;
         capture = kind == "microphone" ? new WasapiCapture(endpoint) : new WasapiLoopbackCapture(endpoint);
@@ -61,6 +64,7 @@ internal sealed class CaptureTrack : IDisposable
                     using var normalized = new MemoryStream();
                     converter.Convert(packet.Bytes, (bytes, count) => normalized.Write(bytes, 0, count));
                     writer.Append(normalized.GetBuffer().AsSpan(0, (int)normalized.Length), packet.StartMs, packet.EndMs);
+                    levels.Append(normalized.GetBuffer().AsSpan(0, (int)normalized.Length), packet.EndMs);
                     Interlocked.Add(ref queuedBytes, -packet.Bytes.Length);
                 }
                 writer.Flush();
@@ -74,6 +78,8 @@ internal sealed class CaptureTrack : IDisposable
             }
         });
     }
+
+    public TrackLevel ReadLevel() => new(TrackId, levels.Read());
 
     private void OnData(object? sender, WaveInEventArgs args)
     {

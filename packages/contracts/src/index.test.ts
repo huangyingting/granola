@@ -124,6 +124,59 @@ describe('capture boundaries', () => {
     ).toBe(false);
   });
 
+  it('bounds unsolicited level previews and distinguishes absent frames from measured silence', () => {
+    const level = { samples: 800, peak: 0.5, rms: 0.25, clock_ms: 50 };
+    const event = {
+      protocol_version: 1,
+      request_id: null,
+      recording_id: randomUUID(),
+      event_type: 'recording.levels',
+      payload: {
+        capture_epoch: randomUUID(),
+        clock_ms: 100,
+        tracks: [{ track_id: track.track_id, level }],
+      },
+    };
+    expect(audioEventSchema.safeParse(event).success).toBe(true);
+    for (const reading of [null, { ...level, peak: 0, rms: 0 }])
+      expect(
+        audioEventSchema.safeParse({
+          ...event,
+          payload: {
+            ...event.payload,
+            tracks: [{ track_id: track.track_id, level: reading }],
+          },
+        }).success,
+      ).toBe(true);
+    for (const invalid of [
+      { ...event, request_id: randomUUID() },
+      { ...event, recording_id: null },
+      { ...event, payload: { ...event.payload, tracks: [] } },
+      {
+        ...event,
+        payload: {
+          ...event.payload,
+          tracks: [event.payload.tracks[0], event.payload.tracks[0]],
+        },
+      },
+      ...[
+        { ...level, samples: 16_001 },
+        { ...level, peak: Number.NaN },
+        { ...level, peak: 1.01 },
+        { ...level, rms: 0.51 },
+        { ...level, clock_ms: 101 },
+        { ...level, pcm_base64: 'not-for-the-renderer' },
+      ].map((reading) => ({
+        ...event,
+        payload: {
+          ...event.payload,
+          tracks: [{ track_id: track.track_id, level: reading }],
+        },
+      })),
+    ])
+      expect(audioEventSchema.safeParse(invalid).success).toBe(false);
+  });
+
   it('binds bounded media replies to canonical WAV sizes, recording identity and final markers', () => {
     const recording = randomUUID();
     const chunk = {
