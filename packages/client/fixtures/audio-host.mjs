@@ -42,6 +42,50 @@ const upload = {
 let capture = null;
 let savedSamples = 16_000;
 const recoveryTrack = process.argv[3] ? JSON.parse(process.argv[3]) : null;
+const archiveChunks = Array.from(
+  { length: mode === 'archive-chunks' ? 51 : mode === 'archive-two' ? 2 : 1 },
+  (_, index) => ({
+    ...upload,
+    chunk: {
+      ...upload.chunk,
+      chunk_id: index
+        ? `${upload.chunk.chunk_id.slice(0, 24)}${index.toString(16).padStart(12, '0')}`
+        : upload.chunk.chunk_id,
+      sequence: index,
+      sample_start: index * upload.chunk.sample_count,
+      clock_start_ms: index * 2048,
+      clock_end_ms: (index + 1) * 2048,
+    },
+  }),
+);
+const archiveEvents = [
+  {
+    event_type: 'capture.started',
+    clock_ms: 0,
+    capture_epoch: upload.chunk.capture_epoch,
+    code: null,
+  },
+  ...(mode === 'archive-pages'
+    ? Array.from({ length: 50 }, (_, index) => ({
+        event_type: 'synthetic.event',
+        clock_ms: index + 1,
+        capture_epoch: null,
+        code: null,
+      }))
+    : []),
+  {
+    event_type: 'capture.paused',
+    clock_ms: archiveChunks.length * 2048,
+    capture_epoch: upload.chunk.capture_epoch,
+    code: null,
+  },
+  {
+    event_type: 'capture.stopped',
+    clock_ms: 1000 + archiveChunks.length * 2048,
+    capture_epoch: null,
+    code: null,
+  },
+];
 let adopted = false;
 function send(request, event_type, payload) {
   const frame = encodeFrame({
@@ -57,7 +101,71 @@ function send(request, event_type, payload) {
 process.stdin.on('data', (bytes) => {
   for (const input of decoder.push(bytes)) {
     const request = audioRequestSchema.parse(input);
-    if (request.command === 'start_recording' && mode.startsWith('capture')) {
+    if (mode.startsWith('archive') && request.command === 'inspect_recording') {
+      send(request, 'recording.inspected', {
+        state:
+          mode === 'archive-incomplete'
+            ? 'interrupted'
+            : mode === 'archive-key-unavailable'
+              ? 'key_unavailable'
+              : 'sealed',
+        verified_chunks: archiveChunks.length,
+        recovered_chunks: mode === 'archive-orphan' ? 1 : 0,
+        issues:
+          mode === 'archive-corrupt'
+            ? [{ code: 'chunk_corrupt', message: 'Synthetic damaged chunk.' }]
+            : mode === 'archive-incomplete'
+              ? [
+                  {
+                    code: 'unsealed_tail',
+                    message: 'Synthetic interrupted tail.',
+                  },
+                ]
+              : [],
+        total_samples: upload.chunk.sample_count * archiveChunks.length,
+      });
+    } else if (
+      mode.startsWith('archive') &&
+      request.command === 'get_recording'
+    ) {
+      const offset = request.offset ?? 0;
+      const events = archiveEvents.slice(offset, offset + 50);
+      const spec = recoveryTrack ?? {
+        track_id: track,
+        kind: 'microphone',
+        capture_scope: 'endpoint',
+        device_selection_policy: 'explicit',
+        device_id: 'synthetic',
+      };
+      send(request, 'recording.manifest', {
+        format_version: 1,
+        recording_id: request.recording_id,
+        created_at: '2026-01-01T00:00:00.1239999+00:00',
+        state: mode === 'archive-incomplete' ? 'failed' : 'sealed',
+        tracks: [
+          {
+            spec:
+              mode === 'archive-wrong-source'
+                ? { ...spec, device_id: 'changed-source' }
+                : spec,
+            actual_device_id:
+              spec.device_id === 'default'
+                ? 'synthetic-default-microphone'
+                : spec.device_id,
+            saved_samples: upload.chunk.sample_count * archiveChunks.length,
+            chunk_count: archiveChunks.length,
+          },
+        ],
+        event_offset: mode === 'archive-bad-page' ? offset + 1 : offset,
+        event_count:
+          archiveEvents.length + (mode === 'archive-bad-page' ? 1 : 0),
+        events,
+        has_more: offset + events.length < archiveEvents.length,
+      });
+    } else if (
+      request.command === 'start_recording' &&
+      mode.startsWith('capture')
+    ) {
       capture = request;
       send(request, 'recording.started', {
         state: 'recording',
@@ -232,7 +340,25 @@ process.stdin.on('data', (bytes) => {
       else reply();
     } else if (request.command === 'list_recording_chunks') {
       if (mode === 'wrong-kind') send(request, 'devices', { devices: [] });
-      else
+      else if (mode.startsWith('archive')) {
+        const chunks = archiveChunks.slice(
+          request.sequence_start,
+          request.sequence_start + 50,
+        );
+        send(request, 'recording.chunks', {
+          track_id: mode === 'archive-wrong-chunk' ? recording : track,
+          sequence_start: request.sequence_start,
+          chunks:
+            mode === 'archive-wrong-chunk'
+              ? chunks.map((c) => ({
+                  ...c,
+                  chunk: { ...c.chunk, track_id: recording },
+                }))
+              : chunks,
+          has_more:
+            request.sequence_start + chunks.length < archiveChunks.length,
+        });
+      } else
         send(request, 'recording.chunks', {
           track_id: track,
           sequence_start: 0,
@@ -240,6 +366,14 @@ process.stdin.on('data', (bytes) => {
           has_more: false,
         });
     } else if (request.command === 'read_chunk') {
+      if (mode === 'archive-stall-read') continue;
+      const rangeUpload = mode.startsWith('archive')
+        ? archiveChunks.find(
+            (chunk) => chunk.chunk.chunk_id === request.chunk_id,
+          )
+        : upload;
+      if (!rangeUpload)
+        throw new Error('The synthetic archive has no matching chunk.');
       if (mode === 'read-error') {
         send(request, 'error', {
           code: 'chunk_unreadable',
@@ -251,7 +385,9 @@ process.stdin.on('data', (bytes) => {
       const end = Math.min(wav.length, request.offset + request.length);
       send(request, 'recording.chunk_range', {
         upload:
-          mode === 'changed' ? { ...upload, sha256: '0'.repeat(64) } : upload,
+          mode === 'changed'
+            ? { ...upload, sha256: '0'.repeat(64) }
+            : rangeUpload,
         offset: mode === 'wrong-offset' ? request.offset + 1 : request.offset,
         data_base64: wav.subarray(request.offset, end).toString('base64'),
         end_of_chunk: end === wav.length,

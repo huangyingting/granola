@@ -138,6 +138,39 @@ export class WorkspaceController {
   audioChanged() {
     if (!this.disposed) this.emit('audio');
   }
+  recordingUploadContext() {
+    if (
+      this.disposed ||
+      this.critical ||
+      this.auth ||
+      !this.api ||
+      !this.account?.active_workspace ||
+      this.session?.summary().status !== 'active' ||
+      this.profile === 'offline'
+    )
+      return null;
+    const scope = this.scope;
+    const profile = this.profile;
+    const api = this.api;
+    return {
+      profile,
+      scope,
+      api,
+      allowLoopback: this.options.allowLoopback ?? false,
+      authorize: () => {
+        this.assertScope(scope);
+        if (
+          this.profile !== profile ||
+          this.api !== api ||
+          this.session?.summary().status !== 'active'
+        )
+          throw new ClientError(
+            'workspace_changed',
+            'The upload workspace or authenticated account changed.',
+          );
+      },
+    };
+  }
   private persist(account: Account) {
     this.local.putValue('root', 'account', account);
     this.account = account;

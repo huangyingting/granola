@@ -234,4 +234,16 @@ export function registerRecordingRoutes(
     const { id } = parse(idParams, request.params);
     return db.recordings.deletion(principal(request).userId, id);
   });
+  app.delete(
+    '/v1/documents/:document/recordings/:id',
+    async (request, reply) => {
+      const { document, id } = parse(
+        z.strictObject({ document: resourceId, id: resourceId }),
+        request.params,
+      );
+      const user = principal(request).userId;
+      await db.recordings.removeExpected(user, document, id);
+      return reply.code(202).send(await db.recordings.deletion(user, id));
+    },
+  );
 }

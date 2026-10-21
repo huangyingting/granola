@@ -101,6 +101,18 @@ export const remoteRecordingSchema = z.strictObject({
   chunk_count: z.number().int().min(0).max(MAX_RECORDING_CHUNKS),
   verified_chunks: z.number().int().min(0).max(MAX_RECORDING_CHUNKS),
 });
+export const recordingDeletionSchema = z
+  .strictObject({
+    state: z.enum(['cleanup_pending', 'cleanup_confirmed']),
+    pending_objects: z.number().int().nonnegative(),
+    cleanup_errors: z.number().int().nonnegative(),
+    repeated_cleanup: z.literal(true),
+  })
+  .refine(
+    (value) =>
+      (value.state === 'cleanup_confirmed') ===
+      (value.pending_objects === 0 && value.cleanup_errors === 0),
+  );
 export const remoteChunkSchema = z.strictObject({
   upload: uploadChunkSchema,
   state: z.enum(['pending', 'checking', 'verified']),

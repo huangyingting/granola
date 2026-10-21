@@ -34,6 +34,10 @@ import {
   recordingOwnerSchema,
   type LocalRecording,
   type RecordingOwner,
+  recordingUploadIntentSchema,
+  type RecordingUploadIntent,
+  recordingUploadStatusSchema,
+  type RecordingUploadStatus,
 } from '@windows-ai-notes/contracts/recording';
 
 export class LocalError extends Error {
@@ -179,7 +183,7 @@ export class LocalStore {
           const version = inspect
             .prepare('PRAGMA user_version')
             .get()?.user_version;
-          if (version !== 1 && version !== 2 && version !== 3)
+          if (version !== 1 && version !== 2 && version !== 3 && version !== 4)
             throw new LocalError(
               'local_version_unsupported',
               'This local database needs a compatible application version.',
@@ -190,6 +194,7 @@ export class LocalStore {
               'drafts',
               'outbox',
               ...(version !== 1 ? ['snapshot_candidates'] : []),
+              ...(version === 4 ? ['recording_uploads'] : []),
             ].every((name) => tables.some((row) => row.name === name))
           )
             throw new LocalError(
@@ -253,6 +258,13 @@ export class LocalStore {
           profile TEXT NOT NULL,id TEXT NOT NULL,PRIMARY KEY(profile,id),
           FOREIGN KEY(profile,id) REFERENCES drafts(profile,id) ON DELETE CASCADE
         );
+        CREATE TABLE IF NOT EXISTS recording_uploads (
+          profile TEXT NOT NULL,recording_id TEXT NOT NULL,document_id TEXT NOT NULL,
+          state TEXT NOT NULL,retry_at INTEGER NOT NULL,payload BLOB NOT NULL,status_payload BLOB NOT NULL,
+          PRIMARY KEY(profile,recording_id),
+          FOREIGN KEY(profile,document_id) REFERENCES drafts(profile,id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS recording_uploads_pending ON recording_uploads(profile,state,retry_at);
       `);
         if (version === 1) {
           const values = this.database
@@ -280,7 +292,7 @@ export class LocalStore {
             .get()
         )
           this.putValue('root', 'key-check', 'windows-ai-notes-local-v1');
-        this.database.exec('PRAGMA user_version=3');
+        this.database.exec('PRAGMA user_version=4');
       });
     } catch (error) {
       try {
@@ -657,6 +669,11 @@ export class LocalStore {
         ).id,
     );
     this.queueRecordingIds(profile, ids);
+    this.database
+      .prepare(
+        'DELETE FROM recording_uploads WHERE profile=? AND (? IS NULL OR document_id=?)',
+      )
+      .run(profile, document ?? null, document ?? null);
   }
   private queueRecordingIds(profile: string, ids: string[]): void {
     const pending = z
@@ -673,7 +690,157 @@ export class LocalStore {
       this.getRecording(profile, document, id);
       this.queueRecordingIds(profile, [id]);
       this.deleteValue(profile, `recording:${id}`);
+      this.database
+        .prepare(
+          'DELETE FROM recording_uploads WHERE profile=? AND recording_id=?',
+        )
+        .run(profile, id);
     });
+  }
+  recordingUpload(
+    profile: string,
+    document: string,
+    id: string,
+  ): RecordingUploadIntent | null {
+    this.getRecording(profile, document, id);
+    const row = this.database
+      .prepare(
+        'SELECT document_id,state,retry_at,payload FROM recording_uploads WHERE profile=? AND recording_id=?',
+      )
+      .get(profile, id);
+    if (!row) return null;
+    const intent = this.open(
+      recordingUploadIntentSchema,
+      z.instanceof(Uint8Array).parse(row.payload),
+      aad('recording-upload', profile, id, document),
+    );
+    if (
+      row.document_id !== document ||
+      intent.document_id !== document ||
+      intent.recording_id !== id ||
+      row.state !== intent.state ||
+      row.retry_at !== intent.retry_at
+    )
+      throw new LocalError(
+        'local_data_corrupt',
+        'The encrypted upload journal does not match its ownership or queue metadata.',
+      );
+    return intent;
+  }
+  saveRecordingUpload(
+    profile: string,
+    value: RecordingUploadIntent,
+  ): RecordingUploadIntent {
+    const intent = recordingUploadIntentSchema.parse(value);
+    return this.transaction(() => {
+      const recording = this.getRecording(
+        profile,
+        intent.document_id,
+        intent.recording_id,
+      );
+      if (
+        profile === 'offline' ||
+        ['starting', 'recording', 'paused'].includes(recording.state)
+      )
+        throw new LocalError(
+          'upload_not_available',
+          'Stop recording in a connected workspace before requesting upload.',
+        );
+      const previous = this.recordingUpload(
+        profile,
+        intent.document_id,
+        intent.recording_id,
+      );
+      if (
+        previous?.plan &&
+        canonicalJson(previous.plan) !== canonicalJson(intent.plan)
+      )
+        throw new LocalError(
+          'upload_plan_changed',
+          'The frozen recording upload plan cannot change. Local audio was preserved.',
+        );
+      const { plan: _plan, accept_incomplete: _accept, ...status } = intent;
+      this.database
+        .prepare(
+          `INSERT INTO recording_uploads VALUES (?,?,?,?,?,?,?)
+        ON CONFLICT(profile,recording_id) DO UPDATE SET state=excluded.state,retry_at=excluded.retry_at,payload=excluded.payload,status_payload=excluded.status_payload`,
+        )
+        .run(
+          profile,
+          intent.recording_id,
+          intent.document_id,
+          intent.state,
+          intent.retry_at,
+          this.seal(
+            intent,
+            aad(
+              'recording-upload',
+              profile,
+              intent.recording_id,
+              intent.document_id,
+            ),
+          ),
+          this.seal(
+            status,
+            aad(
+              'recording-upload-status',
+              profile,
+              intent.recording_id,
+              intent.document_id,
+            ),
+          ),
+        );
+      return intent;
+    });
+  }
+  recordingUploadStatus(
+    profile: string,
+    document: string,
+    id: string,
+  ): RecordingUploadStatus | null {
+    this.getRecording(profile, document, id);
+    const row = this.database
+      .prepare(
+        'SELECT document_id,state,retry_at,status_payload FROM recording_uploads WHERE profile=? AND recording_id=?',
+      )
+      .get(profile, id);
+    if (!row) return null;
+    const status = this.open(
+      recordingUploadStatusSchema,
+      z.instanceof(Uint8Array).parse(row.status_payload),
+      aad('recording-upload-status', profile, id, document),
+    );
+    if (
+      row.document_id !== document ||
+      status.document_id !== document ||
+      status.recording_id !== id ||
+      row.state !== status.state ||
+      row.retry_at !== status.retry_at
+    )
+      throw new LocalError(
+        'local_data_corrupt',
+        'The encrypted upload status does not match its ownership or queue metadata.',
+      );
+    return status;
+  }
+  nextRecordingUpload(
+    profile: string,
+    now = Date.now(),
+  ): RecordingUploadIntent | null {
+    const row = this.database
+      .prepare(
+        `SELECT recording_id,document_id FROM recording_uploads
+      WHERE profile=? AND state IN ('queued','waiting','uploading','delete_pending','deleting') AND retry_at<=?
+      ORDER BY retry_at,recording_id LIMIT 1`,
+      )
+      .get(profile, now);
+    return row
+      ? this.recordingUpload(
+          profile,
+          resourceId.parse(row.document_id),
+          resourceId.parse(row.recording_id),
+        )
+      : null;
   }
   private row(profile: string, id: string): Row | null {
     const value = this.database

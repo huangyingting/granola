@@ -100,7 +100,7 @@ test('requires explicit source selection, rejects stale capture requests and doe
     ).not.toBeChecked();
     await expect(
       page.getByRole('region', { name: 'Meeting audio' }),
-    ).toContainText('Nothing is sent to Azure or uploaded yet.');
+    ).toContainText('Saved audio uploads only with your consent');
     const rejected = await page.evaluate(async () => {
       const initial = await window.notes.invoke({ operation: 'bootstrap' });
       if (!initial.ok || !('state' in initial) || !initial.state.selected_id)

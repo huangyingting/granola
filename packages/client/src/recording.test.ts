@@ -224,6 +224,31 @@ describe('durable desktop capture coordination with a real framed helper process
     expect(local.pendingRecordingDeletions()).toEqual([]);
     expect(controller.snapshot('offline', null).cleanup_error).toBeNull();
   });
+  it('drains physical cleanup before shutdown can close its encrypted journal', async () => {
+    const draft = local.create('offline');
+    const recording = local.beginRecording('offline', draft.id, choices());
+    local.updateRecording('offline', draft.id, recording.id, {
+      state: 'sealed',
+    });
+    local.removeRecording('offline', draft.id, recording.id);
+    let finish!: () => void;
+    const removal = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const { controller } = setup(
+      'capture',
+      vi.fn(() => removal),
+    );
+    const cleanup = controller.cleanup();
+    const closed = vi.fn();
+    const stopping = controller.stop(() => {}).then(closed);
+    await Promise.resolve();
+    expect(closed).not.toHaveBeenCalled();
+    finish();
+    await Promise.all([cleanup, stopping]);
+    expect(closed).toHaveBeenCalledOnce();
+    expect(local.pendingRecordingDeletions()).toEqual([]);
+  });
   it('recovers acknowledged per-track metadata without resuming capture or claiming a sealed tail', async () => {
     const draft = local.create('offline');
     const tracks = choices();

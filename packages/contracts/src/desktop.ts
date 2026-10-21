@@ -71,6 +71,20 @@ export const desktopCommandSchema = z.discriminatedUnion('operation', [
   }),
   z.strictObject({ operation: z.literal('retryRecordingCleanup'), ...scoped }),
   z.strictObject({
+    operation: z.literal('uploadRecording'),
+    ...scoped,
+    id: resourceId,
+    recording_id: resourceId,
+    confirmed: z.literal(true),
+    accept_incomplete: z.boolean(),
+  }),
+  z.strictObject({
+    operation: z.literal('pauseRecordingUpload'),
+    ...scoped,
+    id: resourceId,
+    recording_id: resourceId,
+  }),
+  z.strictObject({
     operation: z.literal('create'),
     ...scoped,
     value: editableSchema.optional(),

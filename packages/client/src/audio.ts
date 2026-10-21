@@ -133,6 +133,15 @@ export class AudioHostClient {
               `AudioHost exited with code ${code ?? 'unknown'}. Inspect saved audio before assuming it is complete.`,
             ),
           );
+        } else if (this.pending.size) {
+          const cancelled = new AudioHostError(
+            'audio_request_cancelled',
+            'The audio helper closed before this request completed. Preserved audio was not assumed complete.',
+            false,
+          );
+          for (const handler of this.pending.values())
+            handler.reject(cancelled);
+          this.pending.clear();
         }
         if (this.killTimer) clearTimeout(this.killTimer);
         resolve(code);

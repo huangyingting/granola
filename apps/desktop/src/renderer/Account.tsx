@@ -208,9 +208,9 @@ export function Account({
               <p>
                 Cloud caches and all pending operations will be removed from
                 this device. Pending deletions will not be sent. Cloud documents
-                are not deleted. Cached workspace audio is deleted too,
-                including recordings not yet uploaded. Kept draft copies contain
-                notes only.
+                and existing remote audio are not deleted. Cached workspace
+                audio is deleted too, including recordings not yet uploaded.
+                Kept draft copies contain notes only.
               </p>
               {connection.unsent_count > 0 && (
                 <label className="checkbox-label">

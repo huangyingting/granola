@@ -660,6 +660,34 @@ export class RecordingStore {
       await this.erase(tx, id);
     });
   }
+  async removeExpected(user: string, document: string, id: string) {
+    await this.database.transaction(async (tx) => {
+      const doc = await this.database.document(user, document, tx);
+      const row = (
+        await tx.query<Row>('SELECT * FROM recordings WHERE id=$1 FOR UPDATE', [
+          id,
+        ])
+      ).rows[0];
+      if (row && (row.document_id !== document || row.owner_id !== user))
+        throw unavailable();
+      if (!row) {
+        const inserted = await tx.query(
+          `INSERT INTO recordings
+          (id,document_id,workspace_id,owner_id,source_created_at,tracks,create_key,create_hash,deleted_at)
+          VALUES ($1,$2,$3,$4,now(),'[]'::jsonb,$5,$6,now()) ON CONFLICT DO NOTHING`,
+          [
+            id,
+            document,
+            doc.workspace_id,
+            user,
+            `deleted:${id}`,
+            hash({ id, document, deleted: true }),
+          ],
+        );
+        if (!inserted.rowCount) throw unavailable();
+      } else await this.erase(tx, id);
+    });
+  }
   async removeDocument(tx: Transaction, document: string) {
     const rows = (
       await tx.query<{ id: string }>(

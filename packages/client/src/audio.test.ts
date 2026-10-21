@@ -115,6 +115,16 @@ describe('bounded main-process native audio transport', () => {
     expect(events).toEqual([]);
     await expect(client.close()).rejects.toThrow();
   });
+  it('settles an unanswered range request when the helper closes rather than waiting for the request timeout', async () => {
+    const client = open('archive-stall-read');
+    const upload = await descriptor(client);
+    const reading = client.readChunk(recording, upload).next();
+    const rejected = expect(reading).rejects.toMatchObject({
+      code: 'audio_request_cancelled',
+    });
+    await client.close();
+    await rejected;
+  });
   it('bounds outstanding commands instead of allowing unbounded control-stream buffering', async () => {
     const client = open('slow');
     try {

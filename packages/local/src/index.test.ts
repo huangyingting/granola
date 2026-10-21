@@ -12,6 +12,11 @@ import {
 } from '@windows-ai-notes/contracts/content';
 import type { Draft } from '@windows-ai-notes/contracts/desktop';
 import type { Track } from '@windows-ai-notes/contracts';
+import {
+  recordingUploadIntentSchema,
+  type LocalRecording,
+  type RecordingUploadIntent,
+} from '@windows-ai-notes/contracts/recording';
 import { LocalStore } from './index.js';
 
 describe('encrypted local drafts and durable outbox', () => {
@@ -76,6 +81,293 @@ describe('encrypted local drafts and durable outbox', () => {
     stores.clear();
     key.fill(0);
     rmSync(directory, { recursive: true, force: true });
+  });
+  function savedUpload(store: LocalStore) {
+    const draft = store.create(profile, fields('Private upload journal.'));
+    const recording = store.beginRecording(profile, draft.id, tracks());
+    store.updateRecording(profile, draft.id, recording.id, { state: 'sealed' });
+    const intent = recordingUploadIntentSchema.parse({
+      recording_id: recording.id,
+      document_id: draft.id,
+      state: 'queued',
+      verified_chunks: 0,
+      total_chunks: 0,
+      verified_bytes: 0,
+      partial: false,
+      attempts: 0,
+      retry_at: 0,
+      error: null,
+      accept_incomplete: false,
+      plan: null,
+    });
+    return { draft, recording, intent };
+  }
+  function frozen(
+    recording: LocalRecording,
+    intent: RecordingUploadIntent,
+  ): RecordingUploadIntent {
+    const chunk = {
+      chunk: {
+        format_version: 1,
+        recording_id: recording.id,
+        track_id: recording.tracks[0]!.spec.track_id,
+        chunk_id: randomUUID(),
+        capture_epoch: randomUUID(),
+        sequence: 0,
+        sample_start: 0,
+        sample_count: 16000,
+        sample_rate: 16000,
+        channels: 1,
+        bits_per_sample: 16,
+        clock_start_ms: 0,
+        clock_end_ms: 1000,
+        pcm_sha256: 'a'.repeat(64),
+      },
+      size_bytes: 32044,
+      sha256: 'b'.repeat(64),
+    };
+    return recordingUploadIntentSchema.parse({
+      ...intent,
+      total_chunks: 1,
+      plan: {
+        create: {
+          id: recording.id,
+          created_at: recording.created_at,
+          tracks: recording.tracks.map((track) => ({
+            spec: track.spec,
+            actual_device_id: track.spec.device_id,
+          })),
+        },
+        chunks: [chunk],
+        seal: {
+          native_state: 'sealed',
+          accept_incomplete: false,
+          tracks: [
+            {
+              track_id: chunk.chunk.track_id,
+              end_sample: 16000,
+              chunk_ids: [chunk.chunk.chunk_id],
+            },
+          ],
+          events: [],
+          gaps: [],
+        },
+      },
+    });
+  }
+  it('persists encrypted scoped upload plans and separate lightweight status across restart without exposing source metadata', () => {
+    const store = open();
+    const { recording, intent } = savedUpload(store);
+    const value = frozen(recording, intent);
+    store.saveRecordingUpload(profile, value);
+    expect(
+      store.recordingUploadStatus(profile, intent.document_id, recording.id),
+    ).toEqual(
+      expect.not.objectContaining({
+        plan: expect.anything(),
+        accept_incomplete: expect.anything(),
+      }),
+    );
+    expect(
+      JSON.stringify(
+        store.recordingUploadStatus(profile, intent.document_id, recording.id),
+      ),
+    ).not.toContain('synthetic-private-microphone');
+    close(store);
+    const reopened = open();
+    expect(
+      reopened.recordingUpload(profile, intent.document_id, recording.id),
+    ).toEqual(value);
+    expect(reopened.nextRecordingUpload(profile)).toEqual(value);
+    expect(reopened.nextRecordingUpload('unrelated-profile')).toBeNull();
+    const other = reopened.create(profile);
+    expect(() =>
+      reopened.recordingUpload(profile, other.id, recording.id),
+    ).toThrow('not available in this document');
+    for (const file of [path, `${path}-wal`])
+      if (existsSync(file))
+        expect(
+          readFileSync(file).includes(
+            Buffer.from('synthetic-private-microphone'),
+          ),
+        ).toBe(false);
+  });
+  it('freezes an authenticated plan and refuses invalid counts, source changes and clearing the plan', () => {
+    const store = open();
+    const { recording, intent } = savedUpload(store);
+    const value = frozen(recording, intent);
+    store.saveRecordingUpload(profile, value);
+    expect(() =>
+      store.saveRecordingUpload(profile, { ...value, plan: null }),
+    ).toThrow();
+    expect(() =>
+      store.saveRecordingUpload(profile, {
+        ...value,
+        plan: {
+          ...value.plan!,
+          create: { ...value.plan!.create, created_at: '2025-01-01T00:00:00Z' },
+        },
+      }),
+    ).toThrow('frozen recording upload plan');
+    expect(() =>
+      store.saveRecordingUpload(profile, { ...value, verified_chunks: 2 }),
+    ).toThrow();
+    expect(
+      store.recordingUpload(profile, intent.document_id, recording.id),
+    ).toEqual(value);
+  });
+  it('restores crashed work, orders due retries, and never selects paused, attention or completed uploads', () => {
+    const store = open();
+    const a = savedUpload(store),
+      b = savedUpload(store);
+    store.saveRecordingUpload(profile, {
+      ...a.intent,
+      state: 'waiting',
+      retry_at: 3000,
+    });
+    store.saveRecordingUpload(profile, {
+      ...b.intent,
+      state: 'uploading',
+      retry_at: 1000,
+    });
+    expect(store.nextRecordingUpload(profile, 999)).toBeNull();
+    expect(store.nextRecordingUpload(profile, 1000)?.recording_id).toBe(
+      b.recording.id,
+    );
+    for (const state of ['paused', 'attention', 'complete'] as const) {
+      store.saveRecordingUpload(profile, { ...b.intent, state });
+      expect(store.nextRecordingUpload(profile, 2999)).toBeNull();
+    }
+    expect(store.nextRecordingUpload(profile, 3000)?.recording_id).toBe(
+      a.recording.id,
+    );
+    store.saveRecordingUpload(profile, { ...b.intent, state: 'deleting' });
+    expect(store.nextRecordingUpload(profile, 0)?.state).toBe('deleting');
+  });
+  it.each(['state', 'retry_at', 'payload', 'status_payload'] as const)(
+    'fails closed on authenticated upload journal tampering of %s',
+    (field) => {
+      const store = open();
+      const { recording, intent } = savedUpload(store);
+      store.saveRecordingUpload(profile, frozen(recording, intent));
+      const inspect = new DatabaseSync(path);
+      try {
+        inspect
+          .prepare(
+            `UPDATE recording_uploads SET ${field}=? WHERE recording_id=?`,
+          )
+          .run(
+            field === 'state'
+              ? 'waiting'
+              : field === 'retry_at'
+                ? 5000
+                : new Uint8Array([0]),
+            recording.id,
+          );
+      } finally {
+        inspect.close();
+      }
+      if (field !== 'status_payload')
+        expect(() =>
+          store.recordingUpload(profile, intent.document_id, recording.id),
+        ).toThrow();
+      if (field !== 'payload')
+        expect(() =>
+          store.recordingUploadStatus(
+            profile,
+            intent.document_id,
+            recording.id,
+          ),
+        ).toThrow();
+    },
+  );
+  it('authenticates plan ownership rather than accepting another recording ciphertext', () => {
+    const store = open();
+    const a = savedUpload(store),
+      b = savedUpload(store);
+    store.saveRecordingUpload(profile, frozen(a.recording, a.intent));
+    store.saveRecordingUpload(profile, frozen(b.recording, b.intent));
+    const inspect = new DatabaseSync(path);
+    try {
+      inspect
+        .prepare(
+          'UPDATE recording_uploads SET payload=(SELECT payload FROM recording_uploads WHERE recording_id=?) WHERE recording_id=?',
+        )
+        .run(a.recording.id, b.recording.id);
+    } finally {
+      inspect.close();
+    }
+    expect(() =>
+      store.recordingUpload(profile, b.draft.id, b.recording.id),
+    ).toThrow('could not be unlocked or verified');
+    expect(
+      store.recordingUpload(profile, a.draft.id, a.recording.id),
+    ).not.toBeNull();
+  });
+  it('atomically purges upload intents with audio deletion, document deletion and profile revocation', () => {
+    const store = open();
+    const a = savedUpload(store),
+      b = savedUpload(store),
+      c = savedUpload(store);
+    for (const item of [a, b, c])
+      store.saveRecordingUpload(profile, frozen(item.recording, item.intent));
+    store.removeRecording(profile, a.draft.id, a.recording.id);
+    store.remove(profile, b.draft.id);
+    store.purgeProfile(profile);
+    const inspect = new DatabaseSync(path, { readOnly: true });
+    try {
+      expect(
+        inspect.prepare('SELECT count(*) count FROM recording_uploads').get()
+          ?.count,
+      ).toBe(0);
+    } finally {
+      inspect.close();
+    }
+    expect(store.pendingRecordingDeletions().sort()).toEqual(
+      [a.recording.id, b.recording.id, c.recording.id].sort(),
+    );
+  });
+  it.each([2, 3])(
+    'upgrades a real v%s table layout without resetting encrypted recordings',
+    (version) => {
+      const store = open();
+      const { recording, draft } = savedUpload(store);
+      close(store);
+      const inspect = new DatabaseSync(path);
+      inspect.exec(
+        `DROP TABLE recording_uploads; PRAGMA user_version=${version}`,
+      );
+      const bytes = inspect
+        .prepare('SELECT payload FROM vault WHERE id=?')
+        .get(`recording:${recording.id}`)?.payload;
+      inspect.close();
+      const reopened = open();
+      expect(reopened.getRecording(profile, draft.id, recording.id).id).toBe(
+        recording.id,
+      );
+      const after = new DatabaseSync(path, { readOnly: true });
+      try {
+        expect(
+          after
+            .prepare('SELECT payload FROM vault WHERE id=?')
+            .get(`recording:${recording.id}`)?.payload,
+        ).toEqual(bytes);
+        expect(after.prepare('PRAGMA user_version').get()?.user_version).toBe(
+          4,
+        );
+      } finally {
+        after.close();
+      }
+    },
+  );
+  it('does not recreate an unexpectedly missing v4 upload journal or reset existing notes', () => {
+    const store = open();
+    savedUpload(store);
+    close(store);
+    const inspect = new DatabaseSync(path);
+    inspect.exec('DROP TABLE recording_uploads');
+    inspect.close();
+    expect(() => open()).toThrow('structure is incomplete');
   });
   it('durably binds encrypted recording metadata to exactly one document and profile before capture', () => {
     const store = open();
@@ -148,7 +440,7 @@ describe('encrypted local drafts and durable outbox', () => {
     const inspect = new DatabaseSync(path, { readOnly: true });
     try {
       expect(inspect.prepare('PRAGMA user_version').get()?.user_version).toBe(
-        3,
+        4,
       );
     } finally {
       inspect.close();

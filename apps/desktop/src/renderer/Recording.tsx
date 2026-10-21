@@ -1,7 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 import type { AudioEvent, Track } from '@windows-ai-notes/contracts';
 import type { DesktopCommand } from '@windows-ai-notes/contracts/desktop';
-import type { AudioState } from '@windows-ai-notes/contracts/recording';
+import type {
+  AudioState,
+  LocalRecording,
+  RecordingUploadStatus,
+} from '@windows-ai-notes/contracts/recording';
 
 const labels = {
   starting: 'Starting audio',
@@ -58,7 +62,7 @@ function useAudioState(scope: number, document: string | null) {
     const off = window.notes.onChanged((change) => {
       if (
         change.scope === scope &&
-        ['audio', 'data', 'revoked'].includes(change.kind)
+        ['audio', 'data', 'revoked', 'status'].includes(change.kind)
       )
         void refresh();
     });
@@ -94,6 +98,7 @@ function useAudioState(scope: number, document: string | null) {
     state,
     error: operationError || error,
     busy: busy || !!state?.busy,
+    acting: busy,
     act,
     offset,
     setOffset,
@@ -101,10 +106,12 @@ function useAudioState(scope: number, document: string | null) {
 }
 
 export function RecordingBar({ scope }: { scope: number }) {
-  const { state, error, busy, act } = useAudioState(scope, null);
+  const { state, error, busy, acting, act } = useAudioState(scope, null);
   const active = state?.active;
+  const upload = state?.active_upload;
   if (
     !active &&
+    !upload &&
     !error &&
     !state?.error &&
     !state?.cleanup_error &&
@@ -122,8 +129,8 @@ export function RecordingBar({ scope }: { scope: number }) {
           <div>
             <strong>{labels[active.state]}</strong>
             <span>
-              Encrypted audio stays on this device. Cloud transcription is not
-              connected.
+              Encrypted capture stays on this device unless you explicitly
+              upload saved audio.
             </span>
           </div>
           {['recording', 'paused'].includes(active.state) && (
@@ -144,6 +151,35 @@ export function RecordingBar({ scope }: { scope: number }) {
                 ? 'Resume recording'
                 : 'Pause recording'}
             </button>
+          )}
+          {upload && (
+            <div className="recording-cleanup">
+              <strong>
+                {upload.state === 'deleting'
+                  ? 'Deleting saved audio'
+                  : 'Uploading saved audio'}
+              </strong>
+              <span>
+                {upload.verified_chunks} / {upload.total_chunks || '?'} chunks
+                verified
+              </span>
+              {upload.state === 'uploading' && (
+                <button
+                  className="secondary"
+                  disabled={acting}
+                  onClick={() =>
+                    void act({
+                      operation: 'pauseRecordingUpload',
+                      scope,
+                      id: upload.document_id,
+                      recording_id: upload.recording_id,
+                    })
+                  }
+                >
+                  Pause upload
+                </button>
+              )}
+            </div>
           )}
           <button
             className="danger-button"
@@ -195,6 +231,190 @@ type Device = Extract<
   AudioEvent,
   { event_type: 'devices' }
 >['payload']['devices'][number];
+const uploadLabels: Record<RecordingUploadStatus['state'], string> = {
+  queued: 'Upload queued',
+  uploading: 'Uploading',
+  waiting: 'Waiting to retry',
+  paused: 'Upload paused',
+  attention: 'Upload needs attention',
+  complete: 'Verified remote copy',
+  delete_pending: 'Audio deletion queued',
+  deleting: 'Deleting remote audio',
+};
+function UploadControls({
+  scope,
+  document,
+  recording,
+  status,
+  available,
+  destination,
+  busy,
+  acting,
+  act,
+}: {
+  scope: number;
+  document: string;
+  recording: LocalRecording;
+  status: RecordingUploadStatus | undefined;
+  available: boolean;
+  destination: string | null;
+  busy: boolean;
+  acting: boolean;
+  act: (command: DesktopCommand) => Promise<boolean>;
+}) {
+  const [consent, setConsent] = useState(false);
+  const [incomplete, setIncomplete] = useState(false);
+  const deleting =
+    status?.state === 'delete_pending' || status?.state === 'deleting';
+  return (
+    <div className="audio-upload">
+      {!available && (
+        <p className="quiet-note">
+          Uploads require the original signed-in cloud workspace. Device-only
+          note copies do not include audio.
+        </p>
+      )}
+      {status && (
+        <div role="status">
+          <strong>{uploadLabels[status.state]}</strong>
+          {!deleting && (
+            <>
+              <progress
+                aria-label="Verified audio upload"
+                max={status.total_chunks || 1}
+                value={status.verified_chunks}
+              />
+              <span>
+                {status.verified_chunks} / {status.total_chunks || '?'} chunks
+                verified. Encrypted local audio is kept.
+              </span>
+              {status.partial && (
+                <span>Incomplete capture was explicitly accepted.</span>
+              )}
+            </>
+          )}
+          {deleting && (
+            <span>
+              Local audio is kept until the service confirms cleanup. Reconnect
+              to the original workspace if offline.
+            </span>
+          )}
+          {status.error && (
+            <p className="account-alert" role="alert">
+              {status.error.message}
+            </p>
+          )}
+        </div>
+      )}
+      <div className="inline-actions">
+        {status &&
+          ['queued', 'uploading', 'waiting'].includes(status.state) && (
+            <button
+              className="secondary"
+              disabled={acting}
+              onClick={() =>
+                void act({
+                  operation: 'pauseRecordingUpload',
+                  scope,
+                  id: document,
+                  recording_id: recording.id,
+                })
+              }
+            >
+              Pause upload
+            </button>
+          )}
+        {!deleting &&
+          status?.state !== 'complete' &&
+          (!status ||
+            ['paused', 'waiting', 'attention'].includes(status.state)) && (
+            <button
+              className="secondary"
+              disabled={busy || !available}
+              onClick={() => {
+                setIncomplete(status?.partial ?? false);
+                setConsent(true);
+              }}
+            >
+              {status ? 'Resume or retry upload' : 'Upload saved audio'}
+            </button>
+          )}
+        {deleting && status.state === 'delete_pending' && (
+          <button
+            className="secondary"
+            disabled={busy || !available}
+            onClick={() =>
+              void act({
+                operation: 'removeRecording',
+                scope,
+                id: document,
+                recording_id: recording.id,
+                confirmed: true,
+              })
+            }
+          >
+            Retry audio deletion
+          </button>
+        )}
+      </div>
+      {consent && !deleting && (
+        <div className="audio-configuration">
+          <p>
+            Send saved audio to{' '}
+            {destination ? new URL(destination).host : 'your workspace service'}
+            ? The encrypted local copy stays on this device. This does not start
+            Azure transcription.
+          </p>
+          {!status?.total_chunks ? (
+            <label className="checkbox-label">
+              <input
+                type="checkbox"
+                checked={incomplete}
+                onChange={(event) => setIncomplete(event.target.checked)}
+              />
+              I accept saved audio even if capture was interrupted or has
+              missing audio.
+            </label>
+          ) : (
+            status.partial && (
+              <p>
+                The frozen upload retains its originally accepted incomplete
+                capture.
+              </p>
+            )
+          )}
+          <div className="inline-actions">
+            <button
+              className="quiet-button"
+              disabled={acting}
+              onClick={() => setConsent(false)}
+            >
+              Keep local only
+            </button>
+            <button
+              className="primary"
+              disabled={busy || !available}
+              onClick={() =>
+                void act({
+                  operation: 'uploadRecording',
+                  scope,
+                  id: document,
+                  recording_id: recording.id,
+                  confirmed: true,
+                  accept_incomplete: incomplete,
+                }).then((accepted) => {
+                  if (accepted) setConsent(false);
+                })
+              }
+            >
+              Confirm audio upload
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 export function RecordingPanel({
   scope,
   document,
@@ -204,7 +424,7 @@ export function RecordingPanel({
   document: string;
   beforeStart: () => Promise<boolean>;
 }) {
-  const { state, error, busy, act, offset, setOffset } = useAudioState(
+  const { state, error, busy, acting, act, offset, setOffset } = useAudioState(
     scope,
     document,
   );
@@ -296,8 +516,8 @@ export function RecordingPanel({
         <div>
           <strong>Meeting audio</strong>
           <p className="quiet-note">
-            Optional, encrypted and local. Nothing is sent to Azure or uploaded
-            yet.
+            Encrypted on this device. Saved audio uploads only with your
+            consent; Azure meeting transcription is not connected yet.
           </p>
         </div>
         <button
@@ -430,144 +650,186 @@ export function RecordingPanel({
             Saved audio ({state.recordings.length}
             {state.has_more || offset > 0 ? '+' : ''})
           </summary>
-          {state.recordings.map((recording) => (
-            <article key={recording.id}>
-              <div>
-                <strong>{labels[recording.state]}</strong>
-                <span>{new Date(recording.created_at).toLocaleString()}</span>
-              </div>
-              <p>
-                Last acknowledged chunks:{' '}
-                {recording.tracks
-                  .map(
-                    (track) =>
-                      `${track.spec.kind === 'microphone' ? 'Microphone' : 'System audio'} ${duration(track.saved_samples)}`,
-                  )
-                  .join(' / ')}
-                .
-              </p>
-              {recording.error && (
-                <p className="account-alert">{recording.error.message}</p>
-              )}
-              {recording.inspection && (
+          {state.recordings.map((recording) => {
+            const upload = state.uploads.find(
+              (value) => value.recording_id === recording.id,
+            );
+            const deleting =
+              upload?.state === 'delete_pending' ||
+              upload?.state === 'deleting';
+            return (
+              <article key={recording.id}>
+                <div>
+                  <strong>{labels[recording.state]}</strong>
+                  <span>{new Date(recording.created_at).toLocaleString()}</span>
+                </div>
                 <p>
-                  Integrity: {recording.inspection.state}.{' '}
-                  {recording.inspection.verified_chunks} verified chunks;{' '}
-                  {recording.inspection.recovered_chunks} orphan chunks found.
-                  Verified audio: {duration(recording.inspection.total_samples)}{' '}
-                  across all tracks.
+                  Last acknowledged chunks:{' '}
+                  {recording.tracks
+                    .map(
+                      (track) =>
+                        `${track.spec.kind === 'microphone' ? 'Microphone' : 'System audio'} ${duration(track.saved_samples)}`,
+                    )
+                    .join(' / ')}
+                  .
                 </p>
-              )}
-              <div className="inline-actions">
-                <button
-                  className="secondary"
-                  disabled={busy || !!state.active}
-                  onClick={() =>
-                    void act({
-                      operation: 'inspectRecording',
-                      scope,
-                      id: document,
-                      recording_id: recording.id,
-                    })
-                  }
-                >
-                  Inspect saved audio
-                </button>
-                {!!recording.inspection?.recovered_chunks &&
-                  recording.inspection.state !== 'key_unavailable' &&
-                  recording.inspection.issues.every((issue) =>
-                    ['unsealed_tail', 'uncommitted_file'].includes(issue.code),
-                  ) && (
-                    <button
-                      className="secondary"
-                      disabled={busy || !!state.active}
-                      onClick={() =>
-                        setConfirmation({
-                          id: recording.id,
-                          action: 'recover',
-                        })
-                      }
-                    >
-                      Recover saved chunks
-                    </button>
+                {recording.error && (
+                  <p className="account-alert">{recording.error.message}</p>
+                )}
+                {recording.inspection && (
+                  <p>
+                    Integrity: {recording.inspection.state}.{' '}
+                    {recording.inspection.verified_chunks} verified chunks;{' '}
+                    {recording.inspection.recovered_chunks} orphan chunks found.
+                    Verified audio:{' '}
+                    {duration(recording.inspection.total_samples)} across all
+                    tracks.
+                  </p>
+                )}
+                <div className="inline-actions">
+                  <button
+                    className="secondary"
+                    disabled={busy || !!state.active || deleting}
+                    onClick={() =>
+                      void act({
+                        operation: 'inspectRecording',
+                        scope,
+                        id: document,
+                        recording_id: recording.id,
+                      })
+                    }
+                  >
+                    Inspect saved audio
+                  </button>
+                  {!!recording.inspection?.recovered_chunks &&
+                    recording.inspection.state !== 'key_unavailable' &&
+                    recording.inspection.issues.every((issue) =>
+                      ['unsealed_tail', 'uncommitted_file'].includes(
+                        issue.code,
+                      ),
+                    ) && (
+                      <button
+                        className="secondary"
+                        disabled={
+                          busy ||
+                          !!state.active ||
+                          !!upload?.total_chunks ||
+                          deleting
+                        }
+                        onClick={() =>
+                          setConfirmation({
+                            id: recording.id,
+                            action: 'recover',
+                          })
+                        }
+                      >
+                        Recover saved chunks
+                      </button>
+                    )}
+                  <button
+                    className="quiet-button danger"
+                    disabled={
+                      acting ||
+                      !!state.active ||
+                      deleting ||
+                      (busy &&
+                        state.active_upload?.recording_id !== recording.id)
+                    }
+                    onClick={() =>
+                      setConfirmation({ id: recording.id, action: 'delete' })
+                    }
+                  >
+                    Delete audio only
+                  </button>
+                </div>
+                {!['starting', 'recording', 'paused'].includes(
+                  recording.state,
+                ) && (
+                  <UploadControls
+                    scope={scope}
+                    document={document}
+                    recording={recording}
+                    status={upload}
+                    available={state.upload_available}
+                    destination={state.upload_destination}
+                    busy={busy}
+                    acting={acting}
+                    act={act}
+                  />
+                )}
+                {confirmation?.id === recording.id &&
+                  confirmation.action === 'recover' && (
+                    <div className="delete-confirm">
+                      <span>
+                        Attach authenticated saved chunks? Capture will not
+                        resume. The unsaved audio tail may be lost.
+                      </span>
+                      <button
+                        className="secondary"
+                        disabled={busy}
+                        onClick={() => setConfirmation(null)}
+                      >
+                        Cancel recovery
+                      </button>
+                      <button
+                        className="primary"
+                        disabled={busy}
+                        onClick={() =>
+                          void act({
+                            operation: 'recoverRecording',
+                            scope,
+                            id: document,
+                            recording_id: recording.id,
+                            confirmed: true,
+                          }).then((recovered) => {
+                            if (recovered) setConfirmation(null);
+                          })
+                        }
+                      >
+                        Confirm recovery
+                      </button>
+                    </div>
                   )}
-                <button
-                  className="quiet-button danger"
-                  disabled={busy || !!state.active}
-                  onClick={() =>
-                    setConfirmation({ id: recording.id, action: 'delete' })
-                  }
-                >
-                  Delete audio only
-                </button>
-              </div>
-              {confirmation?.id === recording.id &&
-                confirmation.action === 'recover' && (
-                  <div className="delete-confirm">
-                    <span>
-                      Attach authenticated saved chunks? Capture will not
-                      resume. The unsaved audio tail may be lost.
-                    </span>
-                    <button
-                      className="secondary"
-                      disabled={busy}
-                      onClick={() => setConfirmation(null)}
-                    >
-                      Cancel recovery
-                    </button>
-                    <button
-                      className="primary"
-                      disabled={busy}
-                      onClick={() =>
-                        void act({
-                          operation: 'recoverRecording',
-                          scope,
-                          id: document,
-                          recording_id: recording.id,
-                          confirmed: true,
-                        }).then((recovered) => {
-                          if (recovered) setConfirmation(null);
-                        })
-                      }
-                    >
-                      Confirm recovery
-                    </button>
-                  </div>
-                )}
-              {confirmation?.id === recording.id &&
-                confirmation.action === 'delete' && (
-                  <div className="delete-confirm">
-                    <span>
-                      Delete this device's only audio copy? Notes stay. This
-                      cannot be undone.
-                    </span>
-                    <button
-                      className="secondary"
-                      onClick={() => setConfirmation(null)}
-                    >
-                      Keep audio
-                    </button>
-                    <button
-                      className="danger-button"
-                      disabled={busy}
-                      onClick={() =>
-                        void act({
-                          operation: 'removeRecording',
-                          scope,
-                          id: document,
-                          recording_id: recording.id,
-                          confirmed: true,
-                        }).then((removed) => {
-                          if (removed) setConfirmation(null);
-                        })
-                      }
-                    >
-                      Confirm audio deletion
-                    </button>
-                  </div>
-                )}
-            </article>
-          ))}
+                {confirmation?.id === recording.id &&
+                  confirmation.action === 'delete' && (
+                    <div className="delete-confirm">
+                      <span>
+                        {upload
+                          ? 'Delete local and remote audio? Deletion is queued until remote cleanup is confirmed; notes stay. This cannot be undone.'
+                          : "Delete this device's only audio copy? Notes stay. This cannot be undone."}
+                      </span>
+                      <button
+                        className="secondary"
+                        onClick={() => setConfirmation(null)}
+                      >
+                        Keep audio
+                      </button>
+                      <button
+                        className="danger-button"
+                        disabled={
+                          acting ||
+                          (busy &&
+                            state.active_upload?.recording_id !== recording.id)
+                        }
+                        onClick={() =>
+                          void act({
+                            operation: 'removeRecording',
+                            scope,
+                            id: document,
+                            recording_id: recording.id,
+                            confirmed: true,
+                          }).then((removed) => {
+                            if (removed) setConfirmation(null);
+                          })
+                        }
+                      >
+                        Confirm audio deletion
+                      </button>
+                    </div>
+                  )}
+              </article>
+            );
+          })}
           {(offset > 0 || state.has_more) && (
             <div className="inline-actions">
               <button

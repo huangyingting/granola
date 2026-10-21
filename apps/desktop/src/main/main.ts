@@ -44,6 +44,7 @@ let window: BrowserWindow | null = null;
 let failure: { code: string; message: string } | null = null;
 let closeNonce: string | null = null;
 let allowClose = false;
+let closingAudio = false;
 let dataDirectory = '';
 let recordings: RecordingController | null = null;
 
@@ -81,15 +82,22 @@ function audio(): RecordingController {
   return recordings;
 }
 function audioMaintenance() {
-  if (!recordings || !controller) return;
-  void recordings.reconcile(controller.profile).catch((error: unknown) => {
-    console.error(
-      JSON.stringify({
-        code: 'recording_cleanup_pending',
-        kind: error instanceof Error ? error.name : 'unknown',
-      }),
-    );
-  });
+  if (!recordings || !controller || closingAudio || allowClose) return;
+  recordings.resumeUploads(controller.recordingUploadContext());
+  void recordings
+    .reconcile(controller.profile)
+    .then(() => {
+      if (!closingAudio && !allowClose && recordings && controller)
+        recordings.resumeUploads(controller.recordingUploadContext());
+    })
+    .catch((error: unknown) => {
+      console.error(
+        JSON.stringify({
+          code: 'recording_cleanup_pending',
+          kind: error instanceof Error ? error.name : 'unknown',
+        }),
+      );
+    });
 }
 
 function localKey(directory: string): Buffer {
@@ -282,7 +290,13 @@ async function start() {
               'invalid_close_request',
               'No matching close operation is pending.',
             );
-          await recordings?.stop(() => {});
+          closingAudio = true;
+          try {
+            await recordings?.stop(() => {});
+          } catch (error) {
+            closingAudio = false;
+            throw error;
+          }
           allowClose = true;
           current.close();
           return { ok: true, closing: true };
@@ -315,6 +329,8 @@ async function start() {
           command.operation === 'inspectRecording' ||
           command.operation === 'recoverRecording' ||
           command.operation === 'removeRecording' ||
+          command.operation === 'uploadRecording' ||
+          command.operation === 'pauseRecordingUpload' ||
           command.operation === 'retryRecordingCleanup'
         ) {
           const active = workspace();
@@ -322,6 +338,8 @@ async function start() {
           const authorize = () => active.assertScope(command.scope);
           authorize();
           const capture = audio();
+          if (!closingAudio && !allowClose)
+            capture.resumeUploads(active.recordingUploadContext());
           if (command.operation === 'startRecording')
             await capture.start(profile, command.id, command.tracks, authorize);
           else if (command.operation === 'controlRecording')
@@ -347,10 +365,25 @@ async function start() {
               authorize,
             );
           else if (command.operation === 'removeRecording') {
-            db.getRecording(profile, command.id, command.recording_id);
-            db.removeRecording(profile, command.id, command.recording_id);
-            await capture.reconcile(profile);
-          } else if (command.operation === 'retryRecordingCleanup')
+            await capture.removeSavedAudio(
+              profile,
+              command.id,
+              command.recording_id,
+            );
+          } else if (command.operation === 'uploadRecording')
+            capture.requestUpload(
+              profile,
+              command.id,
+              command.recording_id,
+              command.accept_incomplete,
+            );
+          else if (command.operation === 'pauseRecordingUpload')
+            await capture.pauseUpload(
+              profile,
+              command.id,
+              command.recording_id,
+            );
+          else if (command.operation === 'retryRecordingCleanup')
             await capture.cleanup();
           authorize();
           const document =

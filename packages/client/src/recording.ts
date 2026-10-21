@@ -3,12 +3,27 @@ import type { AudioEvent, Track } from '@windows-ai-notes/contracts';
 import type {
   LocalRecording,
   RecordingOwner,
+  RecordingUploadIntent,
 } from '@windows-ai-notes/contracts/recording';
 import { LocalError, LocalStore } from '@windows-ai-notes/local';
 import { AudioHostError, type AudioHostClient } from './audio.js';
-import { ClientError } from './http.js';
+import { ClientError, type ApiClient } from './http.js';
+import {
+  uploadSavedRecording,
+  deleteSavedRemoteRecording,
+} from './recording-upload.js';
 
-type AudioClient = Pick<AudioHostClient, 'request' | 'close' | 'failure'>;
+type AudioClient = Pick<
+  AudioHostClient,
+  'request' | 'readChunk' | 'close' | 'failure'
+>;
+export interface RecordingUploadContext {
+  profile: string;
+  scope: number;
+  api: ApiClient;
+  authorize: () => void;
+  allowLoopback?: boolean;
+}
 type Problem = { code: string; message: string };
 function problem(error: unknown): Problem {
   if (
@@ -49,7 +64,14 @@ export class RecordingController {
     document: string;
     id: string;
     revoked: boolean;
+    abort?: AbortController;
   } | null = null;
+  private uploadContext: RecordingUploadContext | null = null;
+  private uploadTask: Promise<void> | null = null;
+  private uploadAbort: AbortController | null = null;
+  private uploading: { profile: string; document: string; id: string } | null =
+    null;
+  private uploadTimer: NodeJS.Timeout | null = null;
   private deviceRequest: Promise<
     Extract<AudioEvent, { event_type: 'devices' }>['payload']['devices']
   > | null = null;
@@ -102,6 +124,7 @@ export class RecordingController {
     } finally {
       this.running = false;
       this.changed();
+      this.resumeUploads(this.uploadContext);
     }
   }
   private report(error: unknown) {
@@ -324,6 +347,10 @@ export class RecordingController {
     });
   }
   async stop(authorize: () => void) {
+    this.uploadContext = null;
+    if (this.uploadTimer) clearTimeout(this.uploadTimer);
+    this.uploadTimer = null;
+    this.uploadAbort?.abort();
     if (this.reviewing) {
       authorize();
       await this.closeReview();
@@ -338,6 +365,8 @@ export class RecordingController {
         authorize,
       );
     else if (this.closing) await this.closing;
+    if (this.uploadTask) await this.uploadTask;
+    if (this.cleaning) await this.cleaning;
   }
   listDevices() {
     if (this.deviceRequest) return this.deviceRequest;
@@ -382,7 +411,354 @@ export class RecordingController {
     const review = this.reviewing;
     if (review) {
       review.revoked = true;
+      review.abort?.abort();
       await review.client.close();
+    }
+    if (this.uploadTask) await this.uploadTask;
+  }
+  requestUpload(
+    profile: string,
+    document: string,
+    id: string,
+    acceptIncomplete: boolean,
+  ) {
+    const context = this.uploadContext;
+    if (!context || context.profile !== profile)
+      throw new ClientError(
+        'not_connected',
+        'Select a signed-in cloud workspace before uploading audio.',
+      );
+    context.authorize();
+    const recording = this.local.getRecording(profile, document, id);
+    if (
+      this.client ||
+      this.running ||
+      ['starting', 'recording', 'paused'].includes(recording.state)
+    )
+      throw new LocalError(
+        'audio_busy',
+        'Stop capture and wait for the current audio operation before uploading.',
+      );
+    if (this.local.get(profile, document).remote_revision === 0)
+      throw new LocalError(
+        'document_not_synced',
+        'Synchronize this meeting before uploading its audio.',
+      );
+    const previous = this.local.recordingUpload(profile, document, id);
+    if (previous?.state === 'complete') return;
+    if (previous && ['delete_pending', 'deleting'].includes(previous.state))
+      throw new LocalError(
+        'audio_deletion_pending',
+        'Audio deletion is already queued.',
+      );
+    this.local.saveRecordingUpload(
+      profile,
+      previous
+        ? {
+            ...previous,
+            state: 'queued',
+            retry_at: 0,
+            error: null,
+            partial: previous.plan ? previous.partial : acceptIncomplete,
+            accept_incomplete: previous.plan
+              ? previous.accept_incomplete
+              : acceptIncomplete,
+          }
+        : {
+            recording_id: id,
+            document_id: document,
+            state: 'queued',
+            verified_chunks: 0,
+            total_chunks: 0,
+            verified_bytes: 0,
+            partial: acceptIncomplete,
+            attempts: 0,
+            retry_at: 0,
+            error: null,
+            accept_incomplete: acceptIncomplete,
+            plan: null,
+          },
+    );
+    this.changed();
+    this.resumeUploads(context);
+  }
+  async pauseUpload(profile: string, document: string, id: string) {
+    const intent = this.local.recordingUpload(profile, document, id);
+    if (
+      !intent ||
+      ['complete', 'delete_pending', 'deleting'].includes(intent.state)
+    )
+      throw new LocalError(
+        'upload_not_active',
+        'This recording has no pausable upload.',
+      );
+    this.local.saveRecordingUpload(profile, {
+      ...intent,
+      state: 'paused',
+      retry_at: 0,
+      error: null,
+    });
+    if (this.uploading?.id === id && this.uploading.profile === profile) {
+      this.uploadAbort?.abort();
+      await this.closeReview();
+    }
+    this.changed();
+  }
+  async removeSavedAudio(profile: string, document: string, id: string) {
+    const intent = this.local.recordingUpload(profile, document, id);
+    if (!intent) {
+      this.local.removeRecording(profile, document, id);
+      await this.reconcile(profile);
+      return;
+    }
+    if (this.uploading?.id === id && this.uploading.profile === profile) {
+      this.local.saveRecordingUpload(profile, { ...intent, state: 'paused' });
+      this.uploadAbort?.abort();
+      await this.closeReview();
+    }
+    const current = this.local.recordingUpload(profile, document, id)!;
+    this.local.saveRecordingUpload(profile, {
+      ...current,
+      state: 'delete_pending',
+      retry_at: 0,
+      error: null,
+    });
+    this.changed();
+    this.resumeUploads(this.uploadContext);
+  }
+  resumeUploads(context: RecordingUploadContext | null): void {
+    const previous = this.uploadContext;
+    this.uploadContext = context;
+    if (this.uploadTimer) clearTimeout(this.uploadTimer);
+    this.uploadTimer = null;
+    if (this.uploadTask) {
+      if (
+        !context ||
+        previous?.profile !== context.profile ||
+        previous?.scope !== context.scope
+      )
+        this.uploadAbort?.abort();
+      return;
+    }
+    if (!context || this.running || this.closing || this.client) return;
+    let intent: RecordingUploadIntent | null;
+    try {
+      context.authorize();
+      intent = this.local.nextRecordingUpload(
+        context.profile,
+        Number.MAX_SAFE_INTEGER,
+      );
+    } catch (error) {
+      this.uploadContext = null;
+      if (!(
+        error instanceof ClientError &&
+        [
+          'workspace_changed',
+          'workspace_closed',
+          'workspace_transition',
+        ].includes(error.code)
+      ))
+        this.report(error);
+      return;
+    }
+    if (!intent) return;
+    const delay = intent.retry_at - Date.now();
+    if (delay > 0) {
+      this.uploadTimer = setTimeout(
+        () => {
+          this.uploadTimer = null;
+          this.resumeUploads(this.uploadContext);
+        },
+        Math.min(delay, 60_000),
+      );
+      this.uploadTimer.unref();
+      return;
+    }
+    this.running = true;
+    const work = this.runUpload(context, intent)
+      .catch((error) => {
+        try {
+          const current = this.local.recordingUpload(
+            context.profile,
+            intent.document_id,
+            intent.recording_id,
+          );
+          if (!current || current.state === 'paused') return;
+          if (current.state === 'complete') {
+            this.report(error);
+            return;
+          }
+          const failure = problem(error);
+          const cancelled =
+            this.uploadContext?.profile !== context.profile ||
+            this.uploadContext.scope !== context.scope ||
+            this.uploadAbort?.signal.aborted ||
+            (error instanceof ClientError &&
+              ['request_cancelled', 'workspace_changed'].includes(error.code));
+          const retryable =
+            cancelled ||
+            ((error instanceof ClientError ||
+              error instanceof AudioHostError) &&
+              error.retryable);
+          const deleting = ['delete_pending', 'deleting'].includes(
+            current.state,
+          );
+          this.local.saveRecordingUpload(context.profile, {
+            ...current,
+            state: deleting
+              ? 'delete_pending'
+              : cancelled
+                ? 'queued'
+                : retryable
+                  ? 'waiting'
+                  : 'attention',
+            retry_at: cancelled
+              ? 0
+              : retryable
+                ? Date.now() +
+                  Math.max(
+                    error instanceof ClientError
+                      ? error.retryAfterSeconds * 1000
+                      : 0,
+                    Math.min(60_000, 1000 * 2 ** Math.min(current.attempts, 6)),
+                  )
+                : deleting
+                  ? Number.MAX_SAFE_INTEGER
+                  : 0,
+            error: cancelled
+              ? null
+              : {
+                  code: failure.code.slice(0, 80),
+                  message: failure.message.slice(0, 512),
+                },
+          });
+        } catch (failure) {
+          if (!missing(failure)) {
+            this.uploadContext = null;
+            this.report(failure);
+          }
+        }
+      })
+      .finally(() => {
+        this.uploadTask = null;
+        this.uploadAbort = null;
+        this.uploading = null;
+        this.running = false;
+        this.changed();
+        this.resumeUploads(this.uploadContext);
+      });
+    this.uploadTask = work;
+    this.changed();
+  }
+  private async runUpload(
+    context: RecordingUploadContext,
+    initial: RecordingUploadIntent,
+  ) {
+    const { profile } = context;
+    this.uploading = {
+      profile,
+      document: initial.document_id,
+      id: initial.recording_id,
+    };
+    const abort = new AbortController();
+    this.uploadAbort = abort;
+    this.error = null;
+    const check = () => {
+      context.authorize();
+      if (
+        abort.signal.aborted ||
+        this.uploadContext?.profile !== profile ||
+        this.uploadContext.scope !== context.scope
+      )
+        throw new ClientError(
+          'request_cancelled',
+          'Audio transfer stopped. Local audio was preserved.',
+          0,
+          true,
+        );
+      this.local.getRecording(
+        profile,
+        initial.document_id,
+        initial.recording_id,
+      );
+    };
+    check();
+    const deleting = ['delete_pending', 'deleting'].includes(initial.state);
+    const intent = this.local.saveRecordingUpload(profile, {
+      ...initial,
+      state: deleting ? 'deleting' : 'uploading',
+      attempts: Math.min(initial.attempts + 1, Number.MAX_SAFE_INTEGER),
+      retry_at: 0,
+      error: null,
+    });
+    this.changed();
+    if (deleting) {
+      const result = await deleteSavedRemoteRecording(
+        context.api,
+        intent.document_id,
+        intent.recording_id,
+        abort.signal,
+      );
+      check();
+      if (result.state !== 'cleanup_confirmed') {
+        this.local.saveRecordingUpload(profile, {
+          ...intent,
+          state: 'delete_pending',
+          retry_at: Date.now() + 30_000,
+          error: result.cleanup_errors
+            ? {
+                code: 'remote_cleanup_pending',
+                message:
+                  'The service is retrying audio deletion. The encrypted local copy is kept until remote cleanup is confirmed.',
+              }
+            : null,
+        });
+        this.changed();
+        return;
+      }
+      this.local.removeRecording(
+        profile,
+        intent.document_id,
+        intent.recording_id,
+      );
+      await this.cleanup();
+      return;
+    }
+    const native = () => {
+      check();
+      if (this.reviewing?.abort === abort) return this.reviewing.client;
+      const client = this.create(() => {});
+      this.reviewing = {
+        client,
+        profile,
+        document: intent.document_id,
+        id: intent.recording_id,
+        revoked: false,
+        abort,
+      };
+      return client;
+    };
+    try {
+      await uploadSavedRecording({
+        local: this.local,
+        profile,
+        intent,
+        native,
+        api: context.api,
+        check,
+        signal: abort.signal,
+        allowLoopback: context.allowLoopback,
+        changed: this.changed,
+      });
+    } finally {
+      const review = this.reviewing;
+      if (review?.abort === abort) {
+        try {
+          await review.client.close();
+        } finally {
+          if (this.reviewing === review) this.reviewing = null;
+        }
+      }
     }
   }
   private async review(
@@ -400,6 +776,11 @@ export class RecordingController {
           'Stop capture before inspecting or recovering saved recordings.',
         );
       this.local.getRecording(profile, document, id);
+      if (recover && this.local.recordingUpload(profile, document, id)?.plan)
+        throw new LocalError(
+          'upload_plan_frozen',
+          'The uploaded recording structure is frozen. Preserved audio cannot be changed by recovery.',
+        );
       const client = this.create(() => {});
       const review = { client, profile, document, id, revoked: false };
       this.reviewing = review;
@@ -523,6 +904,18 @@ export class RecordingController {
       ? this.local.recordings(profile, document, offset)
       : { recordings: [], has_more: false };
     let active: LocalRecording | null = null;
+    let activeUpload = null;
+    if (this.uploading?.profile === profile) {
+      try {
+        activeUpload = this.local.recordingUploadStatus(
+          profile,
+          this.uploading.document,
+          this.uploading.id,
+        );
+      } catch (error) {
+        if (!missing(error)) throw error;
+      }
+    }
     if (this.owner?.profile === profile && !this.revoked) {
       try {
         active = this.local.getRecording(
@@ -543,9 +936,25 @@ export class RecordingController {
       pending_deletions: this.local.pendingRecordingDeletions().length,
       error: this.error,
       cleanup_error: this.cleanupError,
+      upload_available: this.uploadContext?.profile === profile,
+      uploads: page.recordings.flatMap((recording) => {
+        const status = this.local.recordingUploadStatus(
+          profile,
+          recording.document_id,
+          recording.id,
+        );
+        return status ? [status] : [];
+      }),
+      active_upload: activeUpload,
+      upload_destination:
+        this.uploadContext?.profile === profile
+          ? this.uploadContext.api.base
+          : null,
     };
   }
   async reconcile(profile: string): Promise<void> {
+    if (this.uploadContext && this.uploadContext.profile !== profile)
+      this.resumeUploads(null);
     const review = this.reviewing;
     if (review) {
       let forbidden = review.profile !== profile;

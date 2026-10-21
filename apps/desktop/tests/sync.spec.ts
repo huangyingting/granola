@@ -56,6 +56,155 @@ async function synchronize(application: ElectronApplication) {
   });
 }
 
+test('requires inline upload consent and preserves the encrypted journal after native preflight fails and the app restarts', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'windows-notes-upload-ui-'));
+  const fixture = await desktopFixture();
+  const remote = fixture.seed('Synthetic meeting with explicitly saved audio.');
+  let application: ElectronApplication | null = null;
+  try {
+    application = await launch(directory);
+    let page = await application.firstWindow();
+    await page.getByRole('button', { name: /Account & sync/ }).click();
+    await page.getByRole('textbox', { name: 'Service URL' }).fill(fixture.url);
+    await page
+      .getByRole('button', { name: 'Sign in with browser', exact: true })
+      .click();
+    await page
+      .getByRole('button', {
+        name: /^Synthetic cloud workspace (Open workspace|Current workspace)$/,
+      })
+      .click();
+    await expect(
+      page.getByRole('textbox', { name: 'Meeting notes', exact: true }),
+    ).toHaveText(remote.notes);
+    const recording = await application.evaluate(
+      async ({ safeStorage }, { directory, id }) => {
+        const { readFileSync } = await import('node:fs');
+        const { join } = await import('node:path');
+        const { DatabaseSync } = await import('node:sqlite');
+        const { LocalStore } = await import('@windows-ai-notes/local');
+        const path = join(directory, 'notes.sqlite');
+        const inspect = new DatabaseSync(path, { readOnly: true });
+        let profile: unknown;
+        try {
+          profile = inspect
+            .prepare('SELECT profile FROM drafts WHERE id=?')
+            .get(id)?.profile;
+        } finally {
+          inspect.close();
+        }
+        if (typeof profile !== 'string')
+          throw new Error('The synthetic cloud meeting has no cached profile.');
+        const key = Buffer.from(
+          safeStorage.decryptString(
+            readFileSync(join(directory, 'content-key.protected')),
+          ),
+          'base64',
+        );
+        try {
+          const local = new LocalStore(path, key);
+          try {
+            const value = local.beginRecording(profile, id, [
+              {
+                track_id: crypto.randomUUID(),
+                kind: 'microphone',
+                capture_scope: 'endpoint',
+                device_selection_policy: 'explicit',
+                device_id: 'synthetic-unavailable-source',
+              },
+            ]);
+            local.updateRecording(profile, id, value.id, {
+              state: 'interrupted',
+            });
+            return value.id;
+          } finally {
+            local.close();
+          }
+        } finally {
+          key.fill(0);
+        }
+      },
+      { directory, id: remote.id },
+    );
+    await page.reload();
+    await page.getByText(/^Saved audio \(/).click();
+    const upload = page.getByRole('button', {
+      name: 'Upload saved audio',
+      exact: true,
+    });
+    await expect(upload).toBeEnabled();
+    const audioState = () =>
+      page.evaluate(async () => {
+        const state = await window.notes.invoke({ operation: 'bootstrap' });
+        if (!state.ok || !('state' in state))
+          throw new Error('The desktop workspace is unavailable.');
+        return window.notes.invoke({
+          operation: 'getRecordingState',
+          scope: state.state.scope,
+          document_id: state.state.selected_id,
+          offset: 0,
+        });
+      });
+    expect(await audioState()).toMatchObject({
+      ok: true,
+      audio_state: { state: { uploads: [] } },
+    });
+    await upload.click();
+    await expect(
+      page.getByText(/This does not start Azure transcription/),
+    ).toBeVisible();
+    await expect(
+      page.getByRole('checkbox', {
+        name: /I accept saved audio even if capture/,
+      }),
+    ).not.toBeChecked();
+    await page
+      .getByRole('button', { name: 'Keep local only', exact: true })
+      .click();
+    expect(await audioState()).toMatchObject({
+      ok: true,
+      audio_state: { state: { uploads: [] } },
+    });
+    await upload.click();
+    await page
+      .getByRole('button', { name: 'Confirm audio upload', exact: true })
+      .click();
+    await expect(
+      page.getByText('Upload needs attention', { exact: true }),
+    ).toBeVisible();
+    expect(await audioState()).toMatchObject({
+      ok: true,
+      audio_state: {
+        state: {
+          recordings: [{ id: recording }],
+          uploads: [
+            { recording_id: recording, state: 'attention', verified_chunks: 0 },
+          ],
+        },
+      },
+    });
+    await close(application);
+    application = null;
+    application = await launch(directory);
+    page = await application.firstWindow();
+    await page.getByText(/^Saved audio \(/).click();
+    await expect(
+      page.getByText('Upload needs attention', { exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole('button', { name: 'Resume or retry upload', exact: true }),
+    ).toBeVisible();
+    await close(application);
+    application = null;
+  } finally {
+    if (application) await application.close();
+    await fixture.close();
+    expect(fixture.state.failures).toEqual([]);
+    expect(fixture.issuer.state.failures).toEqual([]);
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('connects through real OIDC, requires offline-copy consent, syncs edits and restores the account across restart', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'windows-notes-account-ui-'));
   const fixture = await desktopFixture();

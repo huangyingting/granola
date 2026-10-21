@@ -1,6 +1,12 @@
 import { z } from 'zod';
 import { recoverySchema, trackSchema } from './index.js';
 import { resourceId } from './server.js';
+import {
+  createRecordingSchema,
+  registerChunkSchema,
+  recordingSealSchema,
+  MAX_RECORDING_CHUNKS,
+} from './uploads.js';
 
 export const recordingProblemSchema = z.strictObject({
   code: z.string().min(1).max(80),
@@ -46,6 +52,96 @@ export const recordingOwnerSchema = z.strictObject({
 });
 export type LocalRecording = z.infer<typeof localRecordingSchema>;
 export type RecordingOwner = z.infer<typeof recordingOwnerSchema>;
+export const recordingUploadPlanSchema = z
+  .strictObject({
+    create: createRecordingSchema,
+    chunks: z.array(registerChunkSchema).min(1).max(MAX_RECORDING_CHUNKS),
+    seal: recordingSealSchema,
+  })
+  .refine((plan) => {
+    const tracks = new Set(
+      plan.create.tracks.map((track) => track.spec.track_id),
+    );
+    return (
+      plan.seal.tracks.length === tracks.size &&
+      plan.chunks.every(
+        (chunk) =>
+          chunk.chunk.recording_id === plan.create.id &&
+          tracks.has(chunk.chunk.track_id),
+      ) &&
+      new Set(plan.chunks.map((chunk) => chunk.chunk.chunk_id)).size ===
+        plan.chunks.length &&
+      plan.seal.tracks.every((track) => {
+        const chunks = plan.chunks.filter(
+          (chunk) => chunk.chunk.track_id === track.track_id,
+        );
+        let sample = 0;
+        return (
+          tracks.has(track.track_id) &&
+          chunks.length === track.chunk_ids.length &&
+          chunks.every((chunk, index) => {
+            const valid =
+              chunk.chunk.sequence === index &&
+              chunk.chunk.sample_start === sample &&
+              chunk.chunk.chunk_id === track.chunk_ids[index];
+            sample += chunk.chunk.sample_count;
+            return valid;
+          }) &&
+          sample === track.end_sample
+        );
+      })
+    );
+  });
+export const recordingUploadStatusSchema = z.strictObject({
+  recording_id: resourceId,
+  document_id: resourceId,
+  state: z.enum([
+    'queued',
+    'uploading',
+    'waiting',
+    'paused',
+    'attention',
+    'complete',
+    'delete_pending',
+    'deleting',
+  ]),
+  verified_chunks: z.number().int().min(0).max(MAX_RECORDING_CHUNKS),
+  total_chunks: z.number().int().min(0).max(MAX_RECORDING_CHUNKS),
+  verified_bytes: z
+    .number()
+    .int()
+    .min(0)
+    .max(10_000 * 960_044),
+  partial: z.boolean(),
+  attempts: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+  retry_at: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+  error: recordingProblemSchema.nullable(),
+});
+export const recordingUploadIntentSchema = recordingUploadStatusSchema
+  .extend({
+    accept_incomplete: z.boolean(),
+    plan: recordingUploadPlanSchema.nullable(),
+  })
+  .refine(
+    (intent) =>
+      intent.partial === intent.accept_incomplete &&
+      (intent.plan === null
+        ? intent.total_chunks === 0 &&
+          intent.verified_chunks === 0 &&
+          intent.verified_bytes === 0
+        : intent.plan.create.id === intent.recording_id &&
+          intent.plan.chunks.length === intent.total_chunks &&
+          intent.verified_chunks <= intent.total_chunks &&
+          intent.verified_bytes <=
+            intent.plan.chunks.reduce(
+              (sum, chunk) => sum + chunk.size_bytes,
+              0,
+            ) &&
+          intent.plan.seal.accept_incomplete === intent.accept_incomplete),
+  );
+export type RecordingUploadPlan = z.infer<typeof recordingUploadPlanSchema>;
+export type RecordingUploadStatus = z.infer<typeof recordingUploadStatusSchema>;
+export type RecordingUploadIntent = z.infer<typeof recordingUploadIntentSchema>;
 export const audioStateSchema = z.strictObject({
   document_id: resourceId.nullable(),
   active: localRecordingSchema.nullable(),
@@ -56,5 +152,9 @@ export const audioStateSchema = z.strictObject({
   pending_deletions: z.number().int().min(0).max(10_000),
   error: recordingProblemSchema.nullable(),
   cleanup_error: recordingProblemSchema.nullable(),
+  upload_available: z.boolean().default(false),
+  uploads: z.array(recordingUploadStatusSchema).max(50).default([]),
+  active_upload: recordingUploadStatusSchema.nullable().default(null),
+  upload_destination: z.url().nullable().default(null),
 });
 export type AudioState = z.infer<typeof audioStateSchema>;

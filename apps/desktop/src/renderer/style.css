@@ -619,6 +619,20 @@ h1 {
 .recording-history summary {
   cursor: pointer;
 }
+.audio-upload {
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+}
+.audio-upload [role='status'] {
+  display: grid;
+  gap: 6px;
+}
+.audio-upload progress {
+  width: 100%;
+  height: 8px;
+  accent-color: #8679cc;
+}
 .recording-history article {
   border-top: 1px solid #e9edf5;
   padding: 18px 0;

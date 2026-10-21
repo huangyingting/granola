@@ -7,10 +7,11 @@ Granola code, branding, credentials, or private services.
 
 **This is a developer preview, not production-ready software or a completed P0 gate.**
 The server can transcribe short WAV clips with Azure Speech and produce cited,
-structured meeting summaries with Azure OpenAI. The Windows helper is not yet
-wired to that server. The Electron editor supports browser login, isolated cloud
-workspaces, background synchronization and explicit conflict recovery. Audio
-upload, live transcription and interactive AI workflows remain in progress.
+structured meeting summaries with Azure OpenAI. Explicit saved-recording uploads
+connect the Windows helper to private server storage, not yet to meeting transcription.
+The Electron editor supports browser login, isolated cloud workspaces, background
+synchronization and explicit conflict recovery. Complete-meeting transcription,
+live transcription and interactive AI workflows remain in progress.
 Real Windows audio behavior still requires the hardware checks below.
 
 ## Implemented
@@ -34,12 +35,13 @@ Real Windows audio behavior still requires the hardware checks below.
   canonical WAV descriptors and checksums, and bounded 32 KiB WAV range export
   through the helper's framed protocol. The reusable main-process client streams
   and verifies ranges without forwarding media to UI/status observers. No
-  plaintext audio temporary files are created. Cloud upload is not yet connected.
+  plaintext audio temporary files are created. Consented desktop uploads reuse
+  this authenticated export path.
 - A small CLI using inherited, length-prefixed stdio, and Linux/Windows CI.
 - Explicit desktop microphone/system-output selection, local start/pause/resume/stop,
   an always-visible stop control, acknowledged saved-chunk durations and recording
   integrity inspection. Capture is optional and bounded to the helper's one-hour
-  preview limit; it does not upload audio or call Azure.
+  preview limit; capture alone never uploads audio or calls Azure.
 - Encrypted, durable recording ownership is committed before launching capture.
   Restart marks unfinished sessions for inspection, never automatic capture.
   Document deletion, workspace revocation and disconnect journal physical audio
@@ -63,6 +65,11 @@ Real Windows audio behavior still requires the hardware checks below.
   seals, bounded signed staging PUTs, full WAV/PCM integrity verification and
   server-only immutable promotion. Durable deletion tracks objects across
   document deletion, revocation, expired grants and late upload replay.
+- Explicit desktop upload consent, encrypted per-profile intents and immutable
+  native plans, verified progress, pause/retry with durable backoff and restart
+  reconciliation. Verified chunks are not re-uploaded. Temporary helpers/network
+  work stop before shutdown or ownership cleanup; local audio stays until
+  explicitly deleted.
 - Azure Speech Fast Transcription and Azure OpenAI structured summaries. Inputs
   freeze their revisions; generated summaries never overwrite notes. Citations
   must resolve to the supplied immutable evidence. Provider errors are explicit.
@@ -100,6 +107,24 @@ interrupted recording complete. Missing or ambiguous chunks, damaged manifests,
 and unavailable keys block adoption without deleting audio. Temporary inspection
 and recovery helpers also shut down before account revocation deletes their files.
 
+In a signed-in cloud workspace, synchronize the meeting first, then expand
+**Saved audio** and choose **Upload saved audio**. Inline confirmation names the
+destination service and separately accepts incomplete capture. Native integrity
+inspection must pass; recover safe orphan chunks before uploading. Only explicit
+upload intents resume after restart, and only in their original authorized
+workspace. **Pause upload** remains available during transfer; waiting retries
+honor server backoff. Upload progress is separate from note synchronization.
+The encrypted journal stores no media, tokens or signed URLs, and private plans
+are not sent to the renderer.
+
+A verified remote copy does not remove local audio or start Azure transcription.
+For a recording with upload intent, **Delete audio only** journals deletion of
+both copies. A document-scoped server tombstone prevents an uncertain, late
+creation from resurrecting it. Local audio stays until remote cleanup is
+confirmed; offline or failed deletion stays visible and retryable. Confirmation
+reflects the service's last successful cleanup sweep, not deletion from independent
+backups or an instantaneous erasure guarantee.
+
 No API credentials are needed for the offline editor. Edits display **Saved locally**
 only after SQLite acknowledges the save. Document changes, exports and window
 close wait for queued edits; invalid or failed saves keep the editor open.
@@ -117,9 +142,9 @@ The main-process client core also implements bounded HTTPS transport and durable
 synchronization: frozen requests replay before pulls, snapshot pagination survives
 restarts, missing-document reconciliation preserves unsubmitted edits, and
 workspace revocation purges only the affected cache. Cursors, changed documents
-and encrypted transcript/job artifacts commit together. The v1/v2 local vault is
-migrated transactionally to v3 without resetting keys, drafts or retries. Older
-previews reject this version instead of using recording-unaware deletion logic. Real
+and encrypted transcript/job artifacts commit together. The v1/v2/v3 local vault is
+migrated transactionally to v4 without resetting keys, drafts or retries. Older
+previews reject this version instead of using recording/upload-unaware deletion logic. Real
 HTTP/PostgreSQL/SQLite tests cover lost responses, two-device conflicts, expiry,
 deletion and revocation.
 The OIDC client core uses a system-browser code/S256 flow and a loopback-only
@@ -140,7 +165,8 @@ Switching back to **On this device** pauses cloud sync without signing out.
 
 Disconnecting clears all cached workspaces and local credentials transactionally.
 You can explicitly keep unsynced drafts as new device-only copies; pending
-deletions are not sent. Workspace audio is also deleted, including not-yet-uploaded
+deletions are not sent. Existing remote audio is not deleted by disconnect.
+Workspace audio is also deleted, including not-yet-uploaded
 recordings; the disconnect confirmation makes this explicit. Known access revocation removes the affected cache rather
 than copying forbidden content into an offline profile. If storage prevents its
 removal, the workspace is blocked and the failure is reported. Stale renderer
@@ -303,9 +329,10 @@ retention policies and production storage drills remain release work.
 The main-process transfer core reads authenticated native ranges, checks the
 approved object origin/staging path and immutable checksum, excludes API
 credentials, rejects redirects, and reconciles already-verified chunks after a
-lost response without rereading local media. Durable desktop upload
-intent/progress/retry and consent UI, plus complete-meeting transcription, are
-not connected yet. Local recordings are never removed by the transfer core.
+lost response without rereading local media. Durable encrypted desktop intent,
+consent/progress/pause/retry and immutable native manifest/seal orchestration are
+connected. Complete-meeting transcription remains unconnected. Local recordings
+are never removed by the transfer core.
 
 ### Server API
 
@@ -341,6 +368,7 @@ letters, digits, dots, colons, underscores or hyphens.
 | POST                 | `/v1/audio-chunks/{id}/upload`                                       | Empty object; issue/replay bounded staging authorization                                                                           |
 | POST                 | `/v1/audio-chunks/{id}/complete`                                     | `{upload_id}`; verify actual bytes and publish immutable private object                                                            |
 | DELETE / GET         | `/v1/recordings/{id}`, `/v1/recordings/{id}/deletion`                | Request audio-only deletion; observe durable cleanup                                                                               |
+| DELETE               | `/v1/documents/{document}/recordings/{id}`                           | Tombstone audio even when an uncertain creation has not yet arrived; observe cleanup                                               |
 
 Notes include canonical plain text and optional structured `content`, validated
 by `packages/contracts/src/content.ts`. Supported blocks include paragraphs,
@@ -389,8 +417,7 @@ model-token previews. To retry a terminal failure, create a new run with a new
 idempotency key.
 
 This first slice uses PostgreSQL polling/leases as the durable scheduler rather
-than introducing unused Redis/BullMQ infrastructure. Desktop resumable uploads,
-complete-meeting finalization, realtime STT, chat,
+than introducing unused Redis/BullMQ infrastructure. Complete-meeting finalization, realtime STT, chat,
 interactive desktop AI, budget reservation/settlement and token streaming remain later
 implementation work. Successful jobs expose provider usage, but this is not a
 billing ledger; retries can incur duplicate provider charges.
@@ -510,7 +537,8 @@ Commands are `list_devices`, `start_recording`, `pause_recording`,
 Recovery requires `accept_incomplete: true` and a fresh helper with no capture
 session. Authenticated, bounded archive export uses `get_recording`,
 `list_recording_chunks`, and `read_chunk`. A host handles a single recording
-lifetime. Realtime audio streaming and cloud upload integration remain later work.
+lifetime. Desktop saved-audio uploads use these authenticated exports; realtime
+audio streaming remains later work.
 Native validation and Zod validation share checked-in request fixtures.
 
 Recording directories contain an encrypted `manifest.enc`, UUID-named `.chunk`

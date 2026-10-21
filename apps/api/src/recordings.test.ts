@@ -176,6 +176,85 @@ describe.skipIf(!databaseUrl || !endpoint)(
       });
       return { ...actor, headers, doc, input, key, recording, wav, chunk };
     }
+    it('tombstones an uncertain creation before it exists, and late retries cannot resurrect it', async () => {
+      const c = await context();
+      const id = randomUUID();
+      const request = {
+        method: 'DELETE' as const,
+        url: `/v1/documents/${c.doc.id}/recordings/${id}`,
+        headers: c.headers,
+      };
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const response = await app.inject(request);
+        expect(response.statusCode).toBe(202);
+        expect(response.json()).toMatchObject({
+          state: 'cleanup_confirmed',
+          pending_objects: 0,
+          repeated_cleanup: true,
+        });
+      }
+      const late = await app.inject({
+        method: 'POST',
+        url: `/v1/documents/${c.doc.id}/recordings`,
+        headers: { ...c.headers, 'idempotency-key': `recording:${id}` },
+        payload: { ...c.input, id },
+      });
+      expect(late.statusCode).toBe(409);
+      await expect(db.recordings.get(c.user_id, id)).rejects.toThrow();
+      expect(
+        (await db.recordings.list(c.user_id, c.doc.id, 0)).recordings.map(
+          (r) => r.id,
+        ),
+      ).not.toContain(id);
+    });
+    it('serializes document-scoped deletion with concurrent creation', async () => {
+      const c = await context();
+      const id = randomUUID();
+      const [created, deleted] = await Promise.all([
+        app.inject({
+          method: 'POST',
+          url: `/v1/documents/${c.doc.id}/recordings`,
+          headers: { ...c.headers, 'idempotency-key': `recording:${id}` },
+          payload: { ...c.input, id },
+        }),
+        app.inject({
+          method: 'DELETE',
+          url: `/v1/documents/${c.doc.id}/recordings/${id}`,
+          headers: c.headers,
+        }),
+      ]);
+      expect([201, 409]).toContain(created.statusCode);
+      expect(deleted.statusCode).toBe(202);
+      await expect(db.recordings.get(c.user_id, id)).rejects.toThrow();
+    });
+    it('does not tombstone another owner or document recording identity', async () => {
+      const c = await context(),
+        other = await context();
+      const sibling = await db.createDocument(
+        c.user_id,
+        {
+          workspace_id: c.workspace_id,
+          title: 'Another synthetic meeting',
+          notes: '',
+        },
+        randomUUID(),
+      );
+      for (const [document, headers] of [
+        [other.doc.id, other.headers],
+        [sibling.id, c.headers],
+        [c.doc.id, other.headers],
+      ] as const) {
+        const response = await app.inject({
+          method: 'DELETE',
+          url: `/v1/documents/${document}/recordings/${c.input.id}`,
+          headers,
+        });
+        expect(response.statusCode).toBe(404);
+      }
+      expect((await db.recordings.get(c.user_id, c.input.id)).id).toBe(
+        c.input.id,
+      );
+    });
     type Context = Awaited<ReturnType<typeof context>>;
     async function register(
       c: Context,
