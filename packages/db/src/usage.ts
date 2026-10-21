@@ -11,6 +11,7 @@ import {
 } from '@windows-ai-notes/contracts/server';
 import { canonicalJson } from '@windows-ai-notes/contracts/content';
 import type { Database, Transaction, ClaimedJob } from './index.js';
+import { LIVE_MEDIA_MS, type LiveClaim } from './live.js';
 
 const units = ['input_tokens', 'output_tokens', 'audio_ms'] as const;
 type Totals = z.infer<typeof usageTotalsSchema>;
@@ -61,6 +62,7 @@ interface Call {
   period_start: string;
   reserved: unknown;
   actual: unknown | null;
+  live_lease_id: string | null;
 }
 export class UsageStore {
   constructor(private readonly database: Database) {}
@@ -112,15 +114,6 @@ export class UsageStore {
     request: UsageReservation,
     transaction?: Transaction,
   ): Promise<string> {
-    const budget = totals(request.budget);
-    if (
-      units.every((unit) => budget[unit] === '0') ||
-      !/^[A-Za-z0-9:_-]{1,80}$/.test(request.operation) ||
-      !['azure', 'fixture'].includes(request.provider) ||
-      !request.configurationVersion ||
-      request.configurationVersion.length > 200
-    )
-      throw new Error('Use a bounded, nonempty provider usage reservation.');
     const reserve = async (tx: Transaction) => {
       await this.database.document(job.ownerId, job.documentId, tx);
       const row = (
@@ -136,71 +129,126 @@ export class UsageStore {
           'This request no longer owns its AI job.',
           409,
         );
-      const limits = await this.account(tx, job.ownerId);
-      const { start } = await this.current(tx);
-      await tx.query(
-        'INSERT INTO ai_usage_periods(owner_id,period_start,settled,uncertain) VALUES ($1,$2,$3,$3) ON CONFLICT DO NOTHING',
-        [job.ownerId, start, JSON.stringify(zero())],
-      );
-      const period = await this.period(tx, job.ownerId, start, true);
-      if (!period) throw new Error('The usage period is missing.');
-      if (
-        (
-          await tx.query(
-            'SELECT id FROM ai_usage_calls WHERE job_id=$1 AND lease_token=$2 AND operation=$3',
-            [job.id, job.leaseToken, request.operation],
-          )
-        ).rowCount
-      )
-        throw new ServiceError(
-          'provider_request_already_started',
-          'This provider request already has an uncertain or settled reservation; it must not be sent twice.',
-          409,
-        );
-      const uncertain = add(period.uncertain, budget);
-      if (exceeds(add(period.settled, uncertain), limits))
-        throw new ServiceError(
-          'quota_exceeded',
-          'This account has insufficient monthly AI allowance, including uncertain earlier requests. Contact the deployment administrator.',
-          429,
-        );
-      const id = randomUUID();
-      await tx.query(
-        `INSERT INTO ai_usage_calls(id,owner_id,period_start,job_id,lease_token,operation,provider,configuration_version,reserved)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-        [
-          id,
-          job.ownerId,
-          start,
-          job.id,
-          job.leaseToken,
-          request.operation,
-          request.provider,
-          request.configurationVersion,
-          JSON.stringify(budget),
-        ],
-      );
-      await tx.query(
-        'UPDATE ai_usage_periods SET uncertain=$3,uncertain_requests=uncertain_requests+1 WHERE owner_id=$1 AND period_start=$2',
-        [job.ownerId, start, JSON.stringify(uncertain)],
-      );
-      return id;
+      return this.reserve(tx, job.ownerId, request, { kind: 'job', job });
     };
     return transaction
       ? reserve(transaction)
       : this.database.transaction(reserve);
+  }
+  async startLive(
+    claim: LiveClaim,
+    transaction?: Transaction,
+  ): Promise<string> {
+    const reserve = async (tx: Transaction) => {
+      const lease = await this.database.live.authorize(claim, tx);
+      return this.reserve(
+        tx,
+        lease.owner_id,
+        {
+          operation: 'live-speech',
+          provider: lease.provider,
+          configurationVersion: lease.configuration_version,
+          budget: {
+            input_tokens: 0,
+            output_tokens: 0,
+            audio_ms: LIVE_MEDIA_MS,
+          },
+        },
+        { kind: 'live', id: lease.id },
+      );
+    };
+    return transaction
+      ? reserve(transaction)
+      : this.database.transaction(reserve);
+  }
+  private async reserve(
+    tx: Transaction,
+    owner: string,
+    request: UsageReservation,
+    origin: { kind: 'job'; job: ClaimedJob } | { kind: 'live'; id: string },
+  ): Promise<string> {
+    const budget = totals(request.budget);
+    if (
+      units.every((unit) => budget[unit] === '0') ||
+      !/^[A-Za-z0-9:_-]{1,80}$/.test(request.operation) ||
+      !['azure', 'fixture'].includes(request.provider) ||
+      !request.configurationVersion ||
+      request.configurationVersion.length > 200
+    )
+      throw new Error('Use a bounded, nonempty provider usage reservation.');
+    const limits = await this.account(tx, owner);
+    const { start } = await this.current(tx);
+    await tx.query(
+      'INSERT INTO ai_usage_periods(owner_id,period_start,settled,uncertain) VALUES ($1,$2,$3,$3) ON CONFLICT DO NOTHING',
+      [owner, start, JSON.stringify(zero())],
+    );
+    const period = await this.period(tx, owner, start, true);
+    if (!period) throw new Error('The usage period is missing.');
+    if (
+      (
+        await (origin.kind === 'job'
+          ? tx.query(
+              'SELECT id FROM ai_usage_calls WHERE job_id=$1 AND lease_token=$2 AND operation=$3',
+              [origin.job.id, origin.job.leaseToken, request.operation],
+            )
+          : tx.query('SELECT id FROM ai_usage_calls WHERE live_lease_id=$1', [
+              origin.id,
+            ]))
+      ).rowCount
+    )
+      throw new ServiceError(
+        'provider_request_already_started',
+        'This provider request already has an uncertain or settled reservation; it must not be sent twice.',
+        409,
+      );
+    const uncertain = add(period.uncertain, budget);
+    if (exceeds(add(period.settled, uncertain), limits))
+      throw new ServiceError(
+        'quota_exceeded',
+        'This account has insufficient monthly AI allowance, including uncertain earlier requests. Contact the deployment administrator.',
+        429,
+      );
+    const id = randomUUID();
+    await tx.query(
+      `INSERT INTO ai_usage_calls(id,owner_id,period_start,job_id,lease_token,operation,provider,configuration_version,reserved,request_kind,live_lease_id)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+      [
+        id,
+        owner,
+        start,
+        origin.kind === 'job' ? origin.job.id : null,
+        origin.kind === 'job' ? origin.job.leaseToken : null,
+        request.operation,
+        request.provider,
+        request.configurationVersion,
+        JSON.stringify(budget),
+        origin.kind,
+        origin.kind === 'live' ? origin.id : null,
+      ],
+    );
+    await tx.query(
+      'UPDATE ai_usage_periods SET uncertain=$3,uncertain_requests=uncertain_requests+1 WHERE owner_id=$1 AND period_start=$2',
+      [owner, start, JSON.stringify(uncertain)],
+    );
+    return id;
   }
   async settle(id: string, usage: Usage): Promise<void> {
     const actual = totals(usage);
     await this.database.transaction(async (tx) => {
       const selected = (
         await tx.query<Call>(
-          'SELECT owner_id,period_start::text,reserved,actual FROM ai_usage_calls WHERE id=$1',
+          'SELECT owner_id,period_start::text,reserved,actual,live_lease_id FROM ai_usage_calls WHERE id=$1',
           [id],
         )
       ).rows[0];
       if (!selected)
         throw new Error('The provider usage reservation is missing.');
+      if (selected.live_lease_id)
+        await tx.query(
+          `UPDATE live_leases SET closed_at=coalesce(closed_at,clock_timestamp()),
+        close_code=coalesce(close_code,'settled') WHERE id=$1`,
+          [selected.live_lease_id],
+        );
       const period = await this.period(
         tx,
         selected.owner_id,
@@ -210,7 +258,7 @@ export class UsageStore {
       if (!period) throw new Error('The provider usage period is missing.');
       const call = (
         await tx.query<Call>(
-          'SELECT owner_id,period_start::text,reserved,actual FROM ai_usage_calls WHERE id=$1 FOR UPDATE',
+          'SELECT owner_id,period_start::text,reserved,actual,live_lease_id FROM ai_usage_calls WHERE id=$1 FOR UPDATE',
           [id],
         )
       ).rows[0];

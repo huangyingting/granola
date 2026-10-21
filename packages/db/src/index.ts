@@ -28,7 +28,10 @@ import { RecordingStore } from './recordings.js';
 import { TranscriptStore } from './transcripts.js';
 import { RecordingTranscriptions } from './recording-transcriptions.js';
 import { UsageStore } from './usage.js';
+import { LiveSourceStore } from './live.js';
 export type { UsageReservation } from './usage.js';
+export type { LiveClaim, LiveStart, LiveCursor } from './live.js';
+export { LIVE_MEDIA_MS, LIVE_LEASE_MS } from './live.js';
 export { recordChange } from './sync.js';
 
 const migrationFiles = [
@@ -38,6 +41,7 @@ const migrationFiles = [
   '004_transcript_pages.sql',
   '005_recording_transcription.sql',
   '006_ai_usage.sql',
+  '007_live_sources.sql',
 ];
 
 export type Transaction = pg.PoolClient;
@@ -105,12 +109,13 @@ export interface ClaimedJob {
   attempt: number;
 }
 const terminal = new Set(['succeeded', 'failed', 'cancelled']);
-const documentQuery = `
- SELECT d.id,d.workspace_id,d.owner_id,d.title,d.tags,d.revision,d.transcript_revision,d.created_at,d.updated_at,n.notes,n.content FROM documents d
- JOIN note_versions n ON n.document_id=d.id AND n.revision=d.revision
+const documentAccess = `
  JOIN memberships m ON m.workspace_id=d.workspace_id AND m.user_id=d.owner_id AND m.active
  JOIN users u ON u.id=d.owner_id AND u.active
  WHERE d.id=$1 AND d.owner_id=$2 AND d.deleted_at IS NULL`;
+const documentQuery = `
+ SELECT d.id,d.workspace_id,d.owner_id,d.title,d.tags,d.revision,d.transcript_revision,d.created_at,d.updated_at,n.notes,n.content FROM documents d
+ JOIN note_versions n ON n.document_id=d.id AND n.revision=d.revision ${documentAccess}`;
 
 export function requireDatabaseUrl(
   environment: NodeJS.ProcessEnv = process.env,
@@ -139,6 +144,7 @@ export class Database {
   readonly transcripts: TranscriptStore;
   readonly recordingTranscriptions: RecordingTranscriptions;
   readonly usage: UsageStore;
+  readonly live: LiveSourceStore;
   constructor(url: string) {
     this.pool = new pg.Pool({
       connectionString: url,
@@ -151,6 +157,7 @@ export class Database {
     this.transcripts = new TranscriptStore(this);
     this.recordingTranscriptions = new RecordingTranscriptions(this);
     this.usage = new UsageStore(this);
+    this.live = new LiveSourceStore(this);
     this.pool.on('error', () =>
       console.error(
         'database_connection_failed: idle PostgreSQL connection closed.',
@@ -294,11 +301,7 @@ export class Database {
     tx?: Transaction,
   ): Promise<Document> {
     // A locking revision join can recheck a new document against an old note row after waiting.
-    if (tx)
-      await tx.query(
-        'SELECT id FROM documents WHERE id=$1 AND owner_id=$2 AND deleted_at IS NULL FOR UPDATE',
-        [id, userId],
-      );
+    if (tx) await this.lockDocument(userId, id, tx);
     const result = await (tx ?? this.pool).query<Document>(documentQuery, [
       id,
       userId,
@@ -310,6 +313,21 @@ export class Database {
         404,
       );
     return result.rows[0];
+  }
+  async lockDocument(userId: string, id: string, tx: Transaction) {
+    const row = (
+      await tx.query<Pick<Document, 'id' | 'workspace_id' | 'owner_id'>>(
+        `SELECT d.id,d.workspace_id,d.owner_id FROM documents d ${documentAccess} FOR UPDATE OF d`,
+        [id, userId],
+      )
+    ).rows[0];
+    if (!row)
+      throw new ServiceError(
+        'document_not_found',
+        'The document is unavailable or not accessible.',
+        404,
+      );
+    return row;
   }
   async listDocuments(
     userId: string,
@@ -930,6 +948,7 @@ export class Database {
     await this.transaction(async (tx) => {
       await this.document(userId, id, tx);
       await this.recordings.removeDocument(tx, id);
+      await tx.query('DELETE FROM live_sources WHERE document_id=$1', [id]);
       await tx.query(
         'DELETE FROM recording_transcription_runs WHERE job_id IN (SELECT id FROM jobs WHERE document_id=$1)',
         [id],
@@ -1200,6 +1219,7 @@ export class Database {
            OR (j.state='failed' AND j.updated_at<now()-interval '24 hours'))`,
       );
       await this.sync.prune(tx);
+      await this.live.prune(tx);
     });
   }
 }

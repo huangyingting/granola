@@ -92,8 +92,9 @@ Real Windows audio behavior still requires the hardware checks below.
   Azure recognition; authenticated streaming and its consent UI remain open.
 - An internal Azure streaming adapter using the official pinned Speech SDK in
   isolated workers, with versioned partial/final/discard events and bounded SDK
-  input/replay. A synthetic live Azure probe is available; the server WebSocket,
-  usage-authorized live leases and desktop consent flow are **not implemented yet**.
+  input/replay. Durable owner-fenced source leases and shared quota reservations
+  are implemented internally. A synthetic live Azure probe is available; the server
+  WebSocket and desktop consent/transport flow are **not implemented yet**.
 - Revision-pinned transcript pages backed by indexed immutable PostgreSQL segments.
   Synchronization atomically caches the first bounded page with the document and
   cursor; the desktop loads additional pages on demand into its encrypted cache.
@@ -548,6 +549,46 @@ Its default command runs the API in OIDC mode; override the command with
 your deployment secret manager/environment. The development Compose file
 deliberately starts only PostgreSQL, not an unauthenticated public API.
 
+### Internal live-source authorization
+
+Migration `007_live_sources.sql` adds `Database.live` and a separate
+`Database.usage.startLive` authorization path; existing job reservations still
+require their current owned `ClaimedJob` lease. Live requests require explicit
+live-cloud consent and an authorized document, with the native recording,
+preview, track and capture epoch bound immutably to that document. They do
+**not** require or create an S3 recording/upload. Access expiry must come from
+the server's verified principal, never client-supplied token metadata.
+
+There are at most two active sources and twelve new attempts per account per
+minute, plus a 5,000-source metadata cap. Attempts have a fifteen-second renewable
+lease, an eighty-second wall deadline, the original access-token expiry, and at
+most sixty seconds of media. Membership and user activation epochs prevent
+revocation/restoration from reviving old leases. Identical open keys do not
+extend token expiry; duplicate source sockets cannot reserve a second provider
+dispatch for the same attempt.
+
+Before provider startup, the live path reserves a fixed sixty seconds of media
+in the same account/UTC-month ledger as batch jobs. Insufficient allowance fails
+before dispatch. Cursor-only batches cannot be accepted before reservation and
+advance durable sample/preview-local sequence high-water marks before forwarding.
+Within an attempt they must be contiguous; reconnects reject replay and report
+explicit skipped-sample ranges. Accepted cursors are **authorization, not
+recognition acknowledgment**: reconnect UX must also disclose any uncertain tail
+of a failed provider attempt, even if the next authorized sample is contiguous.
+No PCM, partial text or final text is persisted by this source/accounting store.
+
+Cancel, failure, expiry, replacement or metadata deletion does not refund unknown
+provider usage. Normal known receipts close further media acceptance and settle
+idempotently in their original UTC month, even after document deletion or
+revocation. Document deletion removes source metadata; ordinary cleanup expires
+leases and prunes inactive metadata older than seven days in bounded batches,
+without erasing usage calls/holds. Long-running live transport must rotate
+bounded attempts rather than extend an old lease's token or media budget.
+
+These are internal database APIs, not new public routes. The authenticated
+WebSocket, per-frame/provider backpressure, native/main orchestration and
+separate desktop consent UI remain to be wired and validated.
+
 ### Internal Azure streaming adapter
 
 `@windows-ai-notes/ai/realtime` accepts validated native 50 ms frames for a
@@ -581,7 +622,7 @@ acknowledgment or exactly-once processing. Failed/unknown attempts must remain
 conservative usage holds when the authorized live-session ledger is integrated.
 
 This provider module has no server route or renderer access. Native transport,
-server authentication/source leases, account reservation/settlement and explicit
+durable source authorization, account reservation/settlement and explicit
 live-cloud consent still need end-to-end wiring. Local encrypted capture must
 remain independent of a stopped preview.
 
