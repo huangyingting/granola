@@ -1,0 +1,14 @@
+{
+  "name": "@windows-ai-notes/worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./dist/worker.js"
+  },
+  "dependencies": {
+    "@windows-ai-notes/contracts": "workspace:*",
+    "@windows-ai-notes/ai": "workspace:*",
+    "@windows-ai-notes/db": "workspace:*"
+  }
+}

@@ -15,7 +15,13 @@
     "format:check": "prettier --check .",
     "audio:probe": "node tools/audio-probe/dist/index.js",
     "test:native": "dotnet test native/audio-host/AudioHost.Tests/AudioHost.Tests.csproj --configuration Release",
-    "build:native": "dotnet build native/audio-host/AudioHost/AudioHost.csproj --configuration Release"
+    "build:native": "dotnet build native/audio-host/AudioHost/AudioHost.csproj --configuration Release",
+    "api": "node --env-file-if-exists=.env apps/api/dist/main.js",
+    "worker": "node --env-file-if-exists=.env apps/worker/dist/main.js",
+    "db:migrate": "node --env-file-if-exists=.env packages/db/dist/cli.js migrate",
+    "user:provision": "node --env-file-if-exists=.env packages/db/dist/cli.js provision",
+    "azure:probe": "node tools/azure-probe/dist/index.js",
+    "test:server": "vitest run apps/api/src/server.test.ts"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

@@ -1,0 +1,47 @@
+import { setTimeout as delay } from 'node:timers/promises';
+import { createAzureProviders } from '@windows-ai-notes/ai';
+import { loadAzureConfig } from '@windows-ai-notes/ai/config';
+import { Database, requireDatabaseUrl } from '@windows-ai-notes/db';
+import { runOnce } from './worker.js';
+
+async function main() {
+  const providers = createAzureProviders(loadAzureConfig());
+  const db = new Database(requireDatabaseUrl());
+  const shutdown = new AbortController();
+  process.once('SIGTERM', () => shutdown.abort());
+  process.once('SIGINT', () => shutdown.abort());
+  let nextCleanup = 0;
+  try {
+    await db.assertReady();
+    console.log(
+      JSON.stringify({ code: 'worker_ready', provider: providers.provider }),
+    );
+    while (!shutdown.signal.aborted) {
+      try {
+        if (Date.now() >= nextCleanup) {
+          await db.cleanup();
+          nextCleanup = Date.now() + 60_000;
+        }
+        if (!(await runOnce(db, providers, shutdown.signal)))
+          await delay(500, undefined, { signal: shutdown.signal });
+      } catch (error) {
+        if (shutdown.signal.aborted) break;
+        console.error(
+          JSON.stringify({
+            code: 'worker_iteration_failed',
+            kind: error instanceof Error ? error.name : 'unknown',
+          }),
+        );
+        await delay(1000);
+      }
+    }
+  } finally {
+    await db.close();
+  }
+}
+main().catch(() => {
+  console.error(
+    'worker_start_failed: check Azure configuration and database migrations. Secrets were not logged.',
+  );
+  process.exitCode = 1;
+});

@@ -1,0 +1,15 @@
+{
+  "name": "@windows-ai-notes/ai",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./dist/index.js",
+    "./config": "./dist/config.js",
+    "./wav": "./dist/wav.js"
+  },
+  "dependencies": {
+    "@windows-ai-notes/contracts": "workspace:*",
+    "zod": "^4.1.0"
+  }
+}
