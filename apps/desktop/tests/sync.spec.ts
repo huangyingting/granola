@@ -266,7 +266,7 @@ test('recovers one consented summary, inspects frozen evidence, persists review 
       .selectOption('text');
     await editor.getByRole('button', { name: 'Export reviewed draft' }).click();
     await expect(
-      page.getByText('Unencrypted export saved.', { exact: true }),
+      page.getByRole('status').filter({ hasText: 'Unencrypted export saved.' }),
     ).toBeVisible();
     const exported = await readFile(destination, 'utf8');
     expect(exported).toContain(reviewed);
