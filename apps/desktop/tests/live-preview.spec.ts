@@ -23,6 +23,7 @@ test.skip(
 );
 async function launch() {
   const directory = await mkdtemp(join(tmpdir(), 'notes-live-ui-'));
+  let application: ElectronApplication | undefined;
   const recording = localRecordingSchema.parse({
     id: randomUUID(),
     document_id: randomUUID(),
@@ -97,7 +98,8 @@ async function launch() {
       join(directory, 'fixture.json'),
       JSON.stringify({ audio, live }),
     );
-    const application = await electron.launch({
+    application = await electron.launch({
+      timeout: 15_000,
       args: [
         fileURLToPath(
           new URL('./fixtures/live-preview-main.mjs', import.meta.url),
@@ -108,14 +110,18 @@ async function launch() {
     return {
       directory,
       application,
-      page: await application.firstWindow(),
+      page: await application.firstWindow({ timeout: 10_000 }),
       recording,
       audio,
       live,
       source,
     };
   } catch (error) {
-    await rm(directory, { recursive: true, force: true });
+    try {
+      await application?.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
     throw error;
   }
 }
