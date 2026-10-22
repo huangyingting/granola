@@ -337,6 +337,11 @@ export function signedConfiguration(
   policy,
   updatePolicyFile,
 ) {
+  if (base.appId !== 'io.github.windowsainotes.desktop' || base.nsis?.script)
+    throw new ReleaseError(
+      'release_installer_identity',
+      'The signed installer requires the existing application identity and the first-party NSIS template.',
+    );
   if (
     !Array.isArray(base.extraResources) ||
     base.extraResources.filter((entry) => entry?.to === 'audio-host').length !==
@@ -371,7 +376,12 @@ export function signedConfiguration(
     ],
     forceCodeSigning: true,
     publish: null,
-    nsis: { ...base.nsis, perMachine: false, deleteAppDataOnUninstall: false },
+    nsis: {
+      ...base.nsis,
+      include: fileURLToPath(new URL('./build/installer.nsh', import.meta.url)),
+      perMachine: false,
+      deleteAppDataOnUninstall: false,
+    },
     win: {
       ...base.win,
       target: ['nsis'],
@@ -398,6 +408,7 @@ export async function promoteCandidate(
     updates = false,
   },
   inspect,
+  verifyInstaller = verifyInstallerCandidate,
 ) {
   versionSchema.parse(version);
   if (!sourceCommit.safeParse(commit).success)
@@ -415,6 +426,22 @@ export async function promoteCandidate(
   const artifacts = {};
   for (const file of files)
     artifacts[file] = await verifiedFile(join(output, file), policy, inspect);
+  if (updates) {
+    const artifact = artifacts[installer];
+    await verifyInstaller(
+      join(output, 'win-unpacked/resources/audio-host/AudioHost.exe'),
+      join(output, installer),
+      {
+        current_version: '0.0.0',
+        version,
+        certificate_sha256: policy.certificate_sha256,
+        publisher: policy.publisher,
+        product_name: productName,
+        bytes: Number(artifact.bytes),
+        sha512: artifact.sha512,
+      },
+    );
+  }
   const receipt = {
     version: 1,
     kind: 'signed_candidate',
@@ -423,6 +450,7 @@ export async function promoteCandidate(
     source_commit: commit,
     verified_at: new Date().toISOString(),
     production_accepted: false,
+    installer_role_verified: updates,
     installer,
     artifacts,
   };
@@ -452,6 +480,11 @@ export async function promoteCandidate(
   }
   await rename(output, destination);
   return receipt;
+}
+async function verifyInstallerCandidate(helper, file, expected) {
+  const { verifyInstallerUpdateArtifact } =
+    await import('./dist/main/update-trust.js');
+  await verifyInstallerUpdateArtifact(helper, file, expected);
 }
 async function destinationAvailable(destination) {
   try {

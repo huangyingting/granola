@@ -2,8 +2,18 @@ import type {
   ExecFileException,
   ExecFileOptionsWithStringEncoding,
 } from 'node:child_process';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { assertVerifiedUpdate, verifyUpdateArtifact } from './update-trust.js';
+import { createHash } from 'node:crypto';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  assertVerifiedInstaller,
+  assertVerifiedUpdate,
+  verifyInstallerUpdateArtifact,
+  verifyUpdateArtifact,
+} from './update-trust.js';
+import { UpdateDownloads } from './update-downloads.js';
 
 const execution = vi.hoisted(() =>
   vi.fn<
@@ -39,6 +49,7 @@ beforeEach(() => {
   execution.mockReset();
   vi.unstubAllEnvs();
 });
+afterEach(() => vi.restoreAllMocks());
 
 const policy = {
   current_version: '0.1.0',
@@ -62,6 +73,176 @@ const report = {
     product_version: policy.version,
   },
 };
+
+describe('first-party installer-only update trust', () => {
+  const installerReport = {
+    ...report,
+    code: 'update_installer_verified',
+  };
+
+  it('requires an explicit installer verification result and never upgrades a generic PE trust result', () => {
+    expect(assertVerifiedInstaller(installerReport, policy)).toEqual(
+      report.artifact,
+    );
+    expect(() => assertVerifiedInstaller(report, policy)).toThrow(
+      'invalid metadata',
+    );
+    expect(() => assertVerifiedUpdate(installerReport, policy)).toThrow(
+      'invalid metadata',
+    );
+    expect(() =>
+      assertVerifiedInstaller(
+        {
+          ...installerReport,
+          artifact: {
+            ...report.artifact,
+            sha512: Buffer.alloc(64, 2).toString('base64'),
+          },
+        },
+        policy,
+      ),
+    ).toThrow('does not match');
+  });
+
+  it('uses the installer-only native mode with the same immutable pins, process bounds and cancellation signal', async () => {
+    execution.mockImplementation((_file, _args, _options, callback) =>
+      callback(null, JSON.stringify(installerReport), ''),
+    );
+    const signal = new AbortController().signal;
+    expect(
+      await verifyInstallerUpdateArtifact(
+        'C:\\Helper\\AudioHost.exe',
+        'C:\\Cache\\installer.exe',
+        policy,
+        signal,
+      ),
+    ).toEqual(report.artifact);
+    expect(execution).toHaveBeenCalledExactlyOnceWith(
+      'C:\\Helper\\AudioHost.exe',
+      [
+        '--verify-installer-update',
+        'C:\\Cache\\installer.exe',
+        policy.certificate_sha256,
+        policy.publisher,
+        policy.product_name,
+        policy.version,
+      ],
+      expect.objectContaining({
+        encoding: 'utf8',
+        timeout: 60_000,
+        maxBuffer: 16_384,
+        windowsHide: true,
+        signal,
+      }),
+      expect.any(Function),
+    );
+  });
+
+  it('surfaces an installer-role rejection without accepting generic signature success', async () => {
+    for (const value of [
+      {
+        version: 1,
+        verified: false,
+        code: 'update_installer_mismatch',
+        artifact: null,
+      },
+      report,
+    ]) {
+      execution.mockImplementation((_file, _args, _options, callback) =>
+        callback(
+          Object.assign(new Error('Synthetic private native output.'), {
+            code: 2,
+            stdout: JSON.stringify(value),
+          }),
+          JSON.stringify(value),
+          '',
+        ),
+      );
+      await expect(
+        verifyInstallerUpdateArtifact(
+          'C:\\Helper\\AudioHost.exe',
+          'C:\\Cache\\installer.exe',
+          policy,
+        ),
+      ).rejects.toMatchObject({
+        code: value.verified
+          ? 'update_verifier_protocol'
+          : 'update_installer_mismatch',
+      });
+    }
+  });
+
+  it.skipIf(process.platform !== 'win32')(
+    'defaults both downloaded and recovered Windows paths to installer-only verification with no generic fallback',
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), 'notes-installer-only-'));
+      try {
+        const data = new Uint8Array(policy.bytes);
+        const digest = createHash('sha512').update(data).digest('base64');
+        const verified = {
+          ...installerReport,
+          artifact: { ...installerReport.artifact, sha512: digest },
+        };
+        execution.mockImplementation((_file, _args, _options, callback) =>
+          callback(null, JSON.stringify(verified), ''),
+        );
+        const downloads = new UpdateDownloads(
+          root,
+          'C:\\Helper\\AudioHost.exe',
+          {
+            version: 1,
+            feed_url: 'https://updates.example/stable.json',
+            certificate_sha256: policy.certificate_sha256,
+            publisher: policy.publisher,
+            product_name: policy.product_name,
+          },
+          policy.current_version,
+          {
+            capacity: async () => {},
+            fetch: async (input) => {
+              const result = new Response(data);
+              Object.defineProperty(result, 'url', {
+                value: String(input),
+              });
+              return result;
+            },
+          },
+        );
+        const candidate = await downloads.download({
+          version: 1,
+          kind: 'windows_update',
+          application_version: policy.version,
+          architecture: 'x64',
+          installer: `windows-ai-notes-${policy.version}-x64-signed.exe`,
+          bytes: policy.bytes,
+          sha512: digest,
+        });
+        expect(await downloads.recover()).toMatchObject({
+          ready: { installer: candidate.installer },
+          rejected: 0,
+        });
+        expect(execution.mock.calls.map((call) => call[1][0])).toEqual([
+          '--verify-installer-update',
+          '--verify-installer-update',
+        ]);
+        execution.mockImplementation((_file, _args, _options, callback) =>
+          callback(
+            null,
+            JSON.stringify({ ...verified, code: 'update_verified' }),
+            '',
+          ),
+        );
+        vi.spyOn(console, 'warn').mockImplementation(() => {});
+        expect(await downloads.recover()).toMatchObject({
+          ready: null,
+          rejected: 1,
+        });
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+});
 
 describe('native trusted update boundary', () => {
   it('accepts only the exact pinned identity and downloaded artifact', () => {

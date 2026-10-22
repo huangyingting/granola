@@ -9,10 +9,12 @@ if (!OperatingSystem.IsWindows())
     Console.Error.WriteLine("platform_unsupported: AudioHost capture and DPAPI require Windows 11.");
     return 1;
 }
-if (args.Length > 0 && args[0] == "--verify-update")
+if (args.Length > 0 && args[0] is "--verify-update" or "--verify-installer-update")
 {
     var result = args.Length == 6
-        ? UpdateTrustVerifier.Verify(args[1], new UpdateTrustPolicy(args[2], args[3], args[4], args[5]))
+        ? args[0] == "--verify-installer-update"
+            ? UpdateTrustVerifier.VerifyInstaller(args[1], new UpdateTrustPolicy(args[2], args[3], args[4], args[5]))
+            : UpdateTrustVerifier.Verify(args[1], new UpdateTrustPolicy(args[2], args[3], args[4], args[5]))
         : UpdateTrustResult.Rejected("update_verification_arguments");
     Console.WriteLine(JsonSerializer.Serialize(result, AudioJson.Options));
     return result.Verified ? 0 : 2;

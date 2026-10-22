@@ -309,6 +309,16 @@ describe('fail-closed signed candidate policy', () => {
         },
       },
     });
+    expect(config.nsis.include).toBe(
+      fileURLToPath(new URL('./build/installer.nsh', import.meta.url)),
+    );
+    for (const changed of [
+      { ...base, appId: 'different.application' },
+      { ...base, nsis: { ...base.nsis, script: 'custom-installer.nsi' } },
+    ])
+      expect(() =>
+        signedConfiguration(changed, 'output', 'native', policy),
+      ).toThrow('first-party NSIS');
     expect(
       config.extraResources.find((entry) => entry.to === 'audio-host'),
     ).toEqual({
@@ -449,9 +459,11 @@ describe('fail-closed signed candidate policy', () => {
   });
   it('derives an optional feed only from the completely verified installer without claiming production acceptance', async () => {
     const paths = await fixture();
+    const verifyInstaller = vi.fn(async () => {});
     const receipt = await promoteCandidate(
       { ...paths, updates: true },
       async () => signature,
+      verifyInstaller,
     );
     const feed = JSON.parse(
       await readFile(join(paths.destination, 'windows-update.json'), 'utf8'),
@@ -467,6 +479,20 @@ describe('fail-closed signed candidate policy', () => {
       sha512: installer.sha512,
     });
     expect(receipt.production_accepted).toBe(false);
+    expect(receipt.installer_role_verified).toBe(true);
+    expect(verifyInstaller).toHaveBeenCalledExactlyOnceWith(
+      join(paths.output, 'win-unpacked/resources/audio-host/AudioHost.exe'),
+      join(paths.output, receipt.installer),
+      {
+        current_version: '0.0.0',
+        version,
+        certificate_sha256: policy.certificate_sha256,
+        publisher: policy.publisher,
+        product_name: productName,
+        bytes: Number(installer.bytes),
+        sha512: installer.sha512,
+      },
+    );
     const plain = await fixture();
     await promoteCandidate(plain, async () => signature);
     await expect(
@@ -482,6 +508,23 @@ describe('fail-closed signed candidate policy', () => {
     await expect(
       readFile(join(failed.output, 'windows-update.json')),
     ).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+  it('never publishes a candidate receipt or update feed when native installer-role verification fails after every signature passed', async () => {
+    const paths = await fixture();
+    const inspect = vi.fn(async () => signature);
+    await expect(
+      promoteCandidate({ ...paths, updates: true }, inspect, async () => {
+        throw new Error('Synthetic native installer-role rejection.');
+      }),
+    ).rejects.toThrow('installer-role rejection');
+    expect(inspect).toHaveBeenCalledTimes(5);
+    await expect(readdir(paths.destination)).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+    for (const name of ['signed-candidate.json', 'windows-update.json'])
+      await expect(readFile(join(paths.output, name))).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
   });
   it.each(expectedFiles)(
     'never publishes partial output when this required signature fails: %s',

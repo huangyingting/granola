@@ -40,6 +40,29 @@ public sealed class UpdateTrustTests
         Assert.Equal(Convert.ToBase64String(SHA512.HashData(File.ReadAllBytes(Reference))), result.Artifact.Sha512);
     }
 
+    [Fact]
+    public void RejectsATrustedSignedApplicationAsAnInstallerEvenWithItsExactPinnedIdentity()
+    {
+        var result = UpdateTrustVerifier.VerifyInstaller(Reference, ReferencePolicy());
+        Assert.False(result.Verified);
+        Assert.Equal("update_installer_mismatch", result.Code);
+        Assert.Null(result.Artifact);
+    }
+
+    [Theory]
+    [InlineData(null, null)]
+    [InlineData("io.github.windowsainotes.desktop.uninstaller.x64.v1", "windows-ai-notes-0.1.1-x64-setup.exe")]
+    [InlineData("io.github.windowsainotes.desktop.nsis.arm64.v1", "windows-ai-notes-0.1.1-x64-setup.exe")]
+    [InlineData("io.github.windowsainotes.desktop.nsis.x64.v1", "windows-ai-notes-0.1.0-x64-setup.exe")]
+    [InlineData("io.github.windowsainotes.desktop.nsis.x64.v1", "windows-ai-notes-0.1.1-x64-uninstaller.exe")]
+    [InlineData("io.github.windowsainotes.desktop.nsis.x64.v1\n", "windows-ai-notes-0.1.1-x64-setup.exe")]
+    public void RequiresTheExactFirstPartyInstallerRoleArchitectureAndVersion(string? name, string? originalFilename)
+    {
+        Assert.False(UpdateTrustVerifier.HasInstallerIdentity(name, originalFilename, "0.1.1"));
+        Assert.True(UpdateTrustVerifier.HasInstallerIdentity(
+            "io.github.windowsainotes.desktop.nsis.x64.v1", "windows-ai-notes-0.1.1-x64-setup.exe", "0.1.1"));
+    }
+
     [Theory]
     [InlineData("certificate")]
     [InlineData("publisher")]
@@ -114,7 +137,7 @@ public sealed class UpdateTrustTests
     public async Task RealOneShotProcessIsBoundedStructuredAndRejectsWrongPins()
     {
         var policy = ReferencePolicy();
-        foreach (var valid in new[] { true, false })
+        foreach (var scenario in new[] { "valid", "wrong-pin", "wrong-role", "missing-argument" })
         {
             var start = new ProcessStartInfo("dotnet")
             {
@@ -123,9 +146,12 @@ public sealed class UpdateTrustTests
                 UseShellExecute = false,
                 CreateNoWindow = true
             };
-            foreach (var argument in new[] { typeof(DpapiKeyProtector).Assembly.Location, "--verify-update", Reference,
-                valid ? policy.CertificateSha256 : new string('0', 64), policy.Publisher, policy.ProductName, policy.ProductVersion })
+            foreach (var argument in new[] { typeof(DpapiKeyProtector).Assembly.Location,
+                scenario is "wrong-role" or "missing-argument" ? "--verify-installer-update" : "--verify-update", Reference,
+                scenario == "wrong-pin" ? new string('0', 64) : policy.CertificateSha256,
+                policy.Publisher, policy.ProductName })
                 start.ArgumentList.Add(argument);
+            if (scenario != "missing-argument") start.ArgumentList.Add(policy.ProductVersion);
             using var process = Process.Start(start) ?? throw new InvalidOperationException("The update verifier did not start.");
             using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(60));
             var output = process.StandardOutput.ReadToEndAsync(deadline.Token);
@@ -133,14 +159,20 @@ public sealed class UpdateTrustTests
             try
             {
                 await process.WaitForExitAsync(deadline.Token);
-                Assert.Equal(valid ? 0 : 2, process.ExitCode);
+                Assert.Equal(scenario == "valid" ? 0 : 2, process.ExitCode);
                 var text = await output;
                 Assert.True(text.Length < 4096);
                 var report = JsonSerializer.Deserialize<UpdateTrustResult>(text, AudioJson.Options);
                 Assert.NotNull(report);
                 Assert.Equal(1, report.Version);
-                Assert.Equal(valid, report.Verified);
-                Assert.Equal(valid ? "update_verified" : "update_identity_mismatch", report.Code);
+                Assert.Equal(scenario == "valid", report.Verified);
+                Assert.Equal(scenario switch
+                {
+                    "valid" => "update_verified",
+                    "wrong-pin" => "update_identity_mismatch",
+                    "wrong-role" => "update_installer_mismatch",
+                    _ => "update_verification_arguments"
+                }, report.Code);
                 Assert.Empty(await errors);
             }
             finally

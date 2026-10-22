@@ -15,8 +15,15 @@ public sealed record UpdateTrustResult(int Version, bool Verified, string Code, 
 public static class UpdateTrustVerifier
 {
     public const long MaximumArtifactBytes = 2L * 1024 * 1024 * 1024;
+    public const string InstallerInternalName = "io.github.windowsainotes.desktop.nsis.x64.v1";
 
-    public static UpdateTrustResult Verify(string file, UpdateTrustPolicy policy)
+    public static bool HasInstallerIdentity(string? internalName, string? originalFilename, string version) =>
+        internalName == InstallerInternalName && originalFilename == $"windows-ai-notes-{version}-x64-setup.exe";
+
+    public static UpdateTrustResult Verify(string file, UpdateTrustPolicy policy) => Verify(file, policy, false);
+    public static UpdateTrustResult VerifyInstaller(string file, UpdateTrustPolicy policy) => Verify(file, policy, true);
+
+    private static UpdateTrustResult Verify(string file, UpdateTrustPolicy policy, bool installer)
     {
         if (policy.CertificateSha256.Length != 64 || !policy.CertificateSha256.All(char.IsAsciiHexDigit) ||
             !ValidText(policy.Publisher) || !ValidText(policy.ProductName) || !ValidText(policy.ProductVersion) ||
@@ -91,9 +98,11 @@ public static class UpdateTrustVerifier
                     publisher != policy.Publisher || version.ProductName != policy.ProductName ||
                     !SameVersion(version.ProductVersion, policy.ProductVersion))
                     return UpdateTrustResult.Rejected("update_identity_mismatch");
+                if (installer && !HasInstallerIdentity(version.InternalName, version.OriginalFilename, policy.ProductVersion))
+                    return UpdateTrustResult.Rejected("update_installer_mismatch");
                 stream.Position = 0;
                 var hash = Convert.ToBase64String(SHA512.HashData(stream));
-                return new UpdateTrustResult(1, true, "update_verified",
+                return new UpdateTrustResult(1, true, installer ? "update_installer_verified" : "update_verified",
                     new VerifiedUpdateArtifact(stream.Length, hash, Convert.ToHexStringLower(certificateHash),
                         publisher, version.ProductName!, version.ProductVersion!));
             }

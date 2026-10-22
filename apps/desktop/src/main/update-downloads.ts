@@ -25,7 +25,7 @@ import {
   type UpdateFeed,
 } from '@windows-ai-notes/contracts/updates';
 import { LocalError } from '@windows-ai-notes/local';
-import { verifyUpdateArtifact } from './update-trust.js';
+import { verifyInstallerUpdateArtifact } from './update-trust.js';
 
 const maximumMetadataBytes = 16_384;
 const maximumCacheEntries = 128;
@@ -157,7 +157,7 @@ export function assertUpdateDiskSpace(available: number, bytes: number) {
 
 interface DownloadDependencies {
   fetch: typeof fetch;
-  verify: typeof verifyUpdateArtifact;
+  verify: typeof verifyInstallerUpdateArtifact;
   capacity: typeof ensureUpdateDownloadCapacity;
 }
 export interface ReadyUpdate {
@@ -200,7 +200,7 @@ export class UpdateDownloads {
     this.currentVersion = currentVersion;
     this.dependencies = {
       fetch,
-      verify: verifyUpdateArtifact,
+      verify: verifyInstallerUpdateArtifact,
       capacity: ensureUpdateDownloadCapacity,
       ...dependencies,
     };

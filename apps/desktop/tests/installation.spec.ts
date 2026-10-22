@@ -6,7 +6,7 @@ import {
   type Page,
 } from '@playwright/test';
 import type { Configuration } from 'electron-builder';
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import {
@@ -20,7 +20,10 @@ import {
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 import { z } from 'zod';
+import { audioHostEnvironment } from '@windows-ai-notes/client/audio';
+import { verifyInstallerUpdateArtifact } from '../src/main/update-trust.js';
 
 test.skip(
   process.platform !== 'win32' ||
@@ -72,6 +75,40 @@ async function fingerprint(file: string) {
     .digest('hex');
 }
 
+async function assertInstallerRole(
+  file: string,
+  version: string,
+  product: string,
+  uninstaller = false,
+) {
+  const programs = process.env.ProgramFiles;
+  if (!programs)
+    throw new Error('The Windows Program Files directory is required.');
+  const { stdout } = await promisify(execFile)(
+    join(programs, 'PowerShell', '7', 'pwsh.exe'),
+    [
+      '-NoLogo',
+      '-NoProfile',
+      '-NonInteractive',
+      '-Command',
+      "$ErrorActionPreference='Stop'; $v=[Diagnostics.FileVersionInfo]::GetVersionInfo($env:NOTES_INSTALLER_FILE); [ordered]@{internal_name=$v.InternalName;original_filename=$v.OriginalFilename;product_name=$v.ProductName;product_version=$v.ProductVersion}|ConvertTo-Json -Compress",
+    ],
+    {
+      env: { ...audioHostEnvironment(process.env), NOTES_INSTALLER_FILE: file },
+      encoding: 'utf8',
+      timeout: 30_000,
+      maxBuffer: 16_384,
+      windowsHide: true,
+    },
+  );
+  expect(JSON.parse(stdout)).toEqual({
+    internal_name: `io.github.windowsainotes.desktop.${uninstaller ? 'uninstaller' : 'nsis'}.x64.v1`,
+    original_filename: `windows-ai-notes-${version}-x64-${uninstaller ? 'uninstaller' : 'setup'}.exe`,
+    product_name: product,
+    product_version: version,
+  });
+}
+
 test('preserves encrypted data and new edits through actual installation, compatible upgrade, rollback and reinstall', async () => {
   test.setTimeout(300_000);
   const desktop = fileURLToPath(new URL('../', import.meta.url));
@@ -110,6 +147,26 @@ test('preserves encrypted data and new edits through actual installation, compat
   const baselineInstaller = join(repository, 'artifacts', 'desktop', baseName);
   expect(existsSync(baselineInstaller)).toBe(true);
   expect(base.nsis?.deleteAppDataOnUninstall).toBe(false);
+  await assertInstallerRole(
+    baselineInstaller,
+    metadata.version,
+    base.productName,
+  );
+  await expect(
+    verifyInstallerUpdateArtifact(
+      join(repository, 'artifacts/audio-host/win-x64/AudioHost.exe'),
+      baselineInstaller,
+      {
+        current_version: '0.0.0',
+        version: metadata.version,
+        certificate_sha256: '0'.repeat(64),
+        publisher: 'Synthetic unsigned fixture',
+        product_name: base.productName,
+        bytes: 1,
+        sha512: Buffer.alloc(64).toString('base64'),
+      },
+    ),
+  ).rejects.toMatchObject({ code: 'update_signature_invalid' });
 
   const root = await mkdtemp(join(tmpdir(), 'notes-installed-roundtrip-'));
   const installation = join(root, 'Installed app');
@@ -219,11 +276,22 @@ test('preserves encrypted data and new edits through actual installation, compat
     });
     const upgradeInstaller = join(upgradeOutput, upgradeName);
     expect(existsSync(upgradeInstaller)).toBe(true);
+    await assertInstallerRole(
+      upgradeInstaller,
+      upgradeVersion,
+      base.productName,
+    );
     await runInstaller(baselineInstaller, [
       '/S',
       '/currentuser',
       `/D=${installation}`,
     ]);
+    await assertInstallerRole(
+      uninstaller,
+      metadata.version,
+      base.productName,
+      true,
+    );
     let page = await openInstalled(metadata.version);
     await expect(
       page.getByRole('button', { name: 'Create your first meeting' }),
@@ -258,6 +326,12 @@ test('preserves encrypted data and new edits through actual installation, compat
       '/currentuser',
       `/D=${installation}`,
     ]);
+    await assertInstallerRole(
+      uninstaller,
+      upgradeVersion,
+      base.productName,
+      true,
+    );
     page = await openInstalled(upgradeVersion);
     await checkDraft(page, originalBody);
     await page

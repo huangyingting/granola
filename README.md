@@ -297,6 +297,16 @@ the expected digest/size and a strictly newer stable version, with bounded
 subprocess execution and no AI/signing secrets in the child environment.
 This does not require PowerShell at runtime.
 
+Update delivery uses the separate **installer-only** native mode, not generic
+PE signature inspection. In addition to the signer/product/version/digest checks,
+it requires the exact first-party NSIS x64 `InternalName` and version-bound
+`OriginalFilename` covered by the signature. The first-party NSIS header refuses
+a different application ID, missing/mixed architectures or a downloaded external
+payload and gives uninstallers a distinct, non-installable identity. These public
+markers alone do **not** establish trust: an unsigned installer with correct
+markers still fails signature verification. A valid signed application executable
+cannot substitute for an installer even if all its signer and product pins match.
+
 The direct-HTTPS feed and staged-download service is implemented separately.
 It uses a packaged-only public trust policy, bounded JSON, newer stable x64
 versions, same-directory installer names and streaming writes to an owned
@@ -323,8 +333,9 @@ safe installation/restart and failed-upgrade recovery remain unfinished.**
 ### Verified signed Windows candidates
 
 `pnpm desktop:package:signed` is a separate, Windows-only producer command.
-The ordinary unsigned preview build remains unchanged, including its app ID,
-product name, per-user installation and encrypted data directory. Signing a
+The ordinary preview build stays unsigned and preserves its app ID,
+product name, per-user installation and encrypted data directory. Both builds
+use the first-party installer/uninstaller role markers. Signing a
 candidate does **not** rename the app, reset local data or enable automatic updates.
 
 Run from a clean, trusted checkout using the pinned pnpm, Node and .NET SDK,
@@ -376,12 +387,24 @@ or a fragment. An update-enabled candidate must have a stable three-part version
 The producer embeds `resources/update-policy.json` with that endpoint and the
 independent signer/product pins, and emits `windows-update.json` only after the
 entire signed candidate passes verification. The feed references the verified
-installer's exact size and SHA-512; serve both from the same directory without
+installer's exact size and SHA-512. Before either receipt/feed is written,
+the freshly built helper must also accept the installer-only native verification
+against those exact pins and bytes; the receipt then records
+`installer_role_verified=true`. Unconfigured candidates do not claim this
+additional update-specific acceptance. Serve both from the same directory without
 redirects. GitHub browser-download redirect URLs are not supported by this
 generic transport. Omitting the variable preserves the existing unconfigured
 candidate behavior. Feed generation/upload is **not publication, a separately
 signed manifest, production approval or update activation**; the candidate
 receipt still sets `production_accepted=false`.
+
+The ordinary Windows checks verify real first-party installer/uninstaller metadata,
+reject unsigned first-party packages and correctly signed non-installer runtimes,
+and compile positive/negative NSIS policy fixtures without executing them.
+Generic staging/recovery is also exercised with an explicitly injected generic
+verifier and a real signed runtime. That fixture is **not** evidence of successful
+production-signed first-party installer acceptance; a real signed candidate remains
+a separate release gate. No test CA or signature bypass is installed.
 
 For hosted PFX candidate builds, configure the **`signed-release` environment**
 with required reviewers and branch restrictions **before** storing credentials.

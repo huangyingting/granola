@@ -18,6 +18,9 @@ const verifiedSchema = z.strictObject({
   code: z.literal('update_verified'),
   artifact: verifiedUpdateArtifactSchema,
 });
+const verifiedInstallerSchema = verifiedSchema.extend({
+  code: z.literal('update_installer_verified'),
+});
 const rejectedSchema = z.strictObject({
   version: z.literal(1),
   verified: z.literal(false),
@@ -29,6 +32,7 @@ const rejectedSchema = z.strictObject({
     'update_timestamp_missing',
     'update_timestamp_invalid',
     'update_identity_mismatch',
+    'update_installer_mismatch',
     'update_artifact_unavailable',
   ]),
   artifact: z.null(),
@@ -51,8 +55,22 @@ function expectation(value: unknown): UpdateExpectation {
 }
 
 export function assertVerifiedUpdate(value: unknown, expected: unknown) {
+  return assertVerifiedArtifact(value, expected, false);
+}
+
+export function assertVerifiedInstaller(value: unknown, expected: unknown) {
+  return assertVerifiedArtifact(value, expected, true);
+}
+
+function assertVerifiedArtifact(
+  value: unknown,
+  expected: unknown,
+  installer: boolean,
+) {
   const policy = expectation(expected);
-  const parsed = verifiedSchema.safeParse(value);
+  const parsed = (
+    installer ? verifiedInstallerSchema : verifiedSchema
+  ).safeParse(value);
   if (!parsed.success)
     throw new LocalError(
       'update_verifier_protocol',
@@ -82,6 +100,25 @@ export async function verifyUpdateArtifact(
   expected: unknown,
   signal?: AbortSignal,
 ) {
+  return verifyArtifact(executable, file, expected, signal, false);
+}
+
+export async function verifyInstallerUpdateArtifact(
+  executable: string,
+  file: string,
+  expected: unknown,
+  signal?: AbortSignal,
+) {
+  return verifyArtifact(executable, file, expected, signal, true);
+}
+
+async function verifyArtifact(
+  executable: string,
+  file: string,
+  expected: unknown,
+  signal: AbortSignal | undefined,
+  installer: boolean,
+) {
   const policy = expectation(expected);
   for (const path of [executable, file])
     if (
@@ -100,7 +137,7 @@ export async function verifyUpdateArtifact(
     ({ stdout } = await promisify(execFile)(
       executable,
       [
-        '--verify-update',
+        installer ? '--verify-installer-update' : '--verify-update',
         file,
         policy.certificate_sha256,
         policy.publisher,
@@ -149,5 +186,5 @@ export async function verifyUpdateArtifact(
       'The native verifier rejected the update. No installer was accepted.',
     );
   }
-  return assertVerifiedUpdate(value, policy);
+  return assertVerifiedArtifact(value, policy, installer);
 }
