@@ -14,7 +14,12 @@ import {
   type JobResult,
   type Segment,
 } from '@windows-ai-notes/contracts/server';
-import { digest, type Database } from '@windows-ai-notes/db';
+import {
+  digest,
+  withAuditContext,
+  setAuditTask,
+  type Database,
+} from '@windows-ai-notes/db';
 import type { RecordingBlobs } from '@windows-ai-notes/storage';
 import { transcribeRecording } from './recording.js';
 import { withUsage } from './usage.js';
@@ -29,13 +34,26 @@ export async function runOnce(
   shutdown = new AbortController().signal,
   storage: RecordingBlobs | null = null,
 ): Promise<boolean> {
+  return withAuditContext({ source: 'worker' }, () =>
+    runNext(db, providers, shutdown, storage),
+  );
+}
+
+async function runNext(
+  db: Database,
+  providers: AiProviders,
+  shutdown: AbortSignal,
+  storage: RecordingBlobs | null,
+): Promise<boolean> {
   const question = await db.chat.claim();
   if (question) {
+    setAuditTask('chat', question.id);
     await answerQuestion(db, providers, question, shutdown);
     return true;
   }
   const job = await db.claim();
   if (!job) return false;
+  setAuditTask('job', job.id);
   const lease = monitorLease(() => db.renew(job), { job_id: job.id }, shutdown);
   try {
     const signal = lease.signal;

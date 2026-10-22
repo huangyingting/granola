@@ -24,6 +24,7 @@
     "usage:limits": "node --env-file-if-exists=.env packages/db/dist/cli.js usage-limits",
     "audio:retention": "node --env-file-if-exists=.env packages/db/dist/cli.js audio-retention",
     "operations": "node --env-file-if-exists=.env packages/db/dist/cli.js operations",
+    "audit:events": "node --env-file-if-exists=.env packages/db/dist/cli.js audit",
     "azure:probe": "node tools/azure-probe/dist/index.js",
     "azure:live-probe": "node tools/azure-probe/dist/live.js",
     "test:server": "vitest run apps/api/src/server.test.ts",

@@ -33,6 +33,8 @@ import { SummaryStages } from './summaries.js';
 import { MeetingQuestions } from './questions.js';
 import { ChatStore } from './chat.js';
 import { operationsSnapshot } from './operations.js';
+import { AuditStore } from './audit.js';
+import { auditTransactionContext } from './audit-context.js';
 import {
   summaryCitations,
   summarySourceSchema,
@@ -42,6 +44,12 @@ export type { ClaimedChat } from './chat.js';
 export type { LiveClaim, LiveStart, LiveCursor } from './live.js';
 export { LIVE_MEDIA_MS, LIVE_LEASE_MS } from './live.js';
 export { recordChange } from './sync.js';
+export {
+  withAuditContext,
+  setAuditActor,
+  setAuditTask,
+  bindAuditContext,
+} from './audit-context.js';
 
 const migrationFiles = [
   '001_initial.sql',
@@ -54,6 +62,7 @@ const migrationFiles = [
   '008_summary_stages.sql',
   '009_chat.sql',
   '010_audio_retention.sql',
+  '011_audit.sql',
 ];
 
 export type Transaction = pg.PoolClient;
@@ -161,6 +170,7 @@ export class Database {
   readonly summaries: SummaryStages;
   readonly questions: MeetingQuestions;
   readonly chat: ChatStore;
+  readonly audit: AuditStore;
   constructor(url: string) {
     this.pool = new pg.Pool({
       connectionString: url,
@@ -177,6 +187,7 @@ export class Database {
     this.summaries = new SummaryStages(this);
     this.questions = new MeetingQuestions(this);
     this.chat = new ChatStore(this);
+    this.audit = new AuditStore(this);
     this.pool.on('error', () =>
       console.error(
         'database_connection_failed: idle PostgreSQL connection closed.',
@@ -204,7 +215,9 @@ export class Database {
   ): Promise<T> {
     const client = await this.pool.connect();
     try {
-      await client.query('BEGIN');
+      await client.query(
+        `BEGIN; SET LOCAL notes.audit_context TO ${pg.escapeLiteral(JSON.stringify(auditTransactionContext()))}`,
+      );
       const result = await operation(client);
       await client.query('COMMIT');
       return result;
@@ -1389,6 +1402,7 @@ export class Database {
       await this.sync.prune(tx);
       await this.live.prune(tx);
       await this.chat.prune(tx);
+      await this.audit.prune(tx);
     });
   }
 }

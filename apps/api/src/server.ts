@@ -26,7 +26,11 @@ import {
   syncChangesQuerySchema,
 } from '@windows-ai-notes/contracts/server';
 import { exportMeetingStream } from '@windows-ai-notes/contracts/content';
-import type { Database } from '@windows-ai-notes/db';
+import {
+  withAuditContext,
+  setAuditActor,
+  type Database,
+} from '@windows-ai-notes/db';
 import { validateWav } from '@windows-ai-notes/ai/wav';
 import { createAuthenticator, principal, type AuthConfig } from './auth.js';
 import type { RecordingBlobs } from '@windows-ai-notes/storage';
@@ -69,14 +73,20 @@ export async function createServer(
   // Track upgrades before authentication so rejected requests close their raw sockets.
   const registerRealtime = await prepareRealtimeRoutes(app, db, realtime);
   app.decorateRequest('principal', null);
+  app.addHook('onRequest', (request, _reply, done) =>
+    withAuditContext({ source: 'api', request_id: request.id }, done),
+  );
   app.addHook('onRequest', async (request, reply) => {
     reply
       .header('X-Content-Type-Options', 'nosniff')
-      .header('Cache-Control', 'no-store');
+      .header('Cache-Control', 'no-store')
+      .header('X-Request-ID', request.id);
     if (
       !['/health', '/v1/client-config'].includes(request.routeOptions.url ?? '')
-    )
+    ) {
       request.principal = await authenticate(request);
+      setAuditActor(request.principal.userId);
+    }
   });
   await app.register(rateLimit, { max: 120, timeWindow: '1 minute' });
   app.addContentTypeParser(

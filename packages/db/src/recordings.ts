@@ -888,13 +888,15 @@ export class RecordingStore {
     object: RecordingObject & { token: number },
     success: boolean,
   ) {
-    await this.database.pool.query(
-      `UPDATE recording_objects SET cleanup_until=NULL,
+    await this.database.transaction((tx) =>
+      tx.query(
+        `UPDATE recording_objects SET cleanup_until=NULL,
        deleted_at=CASE WHEN $3 THEN coalesce(deleted_at,now()) ELSE deleted_at END,
        last_error=CASE WHEN $3 THEN NULL ELSE 'object_cleanup_failed' END,
        cleanup_after=now()+CASE WHEN $3 THEN interval '1 hour' ELSE interval '1 minute' END
        WHERE id=$1 AND cleanup_token=$2 AND cleanup_until>now()`,
-      [object.id, object.token, success],
+        [object.id, object.token, success],
+      ),
     );
   }
 }

@@ -808,9 +808,55 @@ Completion duration covers the full response, not first-token latency or
 live-frame backlog; disconnected/incomplete responses may have no completion
 record. Restrict log access and configure the deployment's
 log sink for at most **30 days**; this command does not manage external log storage.
-Durable necessary-action auditing, end-to-end provider correlation, actual
+End-to-end provider correlation, actual
 connection/frame/first-token instrumentation and independent deletion-ledger
 restore remain unfinished production-release requirements.
+
+### Durable lifecycle audits
+
+Migration **011** records committed lifecycle changes in body-free PostgreSQL
+audit rows in the **same transaction** as each mutation. An audit-write failure
+rolls back its mutation rather than silently accepting an unaudited change.
+Coverage includes account/membership access, document edits/publication/deletion,
+recording creation/sealing/access revocation, first confirmed object cleanup,
+job state/lease replacement, chat lifecycle/dispatch/deletion, usage
+reservation/settlement, raw-audio policy changes and live lease lifecycle.
+Retries that make no state change, ordinary lease renewals and successful
+tombstone rechecks do not generate duplicate lifecycle records.
+
+The deployment-only inspector requires database credentials:
+
+```sh
+pnpm build
+pnpm audit:events --limit 50
+pnpm audit:events --before EVENT_ID --limit 50
+```
+
+Pages contain at most 100 metadata records, newest ID first. Fields are fixed
+action/state enums, resource/owner/workspace/request/job/turn UUIDs, timestamps,
+revision/active flags and controlled raw-audio deletion reasons. No notes,
+transcripts, prompts, chat text, audio, device IDs, payload hashes, model
+configuration, credentials, object keys, URLs or exception text are copied.
+There is **no HTTP audit/admin endpoint**. API replies expose their generated
+`X-Request-ID`; caller-supplied IDs are not trusted. Async request contexts are
+isolated and transaction-local settings reset on commit/rollback. Workers and
+usage callbacks retain task attribution; live callbacks explicitly restore
+their authenticated session attribution.
+
+Events identify an authenticated API actor when available. Worker/deployment
+operations are distinguished but do not invent a human operator identity;
+unattributed direct SQL or maintenance is labeled `system`. Individual deployment
+operator attribution requires the deployment's own authenticated host/database
+access records. Existing pre-migration history is not fabricated or backfilled.
+
+Inspection immediately excludes events older than **720 hours (30 days)**.
+The normal worker cleanup removes at most 1,000 expired rows per iteration;
+`expired_rows_pending_cleanup` exposes any physical purge backlog even when no
+recent events remain. Keep that worker running and alert on growing backlog.
+This is a moving inspection window, not a complete concurrent-change export,
+tamper-evident archive or restore protocol. **The 30-day audit table is not the
+independently retained deletion ledger** required to prevent backup resurrection;
+that separate recovery requirement remains open.
 
 ### Server API
 

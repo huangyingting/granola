@@ -538,6 +538,22 @@ describe.skipIf(!url)(
         notes: 'Keep manual notes.',
         transcript_revision: 0,
       });
+      const audit = (await db.audit.page({ limit: 100 })).events.filter(
+        (event) =>
+          event.subject_owner_id === user.user_id &&
+          [
+            'live_lease_opened',
+            'live_lease_closed',
+            'usage_reserved',
+            'usage_settled',
+          ].includes(event.action),
+      );
+      expect(audit).toHaveLength(4);
+      for (const event of audit)
+        expect(event).toMatchObject({ source: 'api', actor_id: user.user_id });
+      expect(new Set(audit.map((event) => event.request_id)).size).toBe(1);
+      expect(audit[0]!.request_id).not.toBeNull();
+      expect(JSON.stringify(audit)).not.toContain('Synthetic Orion evidence.');
     });
     it('rolls back source metadata and the lease when shared account allowance is insufficient', async () => {
       const user = await actor();

@@ -17,7 +17,12 @@ import type {
   RealtimeSession,
   RealtimeProgress,
 } from '@windows-ai-notes/ai/realtime';
-import type { Database, LiveClaim, Transaction } from '@windows-ai-notes/db';
+import {
+  withAuditContext,
+  type Database,
+  type LiveClaim,
+  type Transaction,
+} from '@windows-ai-notes/db';
 import { principal, type Principal } from './auth.js';
 import { parse } from './parse.js';
 
@@ -200,7 +205,17 @@ class LiveConnection {
   private readonly accessExpiresAt: number;
 
   private transaction<T>(operation: (tx: Transaction) => Promise<T>) {
-    return transaction(this.db, operation);
+    return this.attributed(() => transaction(this.db, operation));
+  }
+  private attributed<T>(operation: () => T) {
+    return withAuditContext(
+      {
+        source: 'api',
+        actor_id: this.owner,
+        request_id: this.requestId,
+      },
+      operation,
+    );
   }
   private authorize() {
     if (!this.claim) throw error('live_lease_lost');
@@ -606,7 +621,9 @@ class LiveConnection {
     if (this.receipt) await this.receipt;
     if (this.claim && this.reservation) {
       try {
-        await this.db.live.close(this.claim, this.closeReason);
+        await this.attributed(() =>
+          this.db.live.close(this.claim!, this.closeReason),
+        );
       } catch {
         report('live_lease_cleanup_failed', this.requestId);
       }

@@ -410,22 +410,24 @@ export class LiveSourceStore {
   ): Promise<{ state: 'closed' | 'unavailable' }> {
     const selected = parse(claimSchema, value);
     parse(z.enum(['cancelled', 'failed']), reason);
-    const result = await this.database.pool.query(
-      `UPDATE live_leases l SET closed_at=coalesce(closed_at,clock_timestamp()),
+    const result = await this.database.transaction((tx) =>
+      tx.query(
+        `UPDATE live_leases l SET closed_at=coalesce(closed_at,clock_timestamp()),
       close_code=coalesce(close_code,$6) FROM live_sources s WHERE s.id=l.source_id AND l.id=$1 AND l.owner_id=$2
       AND l.document_id=$3 AND l.lease_token=$4 AND s.recording_id=$5::uuid AND s.preview_id=$7::uuid
       AND s.track_id=$8::uuid AND s.capture_epoch=$9::uuid RETURNING l.id`,
-      [
-        selected.id,
-        selected.ownerId,
-        selected.documentId,
-        selected.leaseToken,
-        selected.source.recording_id,
-        reason,
-        selected.source.preview_id,
-        selected.source.track_id,
-        selected.source.capture_epoch,
-      ],
+        [
+          selected.id,
+          selected.ownerId,
+          selected.documentId,
+          selected.leaseToken,
+          selected.source.recording_id,
+          reason,
+          selected.source.preview_id,
+          selected.source.track_id,
+          selected.source.capture_epoch,
+        ],
+      ),
     );
     return { state: result.rowCount ? 'closed' : 'unavailable' };
   }

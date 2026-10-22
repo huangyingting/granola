@@ -5,8 +5,9 @@ import {
   resourceId,
   ServiceError,
 } from '@windows-ai-notes/contracts/server';
-import { Database, requireDatabaseUrl } from './index.js';
+import { Database, requireDatabaseUrl, withAuditContext } from './index.js';
 import { audioRetentionPolicySchema } from '@windows-ai-notes/contracts/uploads';
+import { auditQuerySchema } from '@windows-ai-notes/contracts/audit';
 
 async function main() {
   const { values, positionals, tokens } = parseArgs({
@@ -24,13 +25,15 @@ async function main() {
       'output-tokens': { type: 'string' },
       'retention-days': { type: 'string' },
       'processing-days': { type: 'string' },
+      before: { type: 'string' },
+      limit: { type: 'string' },
     },
   });
   const database = new Database(requireDatabaseUrl());
   try {
     if (positionals.length !== 1)
       throw new Error(
-        'Choose migrate, provision, usage-limits, audio-retention or operations.',
+        'Choose migrate, provision, usage-limits, audio-retention, operations or audit.',
       );
     if (positionals[0] === 'migrate') {
       await database.migrate();
@@ -43,6 +46,24 @@ async function main() {
           400,
         );
       console.log(JSON.stringify(await database.operations()));
+    } else if (positionals[0] === 'audit') {
+      if (
+        tokens.some(
+          (token) =>
+            token.kind === 'option' &&
+            !['before', 'limit'].includes(token.name),
+        )
+      )
+        throw new ServiceError(
+          'invalid_audit',
+          'Audit inspection accepts only --before and --limit (1-100).',
+          400,
+        );
+      const query = auditQuerySchema.parse({
+        before: values.before,
+        limit: values.limit,
+      });
+      console.log(JSON.stringify(await database.audit.page(query)));
     } else if (positionals[0] === 'provision') {
       if (values.dev && process.env.NODE_ENV === 'production')
         throw new Error(
@@ -104,13 +125,13 @@ async function main() {
       );
     } else
       throw new Error(
-        'Choose migrate, provision, usage-limits, audio-retention or operations.',
+        'Choose migrate, provision, usage-limits, audio-retention, operations or audit.',
       );
   } finally {
     await database.close();
   }
 }
-main().catch((error: unknown) => {
+withAuditContext({ source: 'deployment' }, main).catch((error: unknown) => {
   console.error(
     error instanceof ServiceError
       ? `${error.code}: ${error.message}`

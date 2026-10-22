@@ -1,7 +1,11 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import { createAzureProviders } from '@windows-ai-notes/ai';
 import { loadAzureConfig } from '@windows-ai-notes/ai/config';
-import { Database, requireDatabaseUrl } from '@windows-ai-notes/db';
+import {
+  Database,
+  requireDatabaseUrl,
+  withAuditContext,
+} from '@windows-ai-notes/db';
 import { runOnce } from './worker.js';
 import { loadStorageConfig, RecordingBlobs } from '@windows-ai-notes/storage';
 
@@ -33,7 +37,7 @@ async function main() {
         console.error(
           JSON.stringify({
             code: 'worker_iteration_failed',
-            kind: error instanceof Error ? error.name : 'unknown',
+            kind: error instanceof Error ? 'error' : 'unknown',
           }),
         );
         await delay(1000);
@@ -44,7 +48,7 @@ async function main() {
     await db.close();
   }
 }
-main().catch(() => {
+withAuditContext({ source: 'worker' }, main).catch(() => {
   console.error(
     'worker_start_failed: check Azure/storage configuration and database migrations. Secrets were not logged.',
   );
