@@ -1,0 +1,81 @@
+name: Signed Windows candidate
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: signed-windows-candidate
+  cancel-in-progress: false
+
+jobs:
+  candidate:
+    if: github.ref == 'refs/heads/main'
+    environment: signed-release
+    runs-on: windows-2025
+    timeout-minutes: 30
+    env:
+      DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+      DOTNET_NOLOGO: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require successful Checks for this exact main commit
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $json = gh run list --workflow ci.yml --commit $env:GITHUB_SHA --branch main --event push --status success --limit 5 --json headSha,status,conclusion
+          if ($LASTEXITCODE -ne 0) { throw 'Could not verify the source Checks run.' }
+          $runs = $json | ConvertFrom-Json
+          $verified = @($runs | Where-Object { $_.headSha -eq $env:GITHUB_SHA -and $_.status -eq 'completed' -and $_.conclusion -eq 'success' })
+          if ($verified.Count -eq 0) { throw 'This exact main commit needs successful Checks before signing.' }
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+      - name: Install checksum-verified upstream native pnpm
+        run: node tools/setup-pnpm.mjs
+      - run: pnpm install --frozen-lockfile
+      - name: Build and verify a signed candidate
+        shell: pwsh
+        env:
+          WINDOWS_SIGNING_PFX_BASE64: ${{ secrets.WINDOWS_SIGNING_PFX_BASE64 }}
+          WIN_CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_SIGNING_PFX_PASSWORD }}
+          WINDOWS_SIGNING_CERT_SHA256: ${{ vars.WINDOWS_SIGNING_CERT_SHA256 }}
+          WINDOWS_PUBLISHER_NAME: ${{ vars.WINDOWS_PUBLISHER_NAME }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $certificate = Join-Path $env:RUNNER_TEMP ("notes-signing-" + [guid]::NewGuid().ToString('N') + ".pfx")
+          $bytes = $null
+          try {
+            if (-not $env:WINDOWS_SIGNING_PFX_BASE64) { throw 'The signing certificate is not configured.' }
+            $bytes = [Convert]::FromBase64String($env:WINDOWS_SIGNING_PFX_BASE64)
+            if ($bytes.Length -eq 0 -or $bytes.Length -gt 1048576) { throw 'Invalid signing certificate size.' }
+            [IO.File]::WriteAllBytes($certificate, $bytes)
+            $env:WINDOWS_SIGNING_PFX_BASE64 = $null
+            $env:WIN_CSC_LINK = $certificate
+            pnpm desktop:package:signed
+            if ($LASTEXITCODE -ne 0) { throw 'Signed-candidate build or verification failed.' }
+          } finally {
+            if ($null -ne $bytes) { [Array]::Clear($bytes, 0, $bytes.Length) }
+            $env:WIN_CSC_LINK = $null
+            $env:WIN_CSC_KEY_PASSWORD = $null
+            $env:WINDOWS_SIGNING_PFX_BASE64 = $null
+            if ([IO.File]::Exists($certificate)) { [IO.File]::Delete($certificate) }
+          }
+      - name: Upload only the verified installer and public receipt
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-ai-notes-signed-candidate
+          if-no-files-found: error
+          path: |
+            artifacts/desktop-signed/*/*-signed.exe
+            artifacts/desktop-signed/*/signed-candidate.json
+          retention-days: 7

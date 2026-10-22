@@ -1,0 +1,564 @@
+import { createHash } from 'node:crypto';
+import { createReadStream } from 'node:fs';
+import {
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rename,
+  rm,
+  writeFile,
+} from 'node:fs/promises';
+import { spawn, execFile } from 'node:child_process';
+import { isAbsolute, join, win32 } from 'node:path';
+import { promisify } from 'node:util';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { z } from 'zod';
+
+const desktop = fileURLToPath(new URL('./', import.meta.url));
+const repository = fileURLToPath(new URL('../../', import.meta.url));
+const certificateHash = z
+  .string()
+  .length(64)
+  .regex(/^[0-9a-f]+$/);
+const sourceCommit = z
+  .string()
+  .length(40)
+  .regex(/^[0-9a-f]+$/);
+const publisherName = z
+  .string()
+  .min(1)
+  .max(200)
+  .refine((value) => !/[\u0000-\u001f\u007f]/.test(value));
+const versionSchema = z
+  .string()
+  .regex(
+    /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/,
+  )
+  .refine((value) => value === value.trim());
+const signatureSchema = z.strictObject({
+  version: z.literal(1),
+  status: z.enum([
+    'Valid',
+    'UnknownError',
+    'NotSigned',
+    'HashMismatch',
+    'NotTrusted',
+    'NotSupportedFileFormat',
+    'Incompatible',
+  ]),
+  signature_type: z.enum(['None', 'Authenticode', 'Catalog']),
+  certificate_sha256: certificateHash.nullable(),
+  publisher: publisherName.nullable(),
+  timestamped: z.boolean(),
+});
+const helperFiles = ['AudioHost.exe', 'AudioHost.dll', 'AudioHost.Core.dll'];
+const childVariables = [
+  'PATH',
+  'SystemRoot',
+  'SYSTEMROOT',
+  'WINDIR',
+  'TEMP',
+  'TMP',
+  'USERPROFILE',
+  'APPDATA',
+  'LOCALAPPDATA',
+  'HOMEDRIVE',
+  'HOMEPATH',
+  'DOTNET_ROOT',
+  'DOTNET_ROOT_X64',
+  'NUGET_PACKAGES',
+  'PNPM_HOME',
+];
+
+export class ReleaseError extends Error {
+  constructor(code, message) {
+    super(message);
+    this.code = code;
+  }
+}
+export function signingPolicy(
+  environment = process.env,
+  platform = process.platform,
+) {
+  if (platform !== 'win32')
+    throw new ReleaseError(
+      'release_platform',
+      'Signed candidates require Windows Authenticode verification.',
+    );
+  const certificate = environment.WIN_CSC_LINK;
+  if (
+    !certificate ||
+    !/^[A-Za-z]:[\\/]/.test(certificate) ||
+    !win32.isAbsolute(certificate) ||
+    !/\.(pfx|p12)$/i.test(certificate) ||
+    /[\u0000-\u001f\u007f]/.test(certificate)
+  )
+    throw new ReleaseError(
+      'release_certificate',
+      'Set WIN_CSC_LINK to an absolute local PFX/P12 file; certificate downloads and implicit certificate selection are not allowed.',
+    );
+  if (!environment.WIN_CSC_KEY_PASSWORD)
+    throw new ReleaseError(
+      'release_password',
+      'WIN_CSC_KEY_PASSWORD is required.',
+    );
+  const hash = (environment.WINDOWS_SIGNING_CERT_SHA256 ?? '').toLowerCase();
+  const publisher = environment.WINDOWS_PUBLISHER_NAME;
+  if (
+    !certificateHash.safeParse(hash).success ||
+    !publisherName.safeParse(publisher).success
+  )
+    throw new ReleaseError(
+      'release_identity',
+      'Set the independently verified WINDOWS_SIGNING_CERT_SHA256 and exact WINDOWS_PUBLISHER_NAME.',
+    );
+  if (environment.ELECTRON_BUILDER_OFFLINE === 'true')
+    throw new ReleaseError(
+      'release_timestamp',
+      'Timestamping is mandatory; offline signing is not supported.',
+    );
+  return { certificate, certificate_sha256: hash, publisher };
+}
+export function childEnvironment(environment = process.env) {
+  return {
+    ...Object.fromEntries(
+      childVariables
+        .filter((key) => environment[key])
+        .map((key) => [key, environment[key]]),
+    ),
+    DOTNET_CLI_TELEMETRY_OPTOUT: '1',
+    DOTNET_NOLOGO: '1',
+  };
+}
+export function assertSignature(value, policy) {
+  const parsed = signatureSchema.safeParse(value);
+  if (!parsed.success)
+    throw new ReleaseError(
+      'release_signature_protocol',
+      'Windows signature inspection returned invalid metadata.',
+    );
+  const signature = parsed.data;
+  if (
+    signature.status !== 'Valid' ||
+    signature.signature_type !== 'Authenticode' ||
+    !signature.timestamped ||
+    signature.certificate_sha256 !== policy.certificate_sha256 ||
+    signature.publisher !== policy.publisher
+  )
+    throw new ReleaseError(
+      'release_signature',
+      'An artifact lacks a trusted, timestamped Authenticode signature from the pinned certificate and publisher.',
+    );
+  return signature;
+}
+
+const inspectScript = `
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+$OutputEncoding = [Console]::OutputEncoding
+$signature = Get-AuthenticodeSignature -LiteralPath $env:NOTES_RELEASE_FILE -ErrorAction Stop
+$hash = $null
+$publisher = $null
+if ($null -ne $signature.SignerCertificate) {
+  $sha = [Security.Cryptography.SHA256]::Create()
+  try { $hash = [BitConverter]::ToString($sha.ComputeHash($signature.SignerCertificate.RawData)).Replace('-', '').ToLowerInvariant() }
+  finally { $sha.Dispose() }
+  $publisher = $signature.SignerCertificate.GetNameInfo([Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false)
+}
+[ordered]@{
+  version = 1
+  status = $signature.Status.ToString()
+  signature_type = $signature.SignatureType.ToString()
+  certificate_sha256 = $hash
+  publisher = $publisher
+  timestamped = ($null -ne $signature.TimeStamperCertificate)
+} | ConvertTo-Json -Compress
+`;
+export async function inspectWindowsSignature(file, environment = process.env) {
+  if (process.platform !== 'win32')
+    throw new ReleaseError(
+      'release_platform',
+      'Windows is required to inspect Authenticode signatures.',
+    );
+  const root = environment.SystemRoot ?? environment.SYSTEMROOT;
+  if (!root || !win32.isAbsolute(root))
+    throw new ReleaseError(
+      'release_verifier',
+      'The Windows system verifier is unavailable.',
+    );
+  let stdout;
+  try {
+    ({ stdout } = await promisify(execFile)(
+      win32.join(
+        root,
+        'System32',
+        'WindowsPowerShell',
+        'v1.0',
+        'powershell.exe',
+      ),
+      ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', inspectScript],
+      {
+        env: { ...childEnvironment(environment), NOTES_RELEASE_FILE: file },
+        encoding: 'utf8',
+        timeout: 60_000,
+        maxBuffer: 16_384,
+        windowsHide: true,
+      },
+    ));
+  } catch {
+    throw new ReleaseError(
+      'release_verifier',
+      'Windows signature inspection failed; no artifact was accepted.',
+    );
+  }
+  let value;
+  try {
+    value = JSON.parse(stdout);
+  } catch {
+    throw new ReleaseError(
+      'release_signature_protocol',
+      'Windows signature inspection did not return JSON.',
+    );
+  }
+  const parsed = signatureSchema.safeParse(value);
+  if (!parsed.success)
+    throw new ReleaseError(
+      'release_signature_protocol',
+      'Windows signature inspection returned invalid metadata.',
+    );
+  return parsed.data;
+}
+export async function verifiedFile(
+  file,
+  policy,
+  inspect = inspectWindowsSignature,
+) {
+  const before = await lstat(file, { bigint: true });
+  if (!before.isFile() || before.isSymbolicLink() || before.size === 0n)
+    throw new ReleaseError(
+      'release_artifact',
+      'A required artifact is missing, empty or not a regular file.',
+    );
+  const signature = assertSignature(await inspect(file), policy);
+  const sha256 = createHash('sha256'),
+    sha512 = createHash('sha512');
+  let bytes = 0n;
+  for await (const chunk of createReadStream(file)) {
+    bytes += BigInt(chunk.length);
+    sha256.update(chunk);
+    sha512.update(chunk);
+  }
+  const after = await lstat(file, { bigint: true });
+  if (
+    !after.isFile() ||
+    before.ino !== after.ino ||
+    before.dev !== after.dev ||
+    before.size !== after.size ||
+    before.mtimeNs !== after.mtimeNs ||
+    bytes !== after.size
+  )
+    throw new ReleaseError(
+      'release_artifact_changed',
+      'An artifact changed during signature and digest verification.',
+    );
+  return {
+    bytes: bytes.toString(),
+    sha256: sha256.digest('hex'),
+    sha512: sha512.digest('base64'),
+    certificate_sha256: signature.certificate_sha256,
+    publisher: signature.publisher,
+    timestamped: true,
+  };
+}
+export function signedConfiguration(base, output, native, policy) {
+  if (
+    !Array.isArray(base.extraResources) ||
+    base.extraResources.filter((entry) => entry?.to === 'audio-host').length !==
+      1
+  )
+    throw new ReleaseError(
+      'release_resources',
+      'The preview package must declare exactly one bundled audio helper.',
+    );
+  return {
+    ...base,
+    artifactName: 'windows-ai-notes-${version}-${arch}-signed.${ext}',
+    directories: { ...base.directories, output },
+    files: [
+      'dist/main/main.js',
+      'dist/preload.cjs',
+      'dist/renderer/**/*',
+      'package.json',
+    ],
+    extraResources: base.extraResources.map((entry) =>
+      entry?.to === 'audio-host' ? { ...entry, from: native } : entry,
+    ),
+    forceCodeSigning: true,
+    publish: null,
+    nsis: { ...base.nsis, perMachine: false, deleteAppDataOnUninstall: false },
+    win: {
+      ...base.win,
+      target: ['nsis'],
+      signAndEditExecutable: true,
+      signExecutable: true,
+      signExts: ['AudioHost.dll', 'AudioHost.Core.dll'],
+      verifyUpdateCodeSignature: true,
+      signtoolOptions: {
+        signingHashAlgorithms: ['sha256'],
+        publisherName: policy.publisher,
+        rfc3161TimeStampServer: 'http://timestamp.digicert.com',
+      },
+    },
+  };
+}
+export async function promoteCandidate(
+  { output, destination, version, commit, productName, policy },
+  inspect,
+) {
+  versionSchema.parse(version);
+  if (!sourceCommit.safeParse(commit).success)
+    throw new ReleaseError(
+      'release_source',
+      'The release requires an exact source commit.',
+    );
+  await destinationAvailable(destination);
+  const installer = `windows-ai-notes-${version}-x64-signed.exe`;
+  const files = [
+    installer,
+    `win-unpacked/${productName}.exe`,
+    ...helperFiles.map((file) => `win-unpacked/resources/audio-host/${file}`),
+  ];
+  const artifacts = {};
+  for (const file of files)
+    artifacts[file] = await verifiedFile(join(output, file), policy, inspect);
+  const receipt = {
+    version: 1,
+    kind: 'signed_candidate',
+    application_version: version,
+    architecture: 'x64',
+    source_commit: commit,
+    verified_at: new Date().toISOString(),
+    production_accepted: false,
+    installer,
+    artifacts,
+  };
+  await writeFile(
+    join(output, 'signed-candidate.json'),
+    `${JSON.stringify(receipt, null, 2)}\n`,
+    { flag: 'wx' },
+  );
+  await rename(output, destination);
+  return receipt;
+}
+async function destinationAvailable(destination) {
+  try {
+    await lstat(destination);
+    throw new ReleaseError(
+      'release_exists',
+      'A signed candidate already exists for this version; no previous candidate was overwritten.',
+    );
+  } catch (error) {
+    if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT'))
+      throw error;
+  }
+}
+async function run(file, args, cwd, environment, capture = false) {
+  if (capture)
+    return (
+      await promisify(execFile)(file, args, {
+        cwd,
+        env: environment,
+        encoding: 'utf8',
+        timeout: 15_000,
+        maxBuffer: 65_536,
+      })
+    ).stdout.trim();
+  await new Promise((resolve, reject) => {
+    const child = spawn(file, args, {
+      cwd,
+      env: environment,
+      stdio: 'inherit',
+      windowsHide: true,
+      timeout: 600_000,
+    });
+    child.once('error', () =>
+      reject(
+        new ReleaseError(
+          'release_build',
+          'A required build tool could not start.',
+        ),
+      ),
+    );
+    child.once('exit', (code) =>
+      code === 0
+        ? resolve()
+        : reject(
+            new ReleaseError('release_build', 'A required build step failed.'),
+          ),
+    );
+  });
+}
+async function cleanSource(environment) {
+  if (
+    await run(
+      'git',
+      ['-c', 'core.fsmonitor=false', 'status', '--porcelain'],
+      repository,
+      environment,
+      true,
+    )
+  )
+    throw new ReleaseError(
+      'release_source',
+      'Signed candidates require a clean checkout, including staged and untracked files.',
+    );
+  const commit = await run(
+    'git',
+    ['rev-parse', '--verify', 'HEAD'],
+    repository,
+    environment,
+    true,
+  );
+  if (!sourceCommit.safeParse(commit).success)
+    throw new ReleaseError(
+      'release_source',
+      'The source commit could not be verified.',
+    );
+  return commit;
+}
+async function main() {
+  if (process.argv.length !== 2)
+    throw new ReleaseError(
+      'release_arguments',
+      'The signed-candidate command does not accept options.',
+    );
+  const policy = signingPolicy();
+  const certificate = await lstat(policy.certificate);
+  if (
+    !certificate.isFile() ||
+    certificate.isSymbolicLink() ||
+    certificate.size === 0 ||
+    certificate.size > 1_048_576
+  )
+    throw new ReleaseError(
+      'release_certificate',
+      'The signing certificate must be a nonempty regular local file of at most one MiB.',
+    );
+  const environment = childEnvironment();
+  const commit = await cleanSource(environment);
+  const manifest = JSON.parse(
+    await readFile(new URL('./package.json', import.meta.url), 'utf8'),
+  );
+  const version = versionSchema.parse(manifest.version);
+  const base = JSON.parse(
+    await readFile(
+      new URL('./electron-builder.unsigned.json', import.meta.url),
+      'utf8',
+    ),
+  );
+  const manager = process.env.npm_execpath;
+  if (!manager || !isAbsolute(manager))
+    throw new ReleaseError(
+      'release_package_manager',
+      'Run this command through the pinned pnpm package manager.',
+    );
+  const pnpm = (args) =>
+    /\.[cm]?js$/i.test(manager)
+      ? run(process.execPath, [manager, ...args], repository, environment)
+      : run(manager, args, repository, environment);
+  const parent = join(repository, 'artifacts', 'desktop-signed');
+  await mkdir(parent, { recursive: true });
+  const destination = join(parent, version);
+  await destinationAvailable(destination);
+  const stage = await mkdtemp(join(parent, '.candidate-'));
+  try {
+    const native = join(stage, 'native'),
+      output = join(stage, 'output');
+    await pnpm(['build', '--force']);
+    const project = 'native/audio-host/AudioHost/AudioHost.csproj';
+    await run(
+      'dotnet',
+      ['restore', project, '--locked-mode'],
+      repository,
+      environment,
+    );
+    await run(
+      'dotnet',
+      [
+        'build',
+        project,
+        '--configuration',
+        'Release',
+        '--runtime',
+        'win-x64',
+        '--self-contained',
+        'true',
+        '--no-restore',
+        '--no-incremental',
+      ],
+      repository,
+      environment,
+    );
+    await run(
+      'dotnet',
+      [
+        'publish',
+        project,
+        '--configuration',
+        'Release',
+        '--runtime',
+        'win-x64',
+        '--self-contained',
+        'true',
+        '--no-restore',
+        '--no-build',
+        '--output',
+        native,
+      ],
+      repository,
+      environment,
+    );
+    await pnpm(['desktop:build']);
+    const { build, Platform, Arch } = await import('electron-builder');
+    await build({
+      projectDir: desktop,
+      targets: Platform.WINDOWS.createTarget('nsis', Arch.x64),
+      publish: 'never',
+      config: signedConfiguration(base, output, native, policy),
+    });
+    if ((await cleanSource(environment)) !== commit)
+      throw new ReleaseError(
+        'release_source_changed',
+        'The checkout changed during the signed build; no candidate was published.',
+      );
+    const receipt = await promoteCandidate({
+      output,
+      destination,
+      version,
+      commit,
+      productName: base.productName,
+      policy,
+    });
+    console.log(
+      JSON.stringify({
+        kind: receipt.kind,
+        version,
+        source_commit: commit,
+        production_accepted: false,
+      }),
+    );
+  } finally {
+    await rm(stage, { recursive: true, force: true });
+  }
+}
+if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url)
+  main().catch((error) => {
+    console.error(
+      error instanceof ReleaseError
+        ? `${error.code}: ${error.message}`
+        : 'release_failed: Signed-candidate build, verification or cleanup failed.',
+    );
+    process.exitCode = 1;
+  });

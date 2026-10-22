@@ -9,6 +9,8 @@ artifacts/
 .env.*
 !.env.example
 *.user
+*.[pP][fF][xX]
+*.[pP]12
 *.wav
 *.chunk
 *.partial

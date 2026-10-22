@@ -35,7 +35,8 @@
     "desktop:build": "pnpm --filter @windows-ai-notes/desktop build",
     "desktop": "pnpm desktop:build && pnpm --filter @windows-ai-notes/desktop start",
     "desktop:test": "pnpm --filter @windows-ai-notes/desktop test:ui",
-    "desktop:package:unsigned": "pnpm desktop:build && pnpm --filter @windows-ai-notes/desktop package:unsigned"
+    "desktop:package:unsigned": "pnpm desktop:build && pnpm --filter @windows-ai-notes/desktop package:unsigned",
+    "desktop:package:signed": "node apps/desktop/release.mjs"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

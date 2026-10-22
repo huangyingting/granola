@@ -277,6 +277,67 @@ revocation-driven UI clearing and the packaged executable. It publishes an **uns
 NSIS installer under the workflow artifacts; this is not a signed release or
 evidence of clean-machine install/upgrade/rollback compatibility.
 
+### Verified signed Windows candidates
+
+`pnpm desktop:package:signed` is a separate, Windows-only producer command.
+The ordinary unsigned preview build remains unchanged, including its app ID,
+product name, per-user installation and encrypted data directory. Signing a
+candidate does **not** rename the app, reset local data or enable automatic updates.
+
+Run from a clean, trusted checkout using the pinned pnpm, Node and .NET SDK.
+Set `WIN_CSC_LINK` to an absolute local PFX/P12 file and
+`WIN_CSC_KEY_PASSWORD` to its password. Independently obtain the signing
+certificate's **SHA-256 DER fingerprint** as `WINDOWS_SIGNING_CERT_SHA256`
+and its exact simple/common publisher name as `WINDOWS_PUBLISHER_NAME`.
+Never derive those trust pins from a downloaded candidate or commit private keys.
+PFX/P12 files and local environment files are ignored by Git.
+
+This path supports **local PFX/P12 signing only**, using a certificate already
+trusted on the target Windows machines. Hardware tokens, HSMs and cloud signing
+services are not integrated. Do not export a key that its certificate provider
+requires to remain in hardware; that provider needs a separate signing integration.
+
+The command checks prerequisites before building, freshly compiles the workspace,
+desktop and self-contained helper, and publishes native output into a private
+staging directory rather than reusing the preview's helper cache. The pinned
+builder signs the desktop, installer and bundled `AudioHost.exe`,
+`AudioHost.dll` and `AudioHost.Core.dll` with SHA-256 and an RFC 3161 timestamp.
+Missing signing credentials cannot silently produce an unsigned candidate.
+No model, login or signing secrets are passed to compilation or the Windows
+signature-inspection subprocess.
+
+Before promotion, the actual Windows Authenticode verifier must accept each
+required executable/assembly as an embedded signature with a timestamp and the
+exact configured certificate fingerprint and publisher. Catalog-only,
+untrusted, unsigned, changed or mismatched files fail the build. Each accepted
+file is streamed through SHA-256 and SHA-512 with byte-count and modification
+checks. Only a complete verified set is moved to
+`artifacts/desktop-signed/<version>/`; an existing candidate is not overwritten.
+Failed private staging is removed.
+
+The public `signed-candidate.json` records the source commit, artifact hashes and
+observed signer metadata, and explicitly sets `production_accepted=false`.
+It is a build/inspection receipt, **not a signed update feed, independent
+provenance attestation or production acceptance decision**. Only distribute the
+signed installer, not the unpacked smoke-test directory.
+
+For hosted PFX candidate builds, configure the **`signed-release` environment**
+with required reviewers and branch restrictions **before** storing credentials.
+Add `WINDOWS_SIGNING_PFX_BASE64` and `WINDOWS_SIGNING_PFX_PASSWORD` as environment
+secrets, and the two public trust pins as environment variables. The manually
+dispatched **Signed Windows candidate** workflow runs only on `main`, installs
+dependencies only after successful normal Checks for that exact source commit
+and before exposing signing secrets, removes the temporary certificate
+in `finally`, and uploads only a successfully verified installer and public receipt.
+It does not publish a GitHub release or run on pull requests.
+
+Normal CI needs no private certificate: it checks the policy, staging failures
+and actual Windows verification against the signed Node runtime, a tampered copy
+and a compiled unsigned PE without adding a test CA to Windows trust. Creating a real candidate
+still requires the deployment owner's trusted certificate. Physical-device,
+semantic-quality, clean-machine installation/upgrade/rollback, trusted update
+delivery and production operational gates remain mandatory before release.
+
 ## Desktop cited summaries
 
 **Generate summary** first asks for separate Azure processing consent and English
