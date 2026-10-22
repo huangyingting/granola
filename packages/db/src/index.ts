@@ -30,6 +30,7 @@ import { RecordingTranscriptions } from './recording-transcriptions.js';
 import { UsageStore } from './usage.js';
 import { LiveSourceStore } from './live.js';
 import { SummaryStages } from './summaries.js';
+import { MeetingQuestions } from './questions.js';
 import {
   summaryCitations,
   summarySourceSchema,
@@ -153,6 +154,7 @@ export class Database {
   readonly usage: UsageStore;
   readonly live: LiveSourceStore;
   readonly summaries: SummaryStages;
+  readonly questions: MeetingQuestions;
   constructor(url: string) {
     this.pool = new pg.Pool({
       connectionString: url,
@@ -167,6 +169,7 @@ export class Database {
     this.usage = new UsageStore(this);
     this.live = new LiveSourceStore(this);
     this.summaries = new SummaryStages(this);
+    this.questions = new MeetingQuestions(this);
     this.pool.on('error', () =>
       console.error(
         'database_connection_failed: idle PostgreSQL connection closed.',

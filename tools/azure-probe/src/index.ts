@@ -20,6 +20,86 @@ import {
   factCitations,
   type EvidenceFacts,
 } from '@windows-ai-notes/contracts/evidence';
+import {
+  QUESTION_VERSION,
+  QUESTION_RETRIEVAL_VERSION,
+  questionEvidenceSchema,
+  validateQuestionAnswer,
+} from '@windows-ai-notes/contracts/questions';
+
+async function probeQuestions(
+  providers: ReturnType<typeof createAzureProviders>,
+) {
+  if (!providers.answer)
+    throw new Error('The configured provider lacks current-meeting answers.');
+  const id = randomUUID();
+  const text =
+    'Mira owns the synthetic Orion launch checklist. No budget was discussed.';
+  let inputTokens = 0,
+    outputTokens = 0,
+    previews = 0;
+  for (const language of ['en', 'zh'] as const) {
+    const evidence = questionEvidenceSchema.parse({
+      document_id: id,
+      note_revision: 1,
+      transcript_revision: 0,
+      version: QUESTION_VERSION,
+      retrieval_version: QUESTION_RETRIEVAL_VERSION,
+      mode: 'full',
+      language,
+      question:
+        language === 'en'
+          ? 'Who owns the launch checklist?'
+          : '预算的金额是多少？',
+      units: [
+        {
+          citation: { source: 'note', id, revision: 1 },
+          text,
+          text_start: 0,
+          text_end: text.length,
+          start_ms: null,
+          end_ms: null,
+          overlap: false,
+        },
+      ],
+    });
+    const result = await providers.answer(
+      evidence,
+      AbortSignal.timeout(95_000),
+      undefined,
+      async () => {
+        previews++;
+      },
+    );
+    inputTokens += result.usage.input_tokens;
+    outputTokens += result.usage.output_tokens;
+    const accepted = validateQuestionAnswer(result.answer, evidence);
+    if (
+      language === 'en'
+        ? accepted.status !== 'answered' ||
+          !/\bMira\b/u.test(accepted.answer.text)
+        : accepted.status !== 'insufficient_evidence' ||
+          !/\p{Script=Han}/u.test(accepted.answer.text)
+    )
+      throw new Error(
+        'The synthetic question did not produce the expected cited answer or explicit missing-evidence status.',
+      );
+  }
+  console.log(
+    JSON.stringify({
+      current_meeting_questions: 'passed',
+      provider_requests: 2,
+      english_named_owner: true,
+      chinese_missing_evidence: true,
+      citations_validated: true,
+      preview_updates: previews,
+      input_tokens: inputTokens,
+      output_tokens: outputTokens,
+      credentials_logged: false,
+      real_meeting_quality_evaluated: false,
+    }),
+  );
+}
 
 async function probeEvidence(
   providers: ReturnType<typeof createAzureProviders>,
@@ -121,15 +201,19 @@ async function main() {
     options: {
       'env-file': { type: 'string' },
       'evidence-only': { type: 'boolean', default: false },
+      'question-only': { type: 'boolean', default: false },
     },
   });
   if (process.env.NODE_ENV === 'production')
     throw new Error('Synthetic probe is disabled in production mode.');
+  if (values['question-only'] && values['evidence-only'])
+    throw new Error('Choose exactly one synthetic probe mode.');
   const config = loadAzureConfig({
     ...process.env,
     ...(values['env-file'] ? { AZURE_ENV_FILE: values['env-file'] } : {}),
   });
   const providers = createAzureProviders(config);
+  if (values['question-only']) return probeQuestions(providers);
   if (values['evidence-only']) return probeEvidence(providers);
   const url = requireDatabaseUrl();
   const admin = new Database(url);

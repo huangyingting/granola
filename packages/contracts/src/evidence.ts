@@ -44,6 +44,40 @@ export const summaryEvidenceUnitSchema = z
   );
 export type SummaryEvidenceUnit = z.infer<typeof summaryEvidenceUnitSchema>;
 
+export function* evidencePieces(
+  text: string,
+  source: Pick<SummaryEvidenceUnit, 'citation' | 'start_ms' | 'end_ms'>,
+): Generator<SummaryEvidenceUnit> {
+  let part = '',
+    size = 0,
+    start = 0;
+  for (const character of text) {
+    const cost = utf8.encode(JSON.stringify(character)).length - 2;
+    if (size + cost > 3072 && part) {
+      yield {
+        ...source,
+        text: part,
+        text_start: start,
+        text_end: start + part.length,
+        overlap: false,
+      };
+      start += part.length;
+      part = '';
+      size = 0;
+    }
+    part += character;
+    size += cost;
+  }
+  if (part)
+    yield {
+      ...source,
+      text: part,
+      text_start: start,
+      text_end: start + part.length,
+      overlap: false,
+    };
+}
+
 export const summaryEvidenceChunkSchema = frozenMeetingSchema
   .omit({ notes: true })
   .extend({

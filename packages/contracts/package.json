@@ -11,6 +11,7 @@
     "./generation": "./dist/generation.js",
     "./sse": "./dist/sse.js",
     "./evidence": "./dist/evidence.js",
+    "./questions": "./dist/questions.js",
     "./templates": "./dist/templates.js",
     "./recording": "./dist/recording.js",
     "./uploads": "./dist/uploads.js",

@@ -31,7 +31,19 @@ const invalid = () =>
 
 // Decode only the known leading overview string, never unfinished JSON or citations.
 export function overviewPreview(content: string): string | null {
-  const match = /^\s*\{\s*"overview"\s*:\s*\{\s*"text"\s*:\s*"/u.exec(content);
+  return leadingText(content, 'overview');
+}
+export function answerPreview(content: string): string | null {
+  return leadingText(content, 'answer');
+}
+function leadingText(
+  content: string,
+  field: 'overview' | 'answer',
+): string | null {
+  const match = new RegExp(
+    `^\\s*\\{\\s*"${field}"\\s*:\\s*\\{\\s*"text"\\s*:\\s*"`,
+    'u',
+  ).exec(content);
   if (!match) return null;
   let result = '';
   for (
@@ -77,6 +89,7 @@ export async function readAzureStream(
   signal: AbortSignal,
   preview: PreviewReporter,
   reportUsage?: (usage: Usage) => Promise<void>,
+  project: (content: string) => string | null = overviewPreview,
 ) {
   if (
     !response.headers
@@ -134,7 +147,7 @@ export async function readAzureStream(
               'The generated content exceeds its byte budget.',
               502,
             );
-          const text = overviewPreview(content);
+          const text = project(content);
           if (text !== null && text !== previousPreview) {
             await preview(text);
             previousPreview = text;

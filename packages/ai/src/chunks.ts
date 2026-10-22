@@ -10,6 +10,7 @@ import { canonicalJson } from '@windows-ai-notes/contracts/content';
 import {
   frozenMeetingSchema,
   summaryEvidenceChunkSchema,
+  evidencePieces,
   SUMMARY_EVIDENCE_VERSION,
   SUMMARY_CHUNK_BYTES,
   MAX_SUMMARY_CHUNKS,
@@ -18,7 +19,6 @@ import {
   type SummaryEvidenceChunk,
 } from '@windows-ai-notes/contracts/evidence';
 
-const PIECE_BYTES = 3072;
 const OVERLAP_BYTES = 128;
 const bytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value));
 const characterBytes = (value: string) => bytes(value) - 2;
@@ -28,40 +28,6 @@ const integrity = () =>
     'The frozen meeting evidence is inconsistent or incomplete.',
     500,
   );
-
-function* pieces(
-  text: string,
-  source: Pick<SummaryEvidenceUnit, 'citation' | 'start_ms' | 'end_ms'>,
-): Generator<SummaryEvidenceUnit> {
-  let part = '',
-    size = 0,
-    start = 0;
-  for (const character of text) {
-    const cost = characterBytes(character);
-    if (size + cost > PIECE_BYTES && part) {
-      yield {
-        ...source,
-        text: part,
-        text_start: start,
-        text_end: start + part.length,
-        overlap: false,
-      };
-      start += part.length;
-      part = '';
-      size = 0;
-    }
-    part += character;
-    size += cost;
-  }
-  if (part)
-    yield {
-      ...source,
-      text: part,
-      text_start: start,
-      text_end: start + part.length,
-      overlap: false,
-    };
-}
 
 function tail(unit: SummaryEvidenceUnit): SummaryEvidenceUnit {
   const characters = [...unit.text];
@@ -107,7 +73,7 @@ export async function* chunkFrozenMeeting(
 
   async function* sources(): AsyncGenerator<SummaryEvidenceUnit> {
     if (notes.trim())
-      yield* pieces(notes, {
+      yield* evidencePieces(notes, {
         citation: {
           source: 'note',
           id: context.document_id,
@@ -143,7 +109,7 @@ export async function* chunkFrozenMeeting(
         ids.add(segment.id);
         textBytes += Buffer.byteLength(segment.text);
         if (textBytes > MAX_TRANSCRIPT_TEXT_BYTES) throw integrity();
-        yield* pieces(segment.text, {
+        yield* evidencePieces(segment.text, {
           citation: {
             source: 'transcript',
             id: segment.id,

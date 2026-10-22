@@ -360,8 +360,29 @@ therefore pause when their account allowance cannot reserve another stage.
 Original cited segments remain inspectable after a newer canonical transcript
 replaces the selected revision. These structural checks do not prove semantic
 support, complete decision/action recall or language quality; approved
-real-meeting evaluation remains a release gate. Current-meeting chat is not
-implemented yet.
+real-meeting evaluation remains a release gate. End-to-end current-meeting chat is
+not implemented yet.
+
+### Current-meeting question groundwork
+
+The server-side question evidence builder pins the current note and canonical
+transcript revisions. It uses the complete authorized context when its serialized
+form fits 48,000 bytes; larger meetings use bounded English keywords and Chinese
+substrings, ranked only inside that document and revision, with immediate source
+neighbours. Normalization is for matching only: supplied excerpts retain original
+UTF-16 text offsets, segment IDs, revisions and whole-segment timestamps. Another
+meeting, including one owned by the same account, is never a retrieval fallback.
+
+The configured Azure deployment can return structured cited answers or explicit
+`insufficient_evidence`, with optional isolated plain-text answer previews. Only
+supplied source locators are accepted. No evidence means an explicit local
+insufficiency response without a paid request. Retrieval is deliberately lexical,
+not multilingual semantic search; a missing match is not proof that a fact is
+absent from the whole meeting. Citation validation is not semantic verification.
+This foundation is not exposed as a chat API or desktop workflow yet: durable
+threads, consent/idempotency, fenced paid dispatch, history, replay and citation
+inspection must be wired before that feature is available. Existing strict job
+and result schemas remain unchanged.
 
 ### Live generation and replay
 
@@ -660,8 +681,8 @@ cancelled/completed jobs cannot be resumed. Recording tracks remain bounded to f
 hours each (the desktop capture preview stops at one hour), with at most two tracks.
 
 This first slice uses PostgreSQL polling/leases as the durable scheduler rather
-than introducing unused Redis/BullMQ infrastructure. Desktop realtime STT, chat,
-interactive desktop AI and token streaming remain later implementation work.
+than introducing unused Redis/BullMQ infrastructure. Current-meeting chat and
+the remaining production release gates are still implementation work.
 Durable usage reservations and receipts are implemented as described above;
 they do not provide exactly-once billing or reconcile Azure invoices.
 
@@ -926,6 +947,18 @@ pnpm azure:probe --evidence-only --env-file ../ReadWise/.env
 
 It validates supported structured output and original citation scope, not the
 semantic quality or resilience of a real long meeting.
+
+The question-only mode makes exactly two streamed synthetic OpenAI requests and
+needs no PostgreSQL or Speech requests: an English cited owner question and a
+Chinese question whose budget evidence is missing. It checks the expected
+synthetic responses, citation scope and usage, without printing question, answer
+or preview bodies:
+
+```sh
+pnpm azure:probe --question-only --env-file ../ReadWise/.env
+```
+
+It does not establish real-meeting answer quality or retrieval recall.
 
 The separate live probe makes paid Speech TTS and streaming STT calls, but needs
 neither PostgreSQL nor OpenAI requests:
