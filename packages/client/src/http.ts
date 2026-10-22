@@ -16,6 +16,7 @@ import type { Mutation } from '@windows-ai-notes/local';
 import { ClientError } from './errors.js';
 import { openLiveConnection, type LiveConnectionOptions } from './live.js';
 import { SseDecoder, SseDecodeError } from '@windows-ai-notes/contracts/sse';
+import { chatEventSchema } from '@windows-ai-notes/contracts/questions';
 export { ClientError } from './errors.js';
 export function serverUrl(value: string, allowLoopback = false): string {
   let url: URL;
@@ -224,13 +225,46 @@ export class ApiClient {
     signal: AbortSignal,
   ) {
     resourceId.parse(id);
+    return this.eventStream(
+      `/v1/jobs/${id}/events`,
+      jobEventSchema,
+      (event) => event.job_id === id,
+      after,
+      received,
+      signal,
+    );
+  }
+  async chatEvents(
+    id: string,
+    after: number,
+    received: (event: z.infer<typeof chatEventSchema>) => Promise<void>,
+    signal: AbortSignal,
+  ) {
+    resourceId.parse(id);
+    return this.eventStream(
+      `/v1/chat-turns/${id}/events`,
+      chatEventSchema,
+      (event) => event.turn_id === id,
+      after,
+      received,
+      signal,
+    );
+  }
+  private async eventStream<T extends { seq: number; event_type: string }>(
+    path: string,
+    schema: z.ZodType<T>,
+    matches: (event: T) => boolean,
+    after: number,
+    received: (event: T) => Promise<void>,
+    signal: AbortSignal,
+  ) {
     z.number().int().min(0).max(2_147_483_647).parse(after);
     const bounded = AbortSignal.any([signal, AbortSignal.timeout(60_000)]);
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
     try {
       const headers = await this.headers();
       bounded.throwIfAborted();
-      const response = await fetch(`${this.base}/v1/jobs/${id}/events`, {
+      const response = await fetch(`${this.base}${path}`, {
         headers: {
           ...headers,
           Accept: 'text/event-stream',
@@ -293,17 +327,17 @@ export class ApiClient {
               'The service returned an invalid event.',
             );
           }
-          const parsed = jobEventSchema.safeParse(value);
+          const parsed = schema.safeParse(value);
           if (
             !parsed.success ||
-            parsed.data.job_id !== id ||
+            !matches(parsed.data) ||
             parsed.data.seq !== after + 1 ||
             frame.id !== String(parsed.data.seq) ||
             frame.event !== parsed.data.event_type
           )
             throw new ClientError(
               'invalid_event_stream',
-              'The event does not match its authorized job, sequence or schema.',
+              'The event does not match its authorized operation, sequence or schema.',
             );
           signal.throwIfAborted();
           await received(parsed.data);

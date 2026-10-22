@@ -99,7 +99,7 @@ export function registerChatRoutes(
   });
   app.get('/v1/chat-turns/:id/event-state', async (request) => {
     const { id } = parse(idParams, request.params);
-    return { turn: await db.chat.get(principal(request).userId, id) };
+    return db.chat.eventState(principal(request).userId, id);
   });
   app.get('/v1/chat-turns/:id/events', async (request, reply) => {
     const { id } = parse(idParams, request.params);

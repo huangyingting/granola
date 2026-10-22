@@ -230,12 +230,36 @@ export const chatTurnSchema = z
 export type ChatTurn = z.infer<typeof chatTurnSchema>;
 export const chatPreviewSchema = z.strictObject({
   version: z.literal(1),
-  attempt: z.number().int().positive(),
+  attempt: z.number().int().positive().max(2_147_483_647),
   text: z.string().max(4000),
 });
+export const chatEventStateSchema = z
+  .strictObject({
+    turn: chatTurnSchema,
+    preview_attempt: z.number().int().min(0).max(2_147_483_647),
+    preview: chatPreviewSchema.nullable(),
+  })
+  .refine(
+    (value) =>
+      value.preview_attempt >= value.turn.attempt &&
+      (!value.preview ||
+        (value.turn.state === 'running' &&
+          value.preview.attempt === value.preview_attempt)),
+  );
+export const chatWatchSchema = z.strictObject({
+  document_id: resourceId,
+  thread_id: resourceId,
+  turn_id: resourceId,
+  last_event_id: z.number().int().min(0).max(2_147_483_647),
+  attempt: z.number().int().min(0).max(2_147_483_647),
+  preview: chatPreviewSchema.shape.text,
+  status: z.enum(['connecting', 'streaming', 'reconnecting', 'paused']),
+  error: z.string().max(1000).nullable(),
+});
+export type ChatWatch = z.infer<typeof chatWatchSchema>;
 export const chatEventSchema = z.strictObject({
   turn_id: resourceId,
-  seq: z.number().int().positive(),
+  seq: z.number().int().positive().max(2_147_483_647),
   event_type: z.enum([
     'turn.accepted',
     'turn.progress',

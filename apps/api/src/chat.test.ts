@@ -19,6 +19,7 @@ import { ServiceError } from '@windows-ai-notes/contracts/server';
 import {
   chatTurnSchema,
   chatEventSchema,
+  chatEventStateSchema,
   chatSourceSchema,
   questionPromptVersion,
   QUESTION_CONTEXT_PROMPT_VERSION,
@@ -591,7 +592,10 @@ describe.skipIf(!databaseUrl)(
         url: `/v1/chat-turns/${turn.id}/event-state`,
         headers,
       });
-      expect(snapshot.json().turn).toEqual(state);
+      expect(chatEventStateSchema.parse(snapshot.json())).toMatchObject({
+        turn: state,
+        preview: null,
+      });
     });
     it('inspects only completed cited frozen sources after current-note replacement and cache/event expiry', async () => {
       const document = await source(),

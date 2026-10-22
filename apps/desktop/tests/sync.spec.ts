@@ -153,10 +153,34 @@ test('recovers consented chat and recovery receipts across Windows restarts, ins
     ).toHaveCount(0);
     expect(fixture.state.chatTurns.size).toBe(1);
     const turn = [...fixture.state.chatTurns.values()][0]!;
+    fixture.previewChat(turn.id, '未完成的会议回答草稿。');
+    await expect(page.getByLabel('Unfinished answer preview')).toContainText(
+      '未完成的会议回答草稿。',
+    );
+    await expect(page.getByLabel('Completed meeting answer')).toHaveCount(0);
+    const cursor = await page.evaluate(async () => {
+      const response = await window.notes.invoke({ operation: 'bootstrap' });
+      if (
+        !response.ok ||
+        !('state' in response) ||
+        !response.state.chat_generation
+      )
+        throw new Error('Missing saved Main chat preview.');
+      return response.state.chat_generation.last_event_id;
+    });
+    await close(application);
+    application = null;
+    application = await launch(directory);
+    page = await application.firstWindow();
+    await page.getByText('Ask this meeting', { exact: true }).click();
+    await expect(page.getByLabel('Unfinished answer preview')).toContainText(
+      '未完成的会议回答草稿。',
+    );
+    await expect
+      .poll(() => fixture.state.chat_event_cursors.includes(cursor))
+      .toBe(true);
     fixture.failChat(turn.id);
-    await page
-      .getByRole('button', { name: 'Refresh answers', exact: true })
-      .click();
+    await expect(page.getByLabel('Unfinished answer preview')).toHaveCount(0);
     await expect(
       page.getByRole('button', { name: 'Resume answer', exact: true }),
     ).toBeDisabled();

@@ -44,6 +44,9 @@ import {
   chatResumeSchema,
   chatThreadSchema,
   chatTurnSchema,
+  chatEventSchema,
+  chatEventStateSchema,
+  chatPreviewSchema,
   insufficientQuestionEvidence,
   type ChatTurn,
   type ChatSource,
@@ -87,6 +90,31 @@ export async function desktopFixture() {
   >();
   const chatReceipts = new Map<string, { hash: string; turn: string }>();
   const chatResumes = new Map<string, Set<string>>();
+  const chatEvents = new Map<string, z.infer<typeof chatEventSchema>[]>();
+  const chatPreviews = new Map<
+    string,
+    { attempt: number; text: string | null }
+  >();
+  function chatEvent(
+    id: string,
+    type: z.infer<typeof chatEventSchema>['event_type'],
+    payload: unknown,
+  ) {
+    const turn = chatTurns.get(id);
+    if (!turn) throw new Error('Missing synthetic question event owner.');
+    const value = chatEventSchema.parse({
+      turn_id: id,
+      seq: turn.last_event_id + 1,
+      event_type: type,
+      schema_version: 1,
+      created_at: new Date().toISOString(),
+      payload,
+    });
+    const rows = chatEvents.get(id) ?? [];
+    rows.push(value);
+    chatEvents.set(id, rows);
+    chatTurns.set(id, { ...turn, last_event_id: value.seq });
+  }
   const events = new Map<string, z.infer<typeof jobEventSchema>[]>();
   function event(
     id: string,
@@ -171,6 +199,7 @@ export async function desktopFixture() {
     lose_chat_resume_response: false,
     lose_chat_delete_response: false,
     chat_resume_tokens: [] as string[],
+    chat_event_cursors: [] as number[],
     chat_online: true,
     workspaces: [{ id: workspace, name: 'Synthetic cloud workspace' }],
     failures: [] as unknown[],
@@ -508,13 +537,13 @@ export async function desktopFixture() {
       chatTurnSchema.parse({
         ...turn,
         state: 'succeeded',
-        attempt: turn.attempt + 1,
-        last_event_id: turn.last_event_id + 1,
+        attempt: turn.attempt + Number(turn.state === 'queued'),
         error: null,
         resume_available: false,
         resume_token: null,
         provider_requests:
-          turn.provider_requests + Number(citations.length > 0),
+          turn.provider_requests +
+          Number(citations.length > 0 && turn.state === 'queued'),
         result: {
           answer: citations.length
             ? {
@@ -537,20 +566,61 @@ export async function desktopFixture() {
         },
       }),
     );
+    const previous = chatPreviews.get(id)!;
+    chatPreviews.set(id, {
+      attempt: previous.attempt + Number(turn.state === 'queued'),
+      text: null,
+    });
+    chatEvent(id, 'answer.completed', { state: 'succeeded' });
+  }
+  function previewChat(id: string, text: string) {
+    const turn = chatTurn(id),
+      previous = chatPreviews.get(id);
+    if (
+      !turn ||
+      !previous ||
+      !['queued', 'running'].includes(turn.state) ||
+      !chatSnapshots.get(id)?.units.length
+    )
+      throw new Error('Missing synthetic question preview owner.');
+    const attempt = previous.attempt + Number(turn.state === 'queued');
+    if (!text.startsWith(previous.text ?? ''))
+      throw new Error('Synthetic question preview changed its prefix.');
+    if (turn.state === 'queued') {
+      chatTurns.set(id, {
+        ...turn,
+        state: 'running',
+        attempt: turn.attempt + 1,
+        provider_requests: turn.provider_requests + 1,
+      });
+      chatEvent(id, 'turn.progress', { stage: 'preparing', attempt });
+      chatEvent(
+        id,
+        'turn.progress',
+        chatPreviewSchema.parse({ version: 1, attempt, text: '' }),
+      );
+    }
+    chatPreviews.set(id, { attempt, text });
+    chatEvent(
+      id,
+      'turn.progress',
+      chatPreviewSchema.parse({ version: 1, attempt, text }),
+    );
   }
   function failChat(id: string) {
     const turn = chatTurn(id);
     if (!turn || !['queued', 'running'].includes(turn.state))
       throw new Error('Missing active synthetic question.');
-    const resumable = turn.attempt + 1 < 3;
+    const attempt = turn.attempt + Number(turn.state === 'queued');
+    const resumable = attempt < 3;
     chatTurns.set(
       id,
       chatTurnSchema.parse({
         ...turn,
         state: 'failed',
-        attempt: turn.attempt + 1,
-        last_event_id: turn.last_event_id + 1,
-        provider_requests: turn.provider_requests + 1,
+        attempt,
+        provider_requests:
+          turn.provider_requests + Number(turn.state === 'queued'),
         uncertain_requests: turn.uncertain_requests + 1,
         resume_available: resumable,
         resume_token: resumable ? randomUUID() : null,
@@ -561,6 +631,11 @@ export async function desktopFixture() {
         },
       }),
     );
+    chatPreviews.set(id, {
+      attempt: chatPreviews.get(id)!.attempt + Number(turn.state === 'queued'),
+      text: null,
+    });
+    chatEvent(id, 'turn.failed', { code: 'question_dispatch_unconfirmed' });
   }
   function send(response: ServerResponse, value: unknown, status = 200) {
     response.writeHead(status, { 'Content-Type': 'application/json' });
@@ -655,6 +730,68 @@ export async function desktopFixture() {
         return error(response, 'service_unavailable', 503);
       if (request.method === 'GET' && parts[2] === 'chat-turns') {
         const turn = chatTurn(id);
+        if (!turn) return error(response, 'chat_not_found', 404);
+        if (parts[4] === 'event-state') {
+          const preview = chatPreviews.get(id)!;
+          return send(
+            response,
+            chatEventStateSchema.parse({
+              turn,
+              preview_attempt: preview.attempt,
+              preview:
+                turn.state === 'running' && preview.text !== null
+                  ? { version: 1, attempt: preview.attempt, text: preview.text }
+                  : null,
+            }),
+          );
+        }
+        if (parts[4] === 'events') {
+          let cursor = Number(request.headers['last-event-id'] ?? 0);
+          if (
+            !Number.isInteger(cursor) ||
+            cursor < 0 ||
+            cursor > turn.last_event_id
+          )
+            return error(response, 'invalid_event_cursor', 400);
+          const first = chatEvents.get(id)?.[0]?.seq ?? turn.last_event_id + 1;
+          if (cursor < first - 1)
+            return error(response, 'event_cursor_expired', 410);
+          state.chat_event_cursors.push(cursor);
+          response.writeHead(200, {
+            'content-type': 'text/event-stream',
+            'cache-control': 'no-store',
+          });
+          let closed = false,
+            heartbeat = Date.now();
+          response.once('close', () => {
+            closed = true;
+          });
+          while (
+            !closed &&
+            state.active &&
+            state.chat_online &&
+            documents.has(turn.document_id) &&
+            chatTurns.has(id)
+          ) {
+            for (const value of (chatEvents.get(id) ?? []).filter(
+              (value) => value.seq > cursor,
+            )) {
+              response.write(
+                `id: ${value.seq}\nevent: ${value.event_type}\ndata: ${JSON.stringify(value)}\n\n`,
+              );
+              cursor = value.seq;
+            }
+            if (!['queued', 'running'].includes(chatTurns.get(id)!.state))
+              break;
+            if (Date.now() - heartbeat > 1000) {
+              response.write(': heartbeat\n\n');
+              heartbeat = Date.now();
+            }
+            await new Promise((resolve) => setTimeout(resolve, 25));
+          }
+          response.end();
+          return;
+        }
         return turn
           ? send(response, turn)
           : error(response, 'chat_not_found', 404);
@@ -890,7 +1027,7 @@ export async function desktopFixture() {
           resume_token: null,
           provider_requests: 0,
           uncertain_requests: 0,
-          last_event_id: 1,
+          last_event_id: 0,
           created_at: new Date().toISOString(),
         });
         const units: ChatSource['excerpts'] = existing.notes.trim()
@@ -928,6 +1065,11 @@ export async function desktopFixture() {
         );
         chatThreads.set(thread.id, chatThreadSchema.parse(thread));
         chatTurns.set(turn.id, turn);
+        chatPreviews.set(turn.id, { attempt: 0, text: null });
+        chatEvent(turn.id, 'turn.accepted', {
+          thread_id: turn.thread_id,
+          position: turn.position,
+        });
         chatSnapshots.set(turn.id, { units, context });
         chatReceipts.set(key, { hash: digest, turn: turn.id });
         if (state.lose_chat_response) {
@@ -935,7 +1077,7 @@ export async function desktopFixture() {
           response.destroy();
           return;
         }
-        return send(response, turn, 202);
+        return send(response, chatTurn(turn.id), 202);
       }
       if (parts[2] === 'chat-turns' && request.method === 'POST') {
         let turn = chatTurn(id);
@@ -977,9 +1119,14 @@ export async function desktopFixture() {
               error: null,
               resume_available: false,
               resume_token: null,
-              last_event_id: turn.last_event_id + 1,
             };
             chatTurns.set(id, turn);
+            chatPreviews.set(id, {
+              attempt: chatPreviews.get(id)!.attempt + 1,
+              text: null,
+            });
+            chatEvent(id, 'turn.accepted', { resumed: true });
+            turn = chatTurn(id)!;
           }
           if (state.lose_chat_resume_response) {
             state.lose_chat_resume_response = false;
@@ -997,9 +1144,14 @@ export async function desktopFixture() {
               error: null,
               resume_available: false,
               resume_token: null,
-              last_event_id: turn.last_event_id + 1,
             };
             chatTurns.set(id, turn);
+            chatPreviews.set(id, {
+              attempt: chatPreviews.get(id)!.attempt + 1,
+              text: null,
+            });
+            chatEvent(id, 'turn.cancelled', {});
+            turn = chatTurn(id)!;
             chatSnapshots.delete(id);
           }
           return send(response, turn);
@@ -1015,6 +1167,8 @@ export async function desktopFixture() {
             chatTurns.delete(turn.id);
             chatSnapshots.delete(turn.id);
             chatResumes.delete(turn.id);
+            chatPreviews.delete(turn.id);
+            chatEvents.delete(turn.id);
           }
         chatThreads.delete(id);
         if (state.lose_chat_delete_response) {
@@ -1333,6 +1487,7 @@ export async function desktopFixture() {
     previewSummary,
     failSummary,
     publishChat,
+    previewChat,
     failChat,
     registerRecording(
       document_id: string,

@@ -22,6 +22,7 @@ import {
   type ChatTurn,
 } from '@windows-ai-notes/contracts/questions';
 import { ApiClient, ClientError } from './http.js';
+import { ChatEvents } from './chat-events.js';
 
 export const chatIntentSchema = z
   .strictObject({
@@ -79,11 +80,37 @@ function bound(turn: ChatTurn, document: string, thread?: string, id?: string) {
 }
 
 export class DesktopChat {
+  readonly events: ChatEvents;
   private readonly writes = new Set<string>();
   constructor(
     private readonly local: LocalStore,
     private readonly hooks: Hooks,
-  ) {}
+  ) {
+    this.events = new ChatEvents(local, {
+      owner: (scope, id, thread) => {
+        const owner = this.owner(scope, id),
+          remote = owner.remote;
+        if (!remote)
+          throw problem(
+            'workspace_not_connected',
+            'Reconnect the original workspace for question updates.',
+          );
+        const authorize = () => {
+          owner.authorize();
+          remote.authorize();
+          this.local.get(owner.profile, id);
+          this.available(owner.profile, id, thread);
+        };
+        authorize();
+        return { profile: owner.profile, api: remote.api, authorize };
+      },
+      reads: hooks.reads,
+      changed: hooks.changed,
+      cache: (profile, id, turn) => this.latest(profile, id, turn, false),
+      failed: (error, owner, id, thread, signal) =>
+        this.failure(error, owner, id, signal, thread),
+    });
+  }
   private owner(scope: number, id: string) {
     const owner = this.hooks.owner(scope);
     this.local.get(owner.profile, id);
@@ -128,6 +155,7 @@ export class DesktopChat {
   private forget(profile: string, id: string, thread: string) {
     // Fence reads already in flight without retaining deleted conversation text.
     this.local.putArtifact(profile, id, `chat-deleted:${thread}`, true);
+    this.events.stopThread(profile, id, thread);
     this.local.deleteArtifactPrefix(profile, id, prefix(thread));
     const directory = this.local.getArtifact(
       profile,
@@ -200,25 +228,57 @@ export class DesktopChat {
       authorize();
       return result;
     } catch (error) {
-      let failure = error;
-      if (
-        error instanceof ClientError &&
-        ['chat_not_found', 'document_not_found'].includes(error.code)
-      ) {
-        authorize();
-        try {
-          if (error.code === 'chat_not_found') {
-            const target =
-              thread ??
-              this.local.getArtifact(
-                owner.profile,
-                id,
-                'chat-submission',
-                chatIntentSchema,
-              )?.thread_id;
-            if (target) {
-              const document = await remote.api.document(id, read.signal);
-              authorize();
+      throw await this.failure(
+        error,
+        { profile: owner.profile, api: remote.api, authorize },
+        id,
+        read.signal,
+        thread,
+      );
+    } finally {
+      this.hooks.reads.delete(read);
+    }
+  }
+  private async failure(
+    error: unknown,
+    owner: { profile: string; api: ApiClient; authorize: () => void },
+    id: string,
+    signal: AbortSignal,
+    thread?: string,
+  ) {
+    let failure = error;
+    if (
+      error instanceof ClientError &&
+      ['chat_not_found', 'document_not_found'].includes(error.code)
+    ) {
+      owner.authorize();
+      try {
+        if (error.code === 'chat_not_found') {
+          const target =
+            thread ??
+            this.local.getArtifact(
+              owner.profile,
+              id,
+              'chat-submission',
+              chatIntentSchema,
+            )?.thread_id;
+          if (target) {
+            try {
+              const page = await owner.api.request(
+                `/v1/chat-threads/${target}/turns?after=0`,
+                chatTurnPageSchema,
+                { signal },
+              );
+              owner.authorize();
+              for (const turn of page.turns) bound(turn, id, target);
+            } catch (threadError) {
+              if (
+                !(threadError instanceof ClientError) ||
+                threadError.code !== 'chat_not_found'
+              )
+                throw threadError;
+              const document = await owner.api.document(id, signal);
+              owner.authorize();
               if (document.id !== id)
                 throw problem(
                   'invalid_server_response',
@@ -228,18 +288,50 @@ export class DesktopChat {
                 this.forget(owner.profile, id, target);
               });
               this.hooks.changed();
+              return error;
             }
           }
-          await this.hooks.synchronize();
-          authorize();
-        } catch (accessError) {
-          failure = accessError;
         }
+      } catch (accessError) {
+        failure = accessError;
       }
-      this.hooks.revoked(failure, owner.profile, remote.api);
-      throw failure;
-    } finally {
-      this.hooks.reads.delete(read);
+      // A hidden document 404 can mean revoked membership, not conversation deletion.
+      try {
+        owner.authorize();
+        await this.hooks.synchronize();
+        owner.authorize();
+      } catch (accessError) {
+        failure = accessError;
+      }
+    }
+    this.hooks.revoked(failure, owner.profile, owner.api);
+    return failure;
+  }
+  async watch(command: Command<'watchChat'>) {
+    const owner = this.owner(command.scope, command.id);
+    if (command.action === 'start') {
+      const turn = this.local.getArtifact(
+        owner.profile,
+        command.id,
+        `${prefix(command.thread_id)}turn:${command.turn_id}`,
+        chatTurnSchema,
+      );
+      if (!turn)
+        throw problem(
+          'chat_turn_unavailable',
+          'Load this question before connecting its updates.',
+        );
+      bound(turn, command.id, command.thread_id, command.turn_id);
+      await this.events.start(
+        command.scope,
+        command.id,
+        command.thread_id,
+        command.turn_id,
+      );
+    } else {
+      this.events.stop(command.turn_id);
+      owner.authorize();
+      this.hooks.changed();
     }
   }
   private async write<T>(scope: number, id: string, run: () => Promise<T>) {
@@ -293,6 +385,7 @@ export class DesktopChat {
         ? previous
         : value;
     this.local.putArtifact(profile, id, name, turn);
+    this.events.settled(profile, id, turn);
     const metaName = `${prefix(turn.thread_id)}meta`;
     const meta = this.local.getArtifact(
       profile,
@@ -309,9 +402,10 @@ export class DesktopChat {
     });
     return turn;
   }
-  private latest(profile: string, id: string, turn: ChatTurn) {
+  private latest(profile: string, id: string, turn: ChatTurn, select = true) {
+    let value = turn;
     this.local.atomic(() => {
-      const value = this.remember(profile, id, turn);
+      value = this.remember(profile, id, turn);
       const after = pageAfter(value.position),
         name = `${prefix(value.thread_id)}page:${after}`;
       const previous = this.local.getArtifact(profile, id, name, pageSchema);
@@ -329,7 +423,8 @@ export class DesktopChat {
         has_more: meta.last_position > after + 50,
         complete,
       });
-      this.local.putArtifact(profile, id, 'chat-selection', value.thread_id);
+      if (select)
+        this.local.putArtifact(profile, id, 'chat-selection', value.thread_id);
       const directory = this.local.getArtifact(
         profile,
         id,
@@ -358,6 +453,7 @@ export class DesktopChat {
         }
       }
     });
+    return value;
   }
   async read(command: Command<'getChat'>) {
     const owner = this.owner(command.scope, command.id);
@@ -834,6 +930,12 @@ export class DesktopChat {
                 'chat_resume_changed',
                 'Refresh and confirm the latest failed question before authorizing another attempt.',
               );
+            this.events.clear(
+              context.profile,
+              command.id,
+              command.thread_id,
+              command.turn_id,
+            );
             this.local.putArtifact(
               context.profile,
               command.id,
@@ -883,7 +985,13 @@ export class DesktopChat {
               }
               throw error;
             }
-          } else if (active(turn) || turn.state === 'failed')
+          } else if (active(turn) || turn.state === 'failed') {
+            this.events.clear(
+              context.profile,
+              command.id,
+              command.thread_id,
+              command.turn_id,
+            );
             turn = bound(
               await context.api.request(
                 `/v1/chat-turns/${turn.id}/cancel`,
@@ -894,6 +1002,7 @@ export class DesktopChat {
               command.thread_id,
               command.turn_id,
             );
+          }
           context.authorize();
           this.available(context.profile, command.id, command.thread_id);
           this.local.atomic(() => {

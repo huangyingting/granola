@@ -35,6 +35,8 @@ export function ChatPanel({ state, draft, beforeStart }: Props) {
   const [busy, setBusy] = useState(false);
   const working = useRef(false);
   const epoch = useRef(0);
+  const reading = useRef(0);
+  const refreshedVersion = useRef(0);
   const [unavailable, setUnavailable] = useState(false);
   const [error, setError] = useState('');
   const connected =
@@ -69,9 +71,15 @@ export function ChatPanel({ state, draft, beforeStart }: Props) {
   }
   async function read(
     refresh: boolean,
-    options: { thread?: string | null; offset?: number; after?: number } = {},
+    options: {
+      thread?: string | null;
+      offset?: number;
+      after?: number;
+      preserveSource?: boolean;
+    } = {},
   ) {
     const version = epoch.current,
+      request = ++reading.current,
       previous = current.current;
     const response = await window.notes.invoke({
       operation: 'getChat',
@@ -86,7 +94,7 @@ export function ChatPanel({ state, draft, beforeStart }: Props) {
           : {}),
       ...(options.after !== undefined ? { after: options.after } : {}),
     });
-    if (version !== epoch.current) return;
+    if (version !== epoch.current || request !== reading.current) return;
     if (!response.ok) throw new Error(response.error.message);
     if (
       !('chat_view' in response) ||
@@ -97,7 +105,11 @@ export function ChatPanel({ state, draft, beforeStart }: Props) {
         'The desktop returned another chat workspace or meeting.',
       );
     accept(response.chat_view.view);
-    setSource(null);
+    if (
+      !options.preserveSource ||
+      previous?.thread_id !== response.chat_view.view.thread_id
+    )
+      setSource(null);
   }
   async function action(run: () => Promise<void>) {
     if (working.current || unavailable) return;
@@ -151,8 +163,84 @@ export function ChatPanel({ state, draft, beforeStart }: Props) {
       setConsent(false);
     }
   }, [saved?.rejected, saved?.turn_id, saved?.consent_id]);
+  const activeTurn = view?.turns.findLast(pending);
+  const generation =
+    state.chat_generation?.turn_id === activeTurn?.id &&
+    state.chat_generation?.thread_id === view?.thread_id
+      ? state.chat_generation
+      : null;
+  async function watch(turn: ChatTurn, mode: 'start' | 'stop') {
+    const version = epoch.current;
+    const response = await window.notes.invoke({
+      operation: 'watchChat',
+      scope: state.scope,
+      id: draft.id,
+      thread_id: turn.thread_id,
+      turn_id: turn.id,
+      action: mode,
+    });
+    if (version !== epoch.current) return;
+    if (!response.ok) throw new Error(response.error.message);
+    if (!('state' in response) || response.state.scope !== state.scope)
+      throw new Error(
+        'The desktop returned another question-update workspace.',
+      );
+  }
+  useEffect(() => {
+    if (!open || !connected || !activeTurn || unavailable) return;
+    let alive = true;
+    const turn = activeTurn;
+    void watch(turn, 'start').catch((error) => {
+      if (alive) setError(message(error));
+    });
+    return () => {
+      alive = false;
+      void window.notes
+        .invoke({
+          operation: 'watchChat',
+          scope: state.scope,
+          id: draft.id,
+          thread_id: turn.thread_id,
+          turn_id: turn.id,
+          action: 'stop',
+        })
+        .then((response) => {
+          if (
+            !response.ok &&
+            ![
+              'workspace_changed',
+              'workspace_closed',
+              'workspace_transition',
+            ].includes(response.error.code)
+          )
+            console.error(JSON.stringify({ code: 'chat_updates_stop_failed' }));
+        })
+        .catch(() => {
+          console.error(JSON.stringify({ code: 'chat_updates_stop_failed' }));
+        });
+    };
+  }, [open, connected, unavailable, state.scope, draft.id, activeTurn?.id]);
+  useEffect(() => {
+    if (
+      open &&
+      activeTurn &&
+      !working.current &&
+      !unavailable &&
+      refreshedVersion.current !== state.version &&
+      state.chat_generation?.turn_id !== activeTurn.id
+    ) {
+      refreshedVersion.current = state.version;
+      void action(() =>
+        read(false, {
+          after: current.current?.after ?? 0,
+          preserveSource: true,
+        }),
+      );
+    }
+  }, [state.version, open, busy]);
   async function mutate(command: DesktopCommand) {
     const version = epoch.current;
+    reading.current++;
     const response = await window.notes.invoke(command);
     if (version !== epoch.current) return false;
     if (!response.ok) throw new Error(response.error.message);
@@ -162,6 +250,7 @@ export function ChatPanel({ state, draft, beforeStart }: Props) {
       response.chat_view.view.document_id !== draft.id
     )
       throw new Error('The desktop returned an unsupported chat response.');
+    reading.current++;
     accept(response.chat_view.view);
     setSource(null);
     setConsent(false);
@@ -295,8 +384,8 @@ export function ChatPanel({ state, draft, beforeStart }: Props) {
             <>
               {view?.cached && (
                 <p className="quiet-note">
-                  Saved on this device. Refresh to verify current access and
-                  answer status.
+                  History is saved on this device. Live previews are authorized
+                  separately. Refresh to verify other saved answers.
                 </p>
               )}
               {view && !view.history_complete && (
@@ -488,7 +577,9 @@ export function ChatPanel({ state, draft, beforeStart }: Props) {
                     <p className="chat-question">{turn.request.question}</p>
                     <div className="summary-heading">
                       <span className="summary-status" role="status">
-                        {turn.state}
+                        {pending(turn) && generation?.status === 'streaming'
+                          ? 'processing'
+                          : turn.state}
                       </span>
                       {(pending(turn) ||
                         (turn.state === 'failed' && turn.resume_available)) && (
@@ -547,11 +638,59 @@ export function ChatPanel({ state, draft, beforeStart }: Props) {
                       </div>
                     )}
                     {pending(turn) && (
-                      <p className="quiet-note">
-                        Processing continues on the server if this window
-                        closes. Refresh for the durable answer. Cancellation
-                        cannot undo dispatched usage.
-                      </p>
+                      <section
+                        className="summary-stream"
+                        aria-label="Live meeting answer"
+                      >
+                        <div className="summary-heading">
+                          <span className="summary-status" role="status">
+                            {generation?.status === 'paused'
+                              ? 'Answer updates paused'
+                              : generation?.status === 'reconnecting'
+                                ? 'Reconnecting answer updates'
+                                : generation?.status === 'streaming'
+                                  ? 'Receiving answer updates'
+                                  : 'Waiting for answer updates'}
+                          </span>
+                          <button
+                            disabled={blocked || !connected}
+                            onClick={() =>
+                              void action(() =>
+                                watch(
+                                  turn,
+                                  generation && generation.status !== 'paused'
+                                    ? 'stop'
+                                    : 'start',
+                                ),
+                              )
+                            }
+                          >
+                            {generation && generation.status !== 'paused'
+                              ? 'Pause answer updates'
+                              : 'Connect answer updates'}
+                          </button>
+                        </div>
+                        {generation?.preview && (
+                          <div
+                            className="summary-preview"
+                            aria-label="Unfinished answer preview"
+                          >
+                            <span className="eyebrow">UNFINISHED PREVIEW</span>
+                            <p>{generation.preview}</p>
+                            <small>
+                              Not a validated answer. Verify the completed
+                              citations before relying on it.
+                            </small>
+                          </div>
+                        )}
+                        {generation?.error && (
+                          <p className="account-alert">{generation.error}</p>
+                        )}
+                        <p className="quiet-note">
+                          Closing or pausing updates does not stop server work.
+                          Cancellation cannot undo dispatched usage.
+                        </p>
+                      </section>
                     )}
                     {turn.error && (
                       <p className="account-alert">{turn.error.message}</p>

@@ -320,6 +320,14 @@ async function start() {
             chat_view: { scope: command.scope, view },
           });
         }
+        if (command.operation === 'watchChat') {
+          const active = workspace();
+          await active.chat.watch(command);
+          return desktopResponseSchema.parse({
+            ok: true,
+            state: active.snapshot(),
+          });
+        }
         if (command.operation === 'getChatSource') {
           const source = await workspace().chat.source(command);
           return desktopResponseSchema.parse({

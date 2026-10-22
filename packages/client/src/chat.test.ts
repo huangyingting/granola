@@ -112,6 +112,17 @@ describe.skipIf(!databaseUrl)(
       thread_id: turn.thread_id,
       confirmed: true as const,
     });
+    const watch = (turn: ChatTurn) =>
+      controller.chat.watch({
+        operation: 'watchChat',
+        scope: controller.scope,
+        id: turn.document_id,
+        thread_id: turn.thread_id,
+        turn_id: turn.id,
+        action: 'start',
+      });
+    const eventArtifact = (turn: ChatTurn) =>
+      `chat-thread:${turn.thread_id}:events:${turn.id}`;
     async function connect(
       text = 'Mira owns the launch checklist. It is due Friday.',
     ) {
@@ -262,6 +273,291 @@ describe.skipIf(!databaseUrl)(
       await admin.close();
     });
 
+    it('replays encrypted unfinished answer cursors across a real Main-store restart, then commits only the validated final answer', async () => {
+      const document = await connect(),
+        turn = await controller.chat.start(command(document.id));
+      const complete = answer.getMockImplementation();
+      if (!complete)
+        throw new Error('Missing synthetic answer implementation.');
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const text = 'Unfinished cited answer, not yet validated.';
+      answer.mockImplementationOnce(async (...args) => {
+        if (!args[3]) throw new Error('Missing chat preview reporter.');
+        await args[3](text);
+        await gate;
+        return complete(...args);
+      });
+      await watch(turn);
+      const work = runOnce(db, providers());
+      try {
+        await vi.waitFor(
+          () =>
+            expect(controller.snapshot().chat_generation?.preview).toBe(text),
+          { timeout: 10_000 },
+        );
+        const cursor = controller.snapshot().chat_generation!.last_event_id;
+        expect(
+          (await controller.chat.read(readCommand(document.id, false))).turns[0]
+            ?.result,
+        ).toBeNull();
+        await expect(
+          controller.chat.source({
+            operation: 'getChatSource',
+            scope: controller.scope,
+            id: document.id,
+            thread_id: turn.thread_id,
+            turn_id: turn.id,
+            citation: { source: 'note', id: document.id, revision: 1 },
+          }),
+        ).rejects.toMatchObject({ code: 'citation_not_found' });
+        restart();
+        await watch(turn);
+        expect(controller.snapshot().chat_generation).toMatchObject({
+          last_event_id: cursor,
+          preview: text,
+        });
+        expect(
+          readFileSync(join(directory, 'notes.sqlite')).includes(
+            Buffer.from(text),
+          ),
+        ).toBe(false);
+        release();
+        await work;
+        await vi.waitFor(
+          async () => {
+            const view = await controller.chat.read(
+              readCommand(document.id, false),
+            );
+            expect(view.turns[0]?.result?.answer.answer.text).toContain('Mira');
+            expect(controller.snapshot().chat_generation).toBeNull();
+          },
+          { timeout: 10_000 },
+        );
+        expect(
+          local.getArtifact(
+            controller.profile,
+            document.id,
+            eventArtifact(turn),
+            z.unknown(),
+          ),
+        ).toBeNull();
+        expect(answer).toHaveBeenCalledTimes(1);
+        expect((await db.document(actor.user_id, document.id)).notes).toBe(
+          document.notes,
+        );
+      } finally {
+        release();
+        await work;
+      }
+    }, 30_000);
+    it('restores an expired cursor with the coherent current preview and clears both when cancellation fences a late provider reply', async () => {
+      const document = await connect(),
+        turn = await controller.chat.start(command(document.id));
+      const complete = answer.getMockImplementation();
+      if (!complete)
+        throw new Error('Missing synthetic answer implementation.');
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      answer.mockImplementationOnce(async (...args) => {
+        if (!args[3]) throw new Error('Missing chat preview reporter.');
+        await args[3]('Preview after replay retention expired.');
+        await gate;
+        return complete(...args);
+      });
+      const work = runOnce(db, providers());
+      try {
+        await vi.waitFor(async () =>
+          expect(
+            (await db.chat.eventState(actor.user_id, turn.id)).preview?.text,
+          ).toBe('Preview after replay retention expired.'),
+        );
+        const snapshot = await db.chat.eventState(actor.user_id, turn.id);
+        await db.pool.query('DELETE FROM chat_events WHERE turn_id=$1', [
+          turn.id,
+        ]);
+        await watch(turn);
+        await vi.waitFor(
+          () =>
+            expect(controller.snapshot().chat_generation).toMatchObject({
+              last_event_id: snapshot.turn.last_event_id,
+              preview: snapshot.preview!.text,
+            }),
+          { timeout: 10_000 },
+        );
+        await controller.chat.control(control(turn, 'cancel'));
+        expect(controller.snapshot().chat_generation).toBeNull();
+        expect(
+          local.getArtifact(
+            controller.profile,
+            document.id,
+            eventArtifact(turn),
+            z.unknown(),
+          ),
+        ).toBeNull();
+        release();
+        await work;
+        expect((await db.chat.get(actor.user_id, turn.id)).state).toBe(
+          'cancelled',
+        );
+        expect(
+          (await controller.chat.read(readCommand(document.id, false))).turns[0]
+            ?.result,
+        ).toBeNull();
+        expect(answer).toHaveBeenCalledTimes(1);
+      } finally {
+        release();
+        await work;
+      }
+    }, 30_000);
+    it('does not recache a held initial progress snapshot after acknowledged conversation deletion', async () => {
+      const document = await connect(),
+        turn = await controller.chat.start(command(document.id));
+      const original = globalThis.fetch;
+      let release!: () => void, reached!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const ready = new Promise<void>((resolve) => {
+        reached = resolve;
+      });
+      vi.stubGlobal('fetch', async (...args: Parameters<typeof fetch>) => {
+        const response = await original(...args);
+        if (String(args[0]).endsWith(`/chat-turns/${turn.id}/event-state`)) {
+          reached();
+          await gate;
+        }
+        return response;
+      });
+      const starting = watch(turn);
+      const denied = expect(starting).rejects.toMatchObject({
+        code: 'request_cancelled',
+      });
+      try {
+        await ready;
+        await controller.chat.remove(removeCommand(turn));
+        release();
+        await denied;
+        expect(controller.snapshot().chat_generation).toBeNull();
+        expect(
+          local.getArtifact(
+            controller.profile,
+            document.id,
+            eventArtifact(turn),
+            z.unknown(),
+          ),
+        ).toBeNull();
+        expect(
+          local.getArtifact(
+            controller.profile,
+            document.id,
+            `chat-thread:${turn.thread_id}:turn:${turn.id}`,
+            z.unknown(),
+          ),
+        ).toBeNull();
+      } finally {
+        release();
+        await denied;
+      }
+    });
+    it('purges unfinished encrypted progress after live membership revocation without redispatching the held provider call', async () => {
+      const document = await connect(),
+        turn = await controller.chat.start(command(document.id));
+      const profile = controller.profile,
+        complete = answer.getMockImplementation();
+      if (!complete)
+        throw new Error('Missing synthetic answer implementation.');
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      answer.mockImplementationOnce(async (...args) => {
+        if (!args[3]) throw new Error('Missing chat preview reporter.');
+        await args[3]('Private unfinished progress before revocation.');
+        await gate;
+        return complete(...args);
+      });
+      await watch(turn);
+      const work = runOnce(db, providers());
+      try {
+        await vi.waitFor(
+          () =>
+            expect(controller.snapshot().chat_generation?.preview).toBe(
+              'Private unfinished progress before revocation.',
+            ),
+          { timeout: 10_000 },
+        );
+        await db.pool.query(
+          'UPDATE memberships SET active=false WHERE user_id=$1',
+          [actor.user_id],
+        );
+        await vi.waitFor(
+          () => expect(controller.snapshot().documents).toEqual([]),
+          { timeout: 10_000 },
+        );
+        expect(controller.snapshot().chat_generation).toBeNull();
+        expect(
+          local.getArtifact(
+            profile,
+            document.id,
+            eventArtifact(turn),
+            z.unknown(),
+          ),
+        ).toBeNull();
+        expect(
+          local.getArtifact(
+            profile,
+            document.id,
+            `chat-thread:${turn.thread_id}:turn:${turn.id}`,
+            z.unknown(),
+          ),
+        ).toBeNull();
+        expect(answer).toHaveBeenCalledTimes(1);
+      } finally {
+        release();
+        await work;
+      }
+    }, 30_000);
+    it('does not tombstone a real conversation when an unknown turn is requested, or start updates for an uncached turn', async () => {
+      const document = await connect(),
+        turn = await finish(await controller.chat.start(command(document.id)));
+      const missing = randomUUID();
+      await expect(
+        controller.chat.watch({
+          operation: 'watchChat',
+          scope: controller.scope,
+          id: document.id,
+          thread_id: turn.thread_id,
+          turn_id: missing,
+          action: 'start',
+        }),
+      ).rejects.toMatchObject({ code: 'chat_turn_unavailable' });
+      await expect(
+        controller.chat.source({
+          ...sourceCommand(turn),
+          turn_id: missing,
+        }),
+      ).rejects.toMatchObject({ code: 'chat_not_found' });
+      expect(
+        (await controller.chat.read(readCommand(document.id, false))).turns[0]
+          ?.id,
+      ).toBe(turn.id);
+      expect(
+        local.getArtifact(
+          controller.profile,
+          document.id,
+          `chat-deleted:${turn.thread_id}`,
+          z.unknown(),
+        ),
+      ).toBeNull();
+      expect((await controller.chat.source(sourceCommand(turn))).turn_id).toBe(
+        turn.id,
+      );
+    });
     it('submits a distinct chat turn without summary jobs, preserves human notes, and freezes contextual Chinese follow-ups', async () => {
       const document = await connect();
       await controller.chat.read(readCommand(document.id));

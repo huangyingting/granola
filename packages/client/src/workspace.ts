@@ -183,6 +183,8 @@ export class WorkspaceController {
     if (this.critical || kind === 'scope' || kind === 'revoked')
       this.summaries?.events.stop();
     if (this.critical || kind === 'scope' || kind === 'revoked')
+      this.chat?.events.stop();
+    if (this.critical || kind === 'scope' || kind === 'revoked')
       for (const read of this.transcriptReads) read.abort();
     if (kind === 'scope' || kind === 'revoked') {
       this.query = '';
@@ -345,6 +347,7 @@ export class WorkspaceController {
         profile,
         selected?.id ?? null,
       ),
+      chat_generation: this.chat.events.snapshot(profile, selected?.id ?? null),
       transcript_revision: details?.transcript_revision ?? 0,
       transcript:
         selected && details?.transcript_revision
@@ -379,6 +382,7 @@ export class WorkspaceController {
   }
   private stopEngine() {
     this.summaries?.events.stop();
+    this.chat?.events.stop();
     for (const read of this.transcriptReads) read.abort();
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
@@ -1435,6 +1439,7 @@ export class WorkspaceController {
         this.query = command.query;
         this.offset = command.offset;
       } else if (command.operation === 'create') {
+        this.chat.events.stop();
         this.local.atomic(() => {
           const draft = this.local.create(profile, command.value);
           this.local.putValue(profile, 'selected-document', draft.id);
@@ -1442,6 +1447,7 @@ export class WorkspaceController {
         this.selection.delete(profile);
       } else if (command.operation === 'select') {
         this.summaries.events.stop();
+        this.chat.events.stop();
         this.local.get(profile, command.id);
         this.local.putValue(profile, 'selected-document', command.id);
         this.selection.delete(profile);
@@ -1454,9 +1460,11 @@ export class WorkspaceController {
         );
       } else if (command.operation === 'delete') {
         this.summaries.events.stop();
+        this.chat.events.stop();
         this.local.get(profile, command.id);
         this.local.remove(profile, command.id);
       } else if (command.operation === 'resolve') {
+        this.chat.events.stop();
         this.local.atomic(() => {
           const draft = this.local.resolve(profile, command.id, command.choice);
           if (draft)

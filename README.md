@@ -394,7 +394,9 @@ Accepted receipt replay uses the original body/key before rebuilding sources.
 `GET /v1/documents/{id}/chat-threads` pages conversations;
 `GET /v1/chat-threads/{id}/turns?after=0` pages history in question order.
 `GET /v1/chat-turns/{id}` returns the authoritative turn and result;
-`GET /v1/chat-turns/{id}/event-state` supplies a coherent turn/cursor snapshot.
+`GET /v1/chat-turns/{id}/event-state` supplies a coherent authorized turn, cursor
+and unfinished preview from one database read. Its `preview_attempt` is the current
+lease fence, not the smaller worker-attempt count.
 `GET /v1/chat-turns/{id}/events` supports `Last-Event-ID`, bounded replay batches,
 heartbeats and token-lifetime deadlines. Chat and legacy streams share a two-read
 subscription limit; their event envelopes remain separate. Unverified answer
@@ -445,9 +447,21 @@ is reconciled against current document access. Body-free local tombstones contin
 to fence older reads after deletion succeeds. Other threads, summaries and notes
 are preserved. Resolve an unknown question receipt before deleting its conversation.
 
-Use **Refresh answers** to read durable question status/results. Desktop chat does
-not yet consume the server's SSE previews, event cursors or replay; this workflow
-must not be mistaken for finished desktop streaming or production acceptance.
+Main automatically subscribes to the selected active question's distinct chat SSE
+stream. It encrypts the exact cursor and labelled **Unfinished preview** together,
+verifies a fresh authorized snapshot before displaying restored text, and recovers
+an expired replay window or explicitly reconnected paused read from the coherent
+snapshot rather than resending model work. Old failed-attempt previews cannot
+replace the current lease's text. Terminal
+replay drains every bounded connection, while validated completed answers remain
+separate from previews. Reconnects back off and eventually pause visibly; **Connect
+answer updates** restarts only the read subscription. Closing the panel, changing
+workspace or pausing updates does not cancel or resend server work. Explicit
+cancellation, deletion and revocation clear unfinished local progress.
+
+**Refresh answers** verifies durable history and older question status. These
+developer-preview capabilities are not physical Windows, semantic-quality,
+production deployment, signing or release acceptance.
 
 ### Live generation and replay
 
@@ -746,8 +760,8 @@ cancelled/completed jobs cannot be resumed. Recording tracks remain bounded to f
 hours each (the desktop capture preview stops at one hour), with at most two tracks.
 
 This first slice uses PostgreSQL polling/leases as the durable scheduler rather
-than introducing unused Redis/BullMQ infrastructure. Desktop chat event replay and
-the remaining production release gates are still implementation work.
+than introducing unused Redis/BullMQ infrastructure. Main-owned summary and chat event
+replay are implemented; the remaining production release gates are still open.
 Durable usage reservations and receipts are implemented as described above;
 they do not provide exactly-once billing or reconcile Azure invoices.
 

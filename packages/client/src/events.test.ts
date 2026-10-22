@@ -54,6 +54,124 @@ describe('Main-owned authenticated generation events', () => {
     ).toBe(513);
     expect(received).toHaveBeenCalledTimes(513);
   });
+
+  describe('distinct authenticated chat event envelopes', () => {
+    const value = (seq = 1) => ({
+      turn_id: id,
+      seq,
+      event_type: 'turn.progress',
+      schema_version: 1,
+      created_at: new Date().toISOString(),
+      payload: { version: 1, attempt: 1, text: '未完成的回答。' },
+    });
+    const frame = (
+      entry: ReturnType<typeof value>,
+      frameId = String(entry.seq),
+      type = entry.event_type,
+    ) => `id: ${frameId}\nevent: ${type}\ndata: ${JSON.stringify(entry)}\n\n`;
+    it('pins refreshed Main authorization, the chat route and exact cursor while decoding split UTF-8', async () => {
+      const entry = value(5);
+      const bytes = new TextEncoder().encode(frame(entry));
+      const authorization = `fixture-${randomUUID()}`;
+      const client = new ApiClient('https://fixture.example', async () => ({
+        Authorization: authorization,
+      }));
+      const fetcher = vi.fn<typeof fetch>(async (url, options) => {
+        expect(String(url)).toBe(
+          `https://fixture.example/v1/chat-turns/${id}/events`,
+        );
+        expect(options).toMatchObject({
+          redirect: 'manual',
+          cache: 'no-store',
+        });
+        expect(new Headers(options?.headers).get('authorization')).toBe(
+          authorization,
+        );
+        expect(new Headers(options?.headers).get('last-event-id')).toBe('4');
+        return new Response(
+          new ReadableStream({
+            start(controller) {
+              for (const byte of bytes) controller.enqueue(Uint8Array.of(byte));
+              controller.close();
+            },
+          }),
+          { headers: { 'content-type': 'text/event-stream' } },
+        );
+      });
+      vi.stubGlobal('fetch', fetcher);
+      const received = vi.fn(async (_entry: unknown) => {});
+      expect(
+        await client.chatEvents(id, 4, received, new AbortController().signal),
+      ).toBe(5);
+      expect(received).toHaveBeenCalledExactlyOnceWith(entry);
+    });
+    it.each([
+      'turn',
+      'gap',
+      'duplicate',
+      'id',
+      'type',
+      'version',
+      'legacy',
+    ] as const)(
+      'rejects a mismatched %s without coercing chat into legacy jobs',
+      async (failure) => {
+        const entry = value();
+        if (failure === 'turn') entry.turn_id = randomUUID();
+        if (failure === 'gap') entry.seq = 2;
+        if (failure === 'version') entry.schema_version = 2;
+        let wire = frame(
+          entry,
+          failure === 'id' ? '9' : String(entry.seq),
+          failure === 'type' ? 'turn.failed' : entry.event_type,
+        );
+        if (failure === 'legacy') wire = encode(event());
+        vi.stubGlobal(
+          'fetch',
+          async () =>
+            new Response(
+              (failure === 'duplicate' ? frame(value()) : '') + wire,
+              { headers: { 'content-type': 'text/event-stream' } },
+            ),
+        );
+        await expect(
+          api().chatEvents(id, 0, async () => {}, new AbortController().signal),
+        ).rejects.toMatchObject({ code: 'invalid_event_stream' });
+      },
+    );
+    it('keeps the last complete chat cursor after a torn frame and rotates a full terminal batch', async () => {
+      const received = vi.fn(async (_entry: unknown) => {});
+      vi.stubGlobal(
+        'fetch',
+        async () =>
+          new Response(
+            frame(value()) + 'id: 2\nevent: turn.progress\ndata: {"turn_id":',
+            { headers: { 'content-type': 'text/event-stream' } },
+          ),
+      );
+      await expect(
+        api().chatEvents(id, 0, received, new AbortController().signal),
+      ).rejects.toMatchObject({
+        code: 'event_stream_interrupted',
+        retryable: true,
+      });
+      expect(received).toHaveBeenCalledTimes(1);
+      vi.stubGlobal(
+        'fetch',
+        async () =>
+          new Response(
+            Array.from({ length: 513 }, (_, index) =>
+              frame(value(index + 2)),
+            ).join(''),
+            { headers: { 'content-type': 'text/event-stream' } },
+          ),
+      );
+      expect(
+        await api().chatEvents(id, 1, received, new AbortController().signal),
+      ).toBe(513);
+      expect(received).toHaveBeenCalledTimes(513);
+    });
+  });
   it('discards a torn frame and permits replay from the last completely accepted event', async () => {
     const received = vi.fn(async (_value: unknown) => {});
     vi.stubGlobal(

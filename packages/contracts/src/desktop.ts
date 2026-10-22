@@ -26,6 +26,7 @@ import {
   questionRequestSchema,
   chatViewSchema,
   chatSourceSchema,
+  chatWatchSchema,
 } from './questions.js';
 
 export const editableSchema = z.strictObject({
@@ -54,6 +55,14 @@ const scoped = { scope: z.number().int().positive() };
 const summaryScoped = { ...scoped, id: resourceId, job_id: resourceId };
 export const desktopCommandSchema = z.discriminatedUnion('operation', [
   z.strictObject({ operation: z.literal('bootstrap') }),
+  z.strictObject({
+    operation: z.literal('watchChat'),
+    ...scoped,
+    id: resourceId,
+    thread_id: resourceId,
+    turn_id: resourceId,
+    action: z.enum(['start', 'stop']),
+  }),
   z.strictObject({
     operation: z.literal('getChat'),
     ...scoped,
@@ -392,6 +401,7 @@ export const desktopStateSchema = z.strictObject({
   jobs: z.array(jobSchema).max(20),
   summary_submission: summarySubmissionSchema.nullable().default(null),
   summary_generation: summaryWatchSchema.nullable().default(null),
+  chat_generation: chatWatchSchema.nullable().default(null),
 });
 export const desktopChangeSchema = z.strictObject({
   version: z.number().int().positive(),

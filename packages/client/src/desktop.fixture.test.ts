@@ -2,7 +2,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LocalStore } from '@windows-ai-notes/local';
 import { richTextFromPlainText } from '@windows-ai-notes/contracts/content';
 import { desktopStateSchema } from '@windows-ai-notes/contracts/desktop';
@@ -126,7 +126,46 @@ describe('Windows desktop synthetic service contract', () => {
       ...request,
       new_attempt: false,
     });
+    await controller.chat.watch({
+      operation: 'watchChat',
+      scope: controller.scope,
+      id: document.id,
+      thread_id: turn.thread_id,
+      turn_id: turn.id,
+      action: 'start',
+    });
+    fixture.previewChat(turn.id, 'Unfinished synthetic chat answer.');
+    await vi.waitFor(() =>
+      expect(controller.snapshot().chat_generation?.preview).toBe(
+        'Unfinished synthetic chat answer.',
+      ),
+    );
+    expect(fixture.state.chat_event_cursors).toContain(0);
+    await controller.chat.watch({
+      operation: 'watchChat',
+      scope: controller.scope,
+      id: document.id,
+      thread_id: turn.thread_id,
+      turn_id: turn.id,
+      action: 'stop',
+    });
+    expect(controller.snapshot().chat_generation).toBeNull();
+    await controller.chat.watch({
+      operation: 'watchChat',
+      scope: controller.scope,
+      id: document.id,
+      thread_id: turn.thread_id,
+      turn_id: turn.id,
+      action: 'start',
+    });
+    expect(controller.snapshot().chat_generation?.preview).toBe(
+      'Unfinished synthetic chat answer.',
+    );
+    expect(fixture.state.chatTurns.get(turn.id)?.provider_requests).toBe(1);
     fixture.failChat(turn.id);
+    await vi.waitFor(() =>
+      expect(controller.snapshot().chat_generation).toBeNull(),
+    );
     await read();
     const failed = fixture.state.chatTurns.get(turn.id)!;
     const resume = {

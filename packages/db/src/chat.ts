@@ -7,6 +7,7 @@ import {
 } from '@windows-ai-notes/contracts/server';
 import {
   chatEventSchema,
+  chatEventStateSchema,
   chatPreviewSchema,
   chatResultSchema,
   chatSourceSchema,
@@ -199,6 +200,17 @@ export class ChatStore {
   }
   async get(user: string, id: string) {
     return view(await this.row(user, id));
+  }
+  async eventState(user: string, id: string) {
+    const row = await this.row(user, id);
+    return chatEventStateSchema.parse({
+      turn: view(row),
+      preview_attempt: row.lease_token,
+      preview:
+        row.state === 'running' && row.preview_text !== null
+          ? { version: 1, attempt: row.lease_token, text: row.preview_text }
+          : null,
+    });
   }
   async authorizeClaim(tx: Transaction, claim: ClaimedChat) {
     await this.authorize(tx, claim.ownerId, claim.documentId);
