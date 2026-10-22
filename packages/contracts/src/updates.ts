@@ -109,6 +109,17 @@ export const stagedUpdateRuntimeSchema = z.strictObject({
     .max(512 * 1024 ** 2),
   sha256: z.string().regex(/^[0-9a-f]{64}$/u),
 });
+export const updateParentIdentitySchema = z.strictObject({
+  pid: z
+    .number()
+    .int()
+    .positive()
+    .max(2 ** 31 - 1),
+  creation_file_time: z
+    .string()
+    .regex(/^[1-9][0-9]{0,18}$/u)
+    .refine((value) => value.length < 19 || value <= '9223372036854775807'),
+});
 export const cachedUpdateSchema = z.strictObject({
   version: z.literal(1),
   feed: updateFeedSchema,

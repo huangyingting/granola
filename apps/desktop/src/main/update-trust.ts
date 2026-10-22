@@ -9,6 +9,7 @@ import {
   stagedUpdateRuntimeSchema,
   updateExpectationSchema,
   updateInstallationSchema,
+  updateParentIdentitySchema,
   verifiedUpdateArtifactSchema,
   type UpdateExpectation,
 } from '@windows-ai-notes/contracts/updates';
@@ -81,6 +82,24 @@ const runtimeRejectionSchema = z.strictObject({
     ]),
   ),
   runtime: z.null(),
+});
+const parentResultSchema = z.strictObject({
+  version: z.literal(1),
+  matched: z.literal(true),
+  code: z.literal('update_parent_matched'),
+  parent: updateParentIdentitySchema,
+});
+const parentRejectionSchema = z.strictObject({
+  version: z.literal(1),
+  matched: z.literal(false),
+  code: z.enum([
+    'update_parent_arguments',
+    'update_parent_platform',
+    'update_parent_missing',
+    'update_parent_mismatch',
+    'update_parent_unavailable',
+  ]),
+  parent: z.null(),
 });
 function expectation(value: unknown): UpdateExpectation {
   const parsed = updateExpectationSchema.safeParse(value);
@@ -155,6 +174,51 @@ export async function verifyInstallerUpdateArtifact(
   signal?: AbortSignal,
 ) {
   return verifyArtifact(executable, file, expected, signal, true);
+}
+
+// Inspection only: the one-shot helper releases its process lease before returning.
+export async function verifyUpdateParent(
+  helper: string,
+  pid: number,
+  executable: string,
+  signal?: AbortSignal,
+) {
+  assertExecutablePaths(helper, executable);
+  if (
+    !updateParentIdentitySchema.shape.pid.safeParse(pid).success ||
+    win32.normalize(executable) !== executable
+  )
+    throw new LocalError(
+      'update_parent_arguments',
+      'A process ID and canonical local application executable are required.',
+    );
+  const { value, exitCode } = await invokeVerifier(
+    helper,
+    ['--verify-update-parent', String(pid), executable],
+    signal,
+  );
+  if (exitCode !== 0) {
+    const rejected = parentRejectionSchema.safeParse(value);
+    const code = rejected.success
+      ? rejected.data.code
+      : 'update_verifier_protocol';
+    throw new LocalError(
+      code,
+      `The native helper could not match its actual parent process (${code}). No installer was started.`,
+    );
+  }
+  const result = parentResultSchema.safeParse(value);
+  if (!result.success)
+    throw new LocalError(
+      'update_verifier_protocol',
+      'The native parent inspector returned invalid metadata.',
+    );
+  if (result.data.parent.pid !== pid)
+    throw new LocalError(
+      'update_parent_mismatch',
+      'The inspected parent does not match the selected application process.',
+    );
+  return result.data.parent;
 }
 
 export async function verifyUpdateInstallation(

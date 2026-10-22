@@ -370,8 +370,19 @@ Missing runtime components, reparse points, excessive source inventories and
 insufficient capacity reject staging. Installed lifecycle probes execute the
 copied helper at each version without using the SDK or treating that copy as a
 bundled installation inspector. **Staging does not start a worker or installer,
-and is not authorization to install.** Authenticated worker coordination,
-exact-parent exit, durable outcomes and recovery remain unfinished.
+and is not authorization to install.**
+
+The native parent-process primitive checks its OS-reported parent PID, current-user
+SID, Windows session and physical executable identity, then retains the process
+handle for cancellable exit waiting. Creation time crosses the Main-only protocol
+as an exact decimal string, never a JavaScript number. Cancellation or disposal
+does not terminate the parent. The separate `--verify-update-parent` mode is only
+a one-shot inspection: its lease is released before the helper exits. Neither
+process identity nor this inspection authorizes an update. A worker must retain
+its own lease and require a fresh, unpredictable prepare/commit challenge over
+Main-owned pipes; a saved PID or inspection result cannot substitute for that
+handshake. Authenticated worker coordination, application shutdown integration,
+durable outcomes and recovery remain unfinished.
 
 ### Verified signed Windows candidates
 

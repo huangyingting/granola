@@ -14,6 +14,7 @@ import {
   verifyInstallerUpdateArtifact,
   verifyUpdateArtifact,
   verifyUpdateInstallation,
+  verifyUpdateParent,
 } from './update-trust.js';
 import { UpdateDownloads } from './update-downloads.js';
 
@@ -75,6 +76,116 @@ const report = {
     product_version: policy.version,
   },
 };
+
+describe('native actual-parent process inspection', () => {
+  const helper = 'C:\\Private runtime\\AudioHost.exe';
+  const executable = 'C:\\Installed app\\Windows AI Notes Preview.exe';
+  const matched = {
+    version: 1,
+    matched: true,
+    code: 'update_parent_matched',
+    parent: { pid: 1234, creation_file_time: '134000000000000001' },
+  };
+  it('preserves the exact opaque creation time and uses the bounded shell-free helper', async () => {
+    execution.mockImplementation((_file, _args, _options, callback) =>
+      callback(null, JSON.stringify(matched), ''),
+    );
+    const signal = new AbortController().signal;
+    await expect(
+      verifyUpdateParent(helper, 1234, executable, signal),
+    ).resolves.toEqual(matched.parent);
+    expect(execution).toHaveBeenCalledExactlyOnceWith(
+      helper,
+      ['--verify-update-parent', '1234', executable],
+      expect.objectContaining({
+        signal,
+        timeout: 60_000,
+        maxBuffer: 16_384,
+        windowsHide: true,
+      }),
+      expect.any(Function),
+    );
+  });
+  it.each([0, -1, 1.5, 2 ** 31])(
+    'rejects invalid parent process IDs before invocation: %s',
+    async (pid) => {
+      await expect(
+        verifyUpdateParent(helper, pid, executable),
+      ).rejects.toMatchObject({ code: 'update_parent_arguments' });
+      expect(execution).not.toHaveBeenCalled();
+    },
+  );
+  it.each([
+    { creation_file_time: 134000000000000001 },
+    { creation_file_time: 'not-a-time' },
+    { creation_file_time: '0134000000000000001' },
+    { creation_file_time: '9223372036854775808' },
+    { executable },
+    { verified: true },
+  ])('rejects malformed or extra identity claims: %j', async (change) => {
+    execution.mockImplementation((_file, _args, _options, callback) =>
+      callback(
+        null,
+        JSON.stringify({
+          ...matched,
+          parent: { ...matched.parent, ...change },
+        }),
+        '',
+      ),
+    );
+    await expect(
+      verifyUpdateParent(helper, 1234, executable),
+    ).rejects.toMatchObject({ code: 'update_verifier_protocol' });
+  });
+  it('rejects a different process ID even in a structurally valid success', async () => {
+    execution.mockImplementation((_file, _args, _options, callback) =>
+      callback(
+        null,
+        JSON.stringify({
+          ...matched,
+          parent: { ...matched.parent, pid: 5678 },
+        }),
+        '',
+      ),
+    );
+    await expect(
+      verifyUpdateParent(helper, 1234, executable),
+    ).rejects.toMatchObject({ code: 'update_parent_mismatch' });
+  });
+  it('surfaces a native relationship rejection and does not accept success-shaped exit-2 output', async () => {
+    execution.mockImplementation((_file, _args, _options, callback) =>
+      callback(
+        Object.assign(new Error('Synthetic wrong parent.'), {
+          code: 2,
+          stdout: JSON.stringify({
+            version: 1,
+            matched: false,
+            code: 'update_parent_mismatch',
+            parent: null,
+          }),
+        }),
+        '',
+        '',
+      ),
+    );
+    await expect(
+      verifyUpdateParent(helper, 1234, executable),
+    ).rejects.toMatchObject({ code: 'update_parent_mismatch' });
+    execution.mockImplementation((_file, _args, _options, callback) =>
+      callback(
+        Object.assign(new Error('Synthetic failed inspection.'), {
+          code: 2,
+          stdout: JSON.stringify(matched),
+        }),
+        '',
+        '',
+      ),
+    );
+    await expect(
+      verifyUpdateParent(helper, 1234, executable),
+    ).rejects.toMatchObject({ code: 'update_verifier_protocol' });
+  });
+});
 
 describe('independent native update runtime staging', () => {
   const helper = 'C:\\Installed app\\resources\\audio-host\\AudioHost.exe';

@@ -39,9 +39,15 @@ internal static class UpdatePathLock
     }
 
     internal static bool SameDirectory(string first, string second)
+        => SameIdentity(first, second, directory: true);
+
+    internal static bool SameFile(string first, string second)
+        => SameIdentity(first, second, directory: false);
+
+    private static bool SameIdentity(string first, string second, bool directory)
     {
-        using var left = OpenDirectory(first);
-        using var right = OpenDirectory(second);
+        using var left = Open(first, directory);
+        using var right = Open(second, directory);
         if (!GetFileInformationByHandleEx(left, 18, out var leftId, (uint)Marshal.SizeOf<FileIdentity>()) ||
             !GetFileInformationByHandleEx(right, 18, out var rightId, (uint)Marshal.SizeOf<FileIdentity>()))
             throw new Win32Exception(Marshal.GetLastPInvokeError());

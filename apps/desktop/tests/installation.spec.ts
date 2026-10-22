@@ -27,6 +27,7 @@ import {
   stageUpdateRuntime,
   verifyInstallerUpdateArtifact,
   verifyUpdateInstallation,
+  verifyUpdateParent,
 } from '../src/main/update-trust.js';
 
 test.skip(
@@ -266,6 +267,47 @@ test('preserves encrypted data and new edits through actual installation, compat
           base.productName!,
         ),
       ).rejects.toMatchObject({ code: 'update_installation_helper' });
+      const parent = await lifecycle.application.evaluate(
+        async (
+          _electron,
+          input: { helper: string; environment: NodeJS.ProcessEnv },
+        ) => {
+          const { execFile } = process.getBuiltinModule('node:child_process');
+          const { dirname } = process.getBuiltinModule('node:path');
+          const stdout = await new Promise<string>((resolve, reject) => {
+            execFile(
+              input.helper,
+              ['--verify-update-parent', String(process.pid), process.execPath],
+              {
+                cwd: dirname(input.helper),
+                env: input.environment,
+                encoding: 'utf8',
+                timeout: 60_000,
+                maxBuffer: 16_384,
+                windowsHide: true,
+              },
+              (error, output) => (error ? reject(error) : resolve(output)),
+            );
+          });
+          return { pid: process.pid, report: JSON.parse(stdout) as unknown };
+        },
+        {
+          helper: runtime.executable,
+          environment: audioHostEnvironment(process.env),
+        },
+      );
+      expect(parent.report).toMatchObject({
+        version: 1,
+        matched: true,
+        code: 'update_parent_matched',
+        parent: {
+          pid: parent.pid,
+          creation_file_time: expect.stringMatching(/^[1-9][0-9]{0,18}$/u),
+        },
+      });
+      await expect(
+        verifyUpdateParent(runtime.executable, parent.pid, executable),
+      ).rejects.toMatchObject({ code: 'update_parent_mismatch' });
     } finally {
       await rm(runtime.directory, {
         recursive: true,

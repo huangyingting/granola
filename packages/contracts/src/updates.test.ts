@@ -9,6 +9,7 @@ import {
   stagedUpdateRuntimeSchema,
   updateFeedSchema,
   updateInstallationSchema,
+  updateParentIdentitySchema,
 } from './updates.js';
 
 const policy = {
@@ -126,6 +127,24 @@ describe('packaged update and feed contracts', () => {
             .success,
         ).toBe(false);
     });
+  });
+  it('keeps process creation identity exact without exposing executable or authorization claims', () => {
+    const parent = { pid: 1234, creation_file_time: '134000000000000001' };
+    expect(updateParentIdentitySchema.parse(parent)).toEqual(parent);
+    for (const change of [
+      { pid: 0 },
+      { pid: 2 ** 31 },
+      { creation_file_time: 134000000000000001 },
+      { creation_file_time: 'not-a-time' },
+      { creation_file_time: '0' },
+      { creation_file_time: '0134000000000000001' },
+      { creation_file_time: '9223372036854775808' },
+      { executable: 'C:\\Synthetic\\app.exe' },
+      { installation_enabled: true },
+    ])
+      expect(
+        updateParentIdentitySchema.safeParse({ ...parent, ...change }).success,
+      ).toBe(false);
   });
   it('bounds staged runtime metadata without granting installation or signature authority', () => {
     const runtime = {
