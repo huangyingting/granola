@@ -327,7 +327,19 @@ rejected candidates and unknown contents are preserved and reported separately.
 Cleanup unlinks only recognized regular cache files and removes empty directories;
 it does not recursively delete discovered trees or follow links. This is staged
 download recovery, **not interrupted-installation rollback**.
-**The service is not wired to the application UI or an enabled update channel;
+The **About & updates** page now exposes manual checking, verified downloading
+and cancellation through a Main-owned controller. Only the packaged policy can
+enable the service; an absent policy disables it, and an invalid policy surfaces
+an explicit error independently of note-storage initialization. Startup performs
+local cache recovery, not an automatic HTTP feed check. Action-only, sender-checked
+IPC and validated, revisioned state events expose no feed URLs, trust pins,
+installer paths or renderer-selected metadata. Cancellation stays single-flight
+until cleanup finishes, and normal close awaits update cleanup after the existing
+editor-flush and recording-stop handshake. Navigating to this page also flushes
+edits and remains available when local note storage cannot be unlocked.
+Rejected and incomplete cached downloads are reported without deleting them.
+**Installation remains unavailable: downloading does not execute an installer
+or restart the app. No production update channel has been activated;
 safe installation/restart and failed-upgrade recovery remain unfinished.**
 
 ### Verified signed Windows candidates

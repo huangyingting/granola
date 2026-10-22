@@ -1,4 +1,9 @@
 import { z } from 'zod';
+import type {
+  DesktopUpdateCommand,
+  DesktopUpdateResponse,
+  DesktopUpdateState,
+} from './updates.js';
 import { presentationSchema } from './presentation.js';
 import { richTextSchema, tagsSchema } from './content.js';
 import {
@@ -514,6 +519,8 @@ export type DesktopChange = z.infer<typeof desktopChangeSchema>;
 export type DesktopConnection = z.infer<typeof desktopConnectionSchema>;
 export interface DesktopBridge {
   invoke(command: DesktopCommand): Promise<DesktopResponse>;
+  invokeUpdate(command: DesktopUpdateCommand): Promise<DesktopUpdateResponse>;
+  onUpdateState(callback: (state: DesktopUpdateState) => void): () => void;
   onFlush(callback: (nonce: string) => void): () => void;
   onChanged(callback: (change: DesktopChange) => void): () => void;
 }

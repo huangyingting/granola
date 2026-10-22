@@ -95,6 +95,28 @@ test('opens the actual packaged sandboxed editor without workspace runtime depen
     await expect(
       page.getByRole('heading', { name: 'System audio', exact: true }),
     ).toBeVisible();
+    await page
+      .getByRole('button', { name: 'About & updates', exact: true })
+      .click();
+    await expect(
+      page.getByRole('heading', { name: 'About & updates.' }),
+    ).toBeVisible();
+    await expect(
+      page.getByText('Updates are not enabled for this application package.'),
+    ).toBeVisible();
+    expect(
+      await page.evaluate(() =>
+        window.notes.invokeUpdate({ operation: 'getState' }),
+      ),
+    ).toMatchObject({
+      ok: true,
+      state: { phase: 'disabled', installation_enabled: false },
+    });
+    await expect(
+      page.getByRole('button', {
+        name: /check for updates|download update|restart to update/i,
+      }),
+    ).toHaveCount(0);
     const closed = application.waitForEvent('close');
     await application.evaluate(({ BrowserWindow }) => {
       BrowserWindow.getAllWindows()[0]?.close();

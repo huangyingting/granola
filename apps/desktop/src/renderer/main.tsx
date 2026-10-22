@@ -18,6 +18,7 @@ import './style.css';
 import { Account } from './Account.js';
 import { NoteExtras } from './NoteExtras.js';
 import { AudioDevices } from './AudioDevices.js';
+import { Updates } from './Updates.js';
 import { RecordingBar, RecordingPanel } from './Recording.js';
 import { SummaryPanel } from './Summaries.js';
 import { ChatPanel } from './Chat.js';
@@ -40,9 +41,9 @@ function App() {
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [query, setQuery] = useState('');
-  const [page, setPage] = useState<'notes' | 'storage' | 'account' | 'audio'>(
-    'notes',
-  );
+  const [page, setPage] = useState<
+    'notes' | 'storage' | 'account' | 'audio' | 'updates'
+  >('notes');
   const [switching, setSwitching] = useState(false);
   const flush = useRef<() => Promise<boolean>>(async () => true);
   const latest = useRef<DesktopState | null>(null);
@@ -367,6 +368,17 @@ function App() {
         >
           Local data & privacy <span aria-hidden="true">&#x2197;</span>
         </button>
+        <button
+          className="storage-button"
+          disabled={blocked}
+          onClick={() => {
+            void flush.current().then((saved) => {
+              if (saved) setPage('updates');
+            });
+          }}
+        >
+          About &amp; updates <span aria-hidden="true">&#x2197;</span>
+        </button>
         <div className="preview-label">Developer preview</div>
       </aside>
       <main>
@@ -378,7 +390,9 @@ function App() {
                 ? 'AUDIO DEVICES'
                 : page === 'storage'
                   ? 'Your space, your control'
-                  : 'MEETING WORKSPACE'}
+                  : page === 'updates'
+                    ? 'ABOUT & UPDATES'
+                    : 'MEETING WORKSPACE'}
           </span>
           <span className={`privacy-chip ${state ? '' : 'locked'}`}>
             {state ? 'Encrypted on this device' : 'Storage unavailable'}
@@ -433,6 +447,8 @@ function App() {
           />
         ) : page === 'audio' && state ? (
           <AudioDevices scope={state.scope} />
+        ) : page === 'updates' ? (
+          <Updates bridge={window.notes} />
         ) : page === 'storage' ? (
           <section className="privacy-page">
             <span className="eyebrow">LOCAL FIRST</span>

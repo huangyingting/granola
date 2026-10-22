@@ -39,6 +39,16 @@ import {
   type DesktopState,
   type DesktopResponse,
 } from '@windows-ai-notes/contracts/desktop';
+import {
+  desktopUpdateCommandSchema,
+  desktopUpdateResponseSchema,
+  type DesktopUpdateResponse,
+} from '@windows-ai-notes/contracts/updates';
+import {
+  loadPackagedUpdatePolicy,
+  UpdateDownloads,
+} from './update-downloads.js';
+import { DesktopUpdateController } from './update-controller.js';
 
 let store: LocalStore | null = null;
 let controller: WorkspaceController | null = null;
@@ -50,8 +60,9 @@ let closingAudio = false;
 let dataDirectory = '';
 let recordings: RecordingController | null = null;
 let delivery: DesktopDelivery | null = null;
+let updates: DesktopUpdateController | null = null;
 
-function createAudioHost(observe: (event: AudioEvent) => void) {
+function audioHostExecutable() {
   if (process.platform !== 'win32')
     throw new LocalError(
       'platform_unsupported',
@@ -70,8 +81,11 @@ function createAudioHost(observe: (event: AudioEvent) => void) {
         ? 'The bundled audio helper is missing. Reinstall a complete application package; no external helper was used.'
         : 'Build the audio helper with pnpm audio:publish before checking audio devices.',
     );
+  return executable;
+}
+function createAudioHost(observe: (event: AudioEvent) => void) {
   return new AudioHostClient(
-    executable,
+    audioHostExecutable(),
     ['--data-dir', join(dataDirectory, 'recordings')],
     observe,
   );
@@ -271,19 +285,72 @@ async function start() {
     (_contents, _permission, callback) => callback(false),
   );
   current.webContents.session.setPermissionCheckHandler(() => false);
+  const authorizeSender = (event: Electron.IpcMainInvokeEvent) => {
+    if (
+      event.sender !== current.webContents ||
+      event.senderFrame !== current.webContents.mainFrame ||
+      event.senderFrame.url !== page
+    )
+      throw new LocalError(
+        'untrusted_sender',
+        'This window cannot access desktop operations.',
+      );
+  };
+  updates = new DesktopUpdateController(
+    app.getVersion(),
+    async () => {
+      const policy = await loadPackagedUpdatePolicy(
+        process.resourcesPath,
+        app.isPackaged,
+      );
+      return policy
+        ? new UpdateDownloads(
+            join(dataDirectory, 'updates'),
+            audioHostExecutable(),
+            policy,
+            app.getVersion(),
+          )
+        : null;
+    },
+    (state) => {
+      if (!current.isDestroyed())
+        current.webContents.send('notes:update-state', state);
+    },
+  );
+  updates.start();
+  ipcMain.handle(
+    'notes:update',
+    (event, input: unknown): DesktopUpdateResponse => {
+      try {
+        authorizeSender(event);
+        const command = desktopUpdateCommandSchema.safeParse(input);
+        if (!command.success)
+          throw new LocalError(
+            'invalid_desktop_request',
+            'The update request is invalid.',
+          );
+        if (!updates)
+          throw new LocalError(
+            'update_closed',
+            'The update service is unavailable.',
+          );
+        return desktopUpdateResponseSchema.parse({
+          ok: true,
+          state: updates.execute(command.data),
+        });
+      } catch (error) {
+        return desktopUpdateResponseSchema.parse({
+          ok: false,
+          error: safeError(error),
+        });
+      }
+    },
+  );
   ipcMain.handle(
     'notes:invoke',
     async (event, input: unknown): Promise<DesktopResponse> => {
       try {
-        if (
-          event.sender !== current.webContents ||
-          event.senderFrame !== current.webContents.mainFrame ||
-          event.senderFrame.url !== page
-        )
-          throw new LocalError(
-            'untrusted_sender',
-            'This window cannot access local notes.',
-          );
+        authorizeSender(event);
         const parsed = desktopCommandSchema.safeParse(input);
         if (!parsed.success)
           throw new LocalError(
@@ -315,6 +382,7 @@ async function start() {
             closingAudio = false;
             throw error;
           }
+          await updates?.close();
           allowClose = true;
           current.close();
           return { ok: true, closing: true };
@@ -758,6 +826,8 @@ async function start() {
     current.webContents.send('notes:flush', closeNonce);
   });
   current.on('closed', () => {
+    void updates?.close();
+    updates = null;
     controller?.dispose();
     delivery?.close();
     controller = null;

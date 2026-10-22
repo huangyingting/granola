@@ -18,6 +18,7 @@ import {
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 
 test.skip(
   process.platform !== 'win32',
@@ -42,6 +43,90 @@ async function close(application: ElectronApplication) {
   });
   await closed;
 }
+
+test('flushes before the updates page, disables unconfigured updates and rejects other windows', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'windows-notes-updates-'));
+  let application: ElectronApplication | null = null;
+  try {
+    application = await launch(directory);
+    const page = await application.firstWindow();
+    await page
+      .getByRole('button', { name: '+ New meeting', exact: true })
+      .click();
+    await page
+      .getByRole('textbox', { name: 'Meeting notes', exact: true })
+      .fill('Latest text before opening updates.');
+    await page
+      .getByRole('button', { name: 'About & updates', exact: true })
+      .click();
+    await expect(
+      page.getByRole('heading', { name: 'About & updates.' }),
+    ).toBeVisible();
+    await expect(
+      page.getByText('Updates are not enabled for this application package.'),
+    ).toBeVisible();
+    await expect(
+      page.getByRole('button', {
+        name: /check for updates|download update|restart to update/i,
+      }),
+    ).toHaveCount(0);
+    expect(
+      await page.evaluate(() =>
+        window.notes.invokeUpdate({ operation: 'getState' }),
+      ),
+    ).toMatchObject({
+      ok: true,
+      state: {
+        phase: 'disabled',
+        installation_enabled: false,
+        can_check: false,
+        can_download: false,
+      },
+    });
+    expect(
+      await page.evaluate(() =>
+        window.notes.invokeUpdate({ operation: 'check' }),
+      ),
+    ).toMatchObject({ ok: false, error: { code: 'update_disabled' } });
+    expect(
+      await application.evaluate(
+        async ({ BrowserWindow }, preload) => {
+          const other = new BrowserWindow({
+            show: false,
+            webPreferences: {
+              preload,
+              sandbox: true,
+              contextIsolation: true,
+              nodeIntegration: false,
+            },
+          });
+          try {
+            await other.loadURL('about:blank');
+            return await other.webContents.executeJavaScript(
+              'window.notes.invokeUpdate({operation:"getState"})',
+            );
+          } finally {
+            other.destroy();
+          }
+        },
+        fileURLToPath(new URL('../dist/preload.cjs', import.meta.url)),
+      ),
+    ).toMatchObject({ ok: false, error: { code: 'untrusted_sender' } });
+    expect(await readdir(directory)).not.toContain('updates');
+    await close(application);
+    application = null;
+    application = await launch(directory);
+    const restarted = await application.firstWindow();
+    await expect(
+      restarted.getByRole('textbox', { name: 'Meeting notes', exact: true }),
+    ).toHaveText('Latest text before opening updates.');
+    await close(application);
+    application = null;
+  } finally {
+    if (application) await application.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 test('persists the device audio limit and blocks capture without reclaiming unique interrupted files', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'windows-notes-storage-ui-'));
@@ -525,6 +610,15 @@ test('blocks closing and document switches while edits are invalid, then flushes
       .fill('Latest text must survive.');
     await expect(page.getByText('NOT SAVED', { exact: true })).toBeVisible();
     await page
+      .getByRole('button', { name: 'About & updates', exact: true })
+      .click();
+    await expect(
+      page.getByRole('textbox', { name: 'Meeting tags' }),
+    ).toHaveValue('Duplicate, duplicate');
+    await expect(
+      page.getByRole('heading', { name: 'About & updates.' }),
+    ).toHaveCount(0);
+    await page
       .getByRole('button', { name: '+ New meeting', exact: true })
       .click();
     await expect(
@@ -579,6 +673,17 @@ test('fails closed instead of replacing a missing or invalid operating-system-wr
     await expect(
       page.getByRole('button', { name: 'Create your first meeting' }),
     ).toBeDisabled();
+    await page
+      .getByRole('button', { name: 'About & updates', exact: true })
+      .click();
+    await expect(
+      page.getByText('Updates are not enabled for this application package.'),
+    ).toBeVisible();
+    expect(
+      await page.evaluate(() =>
+        window.notes.invokeUpdate({ operation: 'getState' }),
+      ),
+    ).toMatchObject({ ok: true, state: { phase: 'disabled' } });
     await close(application);
     application = null;
     expect(await readFile(join(directory, 'notes.sqlite'))).toEqual(original);

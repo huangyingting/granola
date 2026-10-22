@@ -5,6 +5,11 @@ import {
   desktopChangeSchema,
   type DesktopBridge,
 } from '@windows-ai-notes/contracts/desktop';
+import {
+  desktopUpdateCommandSchema,
+  desktopUpdateResponseSchema,
+  desktopUpdateStateSchema,
+} from '@windows-ai-notes/contracts/updates';
 
 const bridge: DesktopBridge = {
   async invoke(command) {
@@ -12,6 +17,20 @@ const bridge: DesktopBridge = {
     return desktopResponseSchema.parse(
       await ipcRenderer.invoke('notes:invoke', request),
     );
+  },
+  async invokeUpdate(command) {
+    return desktopUpdateResponseSchema.parse(
+      await ipcRenderer.invoke(
+        'notes:update',
+        desktopUpdateCommandSchema.parse(command),
+      ),
+    );
+  },
+  onUpdateState(callback) {
+    const listener = (_event: Electron.IpcRendererEvent, value: unknown) =>
+      callback(desktopUpdateStateSchema.parse(value));
+    ipcRenderer.on('notes:update-state', listener);
+    return () => ipcRenderer.removeListener('notes:update-state', listener);
   },
   onFlush(callback) {
     const listener = (_event: Electron.IpcRendererEvent, value: unknown) => {

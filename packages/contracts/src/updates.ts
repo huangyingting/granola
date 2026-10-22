@@ -91,6 +91,53 @@ export const cachedUpdateSchema = z.strictObject({
   expected: updateExpectationSchema,
   verified_at: z.iso.datetime(),
 });
+export const desktopUpdateCommandSchema = z.strictObject({
+  operation: z.enum(['getState', 'check', 'download', 'cancel']),
+});
+const updateError = z.strictObject({
+  code: z.string().regex(/^[a-z][a-z0-9_]{0,99}$/u),
+  message: z.string().min(1).max(600),
+});
+export const desktopUpdateStateSchema = z.strictObject({
+  version: z.literal(1),
+  revision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  installed_version: label,
+  phase: z.enum([
+    'initializing',
+    'disabled',
+    'recovering',
+    'idle',
+    'checking',
+    'current',
+    'available',
+    'downloading',
+    'ready',
+    'cancelling',
+    'cancelled',
+    'failed',
+  ]),
+  available_version: updateVersionSchema.nullable(),
+  download_bytes: bytes.nullable(),
+  can_check: z.boolean(),
+  can_download: z.boolean(),
+  can_cancel: z.boolean(),
+  installation_enabled: z.literal(false),
+  cache: z
+    .strictObject({
+      removed: z.number().int().min(0).max(128),
+      rejected: z.number().int().min(0).max(128),
+      incomplete: z.number().int().min(0).max(128),
+    })
+    .nullable(),
+  error: updateError.nullable(),
+});
+export const desktopUpdateResponseSchema = z.union([
+  z.strictObject({ ok: z.literal(true), state: desktopUpdateStateSchema }),
+  z.strictObject({ ok: z.literal(false), error: updateError }),
+]);
+export type DesktopUpdateCommand = z.infer<typeof desktopUpdateCommandSchema>;
+export type DesktopUpdateState = z.infer<typeof desktopUpdateStateSchema>;
+export type DesktopUpdateResponse = z.infer<typeof desktopUpdateResponseSchema>;
 export type PackagedUpdatePolicy = z.infer<typeof packagedUpdatePolicySchema>;
 export type UpdateFeed = z.infer<typeof updateFeedSchema>;
 export type UpdateExpectation = z.infer<typeof updateExpectationSchema>;
