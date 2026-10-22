@@ -958,13 +958,35 @@ test('persists scoped local audio deadlines with real DPAPI, cleans verified aud
     await retention().selectOption('0');
     await expect.poll(() => existsSync(verifiedPath)).toBe(false);
     expect(existsSync(unuploadedPath)).toBe(true);
-    await expect(page.getByText(/^Saved audio \(1\)/)).toBeVisible();
+    await page.getByText(/^Saved audio \(/).click();
+    const cloud = page.locator('.recording-history article').filter({
+      has: page.getByText('Cloud recording receipt', { exact: true }),
+    });
+    await expect(cloud).toBeVisible();
+    await expect(
+      cloud.getByRole('button', { name: 'Inspect saved audio', exact: true }),
+    ).toBeDisabled();
+    await expect(
+      cloud.getByRole('button', { name: 'Delete audio only', exact: true }),
+    ).toBeEnabled();
+    await cloud
+      .getByRole('button', { name: 'Transcribe saved audio', exact: true })
+      .click();
+    await cloud
+      .getByRole('checkbox', {
+        name: /I accept transcription of an incomplete recording/,
+      })
+      .check();
+    await cloud
+      .getByRole('button', { name: 'Confirm Azure transcription', exact: true })
+      .click();
+    await expect.poll(() => fixture.state.jobs.size).toBe(1);
     await expect(
       page.getByRole('textbox', { name: 'Meeting notes', exact: true }),
     ).toHaveText(remote.notes);
     expect(fixture.state.documents.get(remote.id)?.transcript_revision).toBe(1);
     expect(fixture.state.recording_deletes).toBe(0);
-    expect(fixture.state.jobs.size).toBe(0);
+    expect(fixture.state.jobs.size).toBe(1);
     await close(application);
     application = null;
   } finally {

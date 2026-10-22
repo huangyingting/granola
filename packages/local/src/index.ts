@@ -224,7 +224,8 @@ export class LocalStore {
             version !== 4 &&
             version !== 5 &&
             version !== 6 &&
-            version !== 7
+            version !== 7 &&
+            version !== 8
           )
             throw new LocalError(
               'local_version_unsupported',
@@ -239,10 +240,13 @@ export class LocalStore {
               ...(version === 4 ||
               version === 5 ||
               version === 6 ||
-              version === 7
+              version === 7 ||
+              version === 8
                 ? ['recording_uploads']
                 : []),
-              ...(version === 7 ? ['recording_retention'] : []),
+              ...(version === 7 || version === 8
+                ? ['recording_retention']
+                : []),
             ].every((name) => tables.some((row) => row.name === name))
           )
             throw new LocalError(
@@ -309,6 +313,7 @@ export class LocalStore {
         CREATE TABLE IF NOT EXISTS recording_uploads (
           profile TEXT NOT NULL,recording_id TEXT NOT NULL,document_id TEXT NOT NULL,
           state TEXT NOT NULL,retry_at INTEGER NOT NULL,payload BLOB NOT NULL,status_payload BLOB NOT NULL,
+          local_retired INTEGER NOT NULL DEFAULT 0,
           PRIMARY KEY(profile,recording_id),
           FOREIGN KEY(profile,document_id) REFERENCES drafts(profile,id) ON DELETE CASCADE
         );
@@ -321,6 +326,24 @@ export class LocalStore {
         );
         CREATE INDEX IF NOT EXISTS recording_retention_due ON recording_retention(delete_after);
       `);
+        if (
+          !this.database
+            .prepare('PRAGMA table_info(recording_uploads)')
+            .all()
+            .some((column) => column.name === 'local_retired')
+        ) {
+          if (version === 8)
+            throw new LocalError(
+              'local_data_corrupt',
+              'The local upload structure is incomplete. Existing files were preserved.',
+            );
+          this.database.exec(
+            'ALTER TABLE recording_uploads ADD COLUMN local_retired INTEGER NOT NULL DEFAULT 0',
+          );
+        }
+        this.database
+          .exec(`CREATE INDEX IF NOT EXISTS recording_uploads_retention
+          ON recording_uploads(profile,local_retired,recording_id)`);
         if (version === 1) {
           const values = this.database
             .prepare('SELECT profile,id,payload FROM vault')
@@ -347,7 +370,7 @@ export class LocalStore {
             .get()
         )
           this.putValue('root', 'key-check', 'windows-ai-notes-local-v1');
-        this.database.exec('PRAGMA user_version=7');
+        this.database.exec('PRAGMA user_version=8');
       });
     } catch (error) {
       try {
@@ -897,6 +920,7 @@ export class LocalStore {
         status.document_id,
         status.id,
       );
+      if (recording.audio_retired_at) return null;
       const previous = this.retentionProof(
         profile,
         status.document_id,
@@ -955,6 +979,7 @@ export class LocalStore {
       .prepare(
         `SELECT document_id,recording_id FROM recording_uploads
         WHERE profile=? AND state IN ('complete','delete_pending','deleting')
+          AND local_retired=0
           AND (? IS NULL OR recording_id>?)
         ORDER BY recording_id LIMIT 4`,
       )
@@ -966,7 +991,11 @@ export class LocalStore {
           resourceId.parse(row.document_id),
           resourceId.parse(row.recording_id),
         );
-        return verifiedRecording(intent) ? [intent] : [];
+        return verifiedRecording(intent) &&
+          !this.recordingValue(profile, intent.document_id, intent.recording_id)
+            .audio_retired_at
+          ? [intent]
+          : [];
       }),
       after: rows.length ? resourceId.parse(rows.at(-1)!.recording_id) : null,
     };
@@ -996,7 +1025,22 @@ export class LocalStore {
             'audio_retention_not_eligible',
             'The recording no longer matches its verified deletion proof. Audio was preserved.',
           );
-        this.removeRecording(profile, document, id);
+        this.queueRecordingIds(profile, [id]);
+        this.writeRecording(profile, {
+          ...recording,
+          audio_retired_at: new Date(now).toISOString(),
+          inspection: null,
+        });
+        this.database
+          .prepare(
+            'UPDATE recording_uploads SET local_retired=1 WHERE profile=? AND recording_id=?',
+          )
+          .run(profile, id);
+        this.database
+          .prepare(
+            'DELETE FROM recording_retention WHERE profile=? AND recording_id=?',
+          )
+          .run(profile, id);
       }
       return rows.length;
     });
@@ -1006,10 +1050,10 @@ export class LocalStore {
     document: string,
     id: string,
   ): RecordingUploadIntent | null {
-    this.getRecording(profile, document, id);
+    const recording = this.getRecording(profile, document, id);
     const row = this.database
       .prepare(
-        'SELECT document_id,state,retry_at,payload FROM recording_uploads WHERE profile=? AND recording_id=?',
+        'SELECT document_id,state,retry_at,payload,local_retired FROM recording_uploads WHERE profile=? AND recording_id=?',
       )
       .get(profile, id);
     if (!row) return null;
@@ -1023,7 +1067,8 @@ export class LocalStore {
       intent.document_id !== document ||
       intent.recording_id !== id ||
       row.state !== intent.state ||
-      row.retry_at !== intent.retry_at
+      row.retry_at !== intent.retry_at ||
+      row.local_retired !== Number(!!recording.audio_retired_at)
     )
       throw new LocalError(
         'local_data_corrupt',
@@ -1042,6 +1087,11 @@ export class LocalStore {
         intent.document_id,
         intent.recording_id,
       );
+      if (recording.audio_retired_at && !verifiedRecording(intent))
+        throw new LocalError(
+          'local_audio_retired',
+          'Expired local audio cannot be reuploaded. Its immutable cloud receipt was preserved.',
+        );
       if (
         profile === 'offline' ||
         ['starting', 'recording', 'paused'].includes(recording.state)
@@ -1066,8 +1116,8 @@ export class LocalStore {
       const { plan: _plan, accept_incomplete: _accept, ...status } = intent;
       this.database
         .prepare(
-          `INSERT INTO recording_uploads VALUES (?,?,?,?,?,?,?)
-        ON CONFLICT(profile,recording_id) DO UPDATE SET state=excluded.state,retry_at=excluded.retry_at,payload=excluded.payload,status_payload=excluded.status_payload`,
+          `INSERT INTO recording_uploads VALUES (?,?,?,?,?,?,?,?)
+        ON CONFLICT(profile,recording_id) DO UPDATE SET state=excluded.state,retry_at=excluded.retry_at,payload=excluded.payload,status_payload=excluded.status_payload,local_retired=excluded.local_retired`,
         )
         .run(
           profile,
@@ -1093,6 +1143,7 @@ export class LocalStore {
               intent.document_id,
             ),
           ),
+          Number(!!recording.audio_retired_at),
         );
       return intent;
     });
@@ -1102,10 +1153,10 @@ export class LocalStore {
     document: string,
     id: string,
   ): RecordingUploadStatus | null {
-    this.getRecording(profile, document, id);
+    const recording = this.getRecording(profile, document, id);
     const row = this.database
       .prepare(
-        'SELECT document_id,state,retry_at,status_payload FROM recording_uploads WHERE profile=? AND recording_id=?',
+        'SELECT document_id,state,retry_at,status_payload,local_retired FROM recording_uploads WHERE profile=? AND recording_id=?',
       )
       .get(profile, id);
     if (!row) return null;
@@ -1119,7 +1170,8 @@ export class LocalStore {
       status.document_id !== document ||
       status.recording_id !== id ||
       row.state !== status.state ||
-      row.retry_at !== status.retry_at
+      row.retry_at !== status.retry_at ||
+      row.local_retired !== Number(!!recording.audio_retired_at)
     )
       throw new LocalError(
         'local_data_corrupt',

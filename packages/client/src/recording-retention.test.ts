@@ -241,10 +241,45 @@ describe('Main-owned local audio retention', () => {
       await rejected;
       expect(removal).toHaveBeenCalledWith(c.recording.id);
       expect(local.pendingRecordingDeletions()).toEqual([]);
-      expect(local.recordings(profile, c.document.id).recordings).toEqual([]);
+      expect(local.recordings(profile, c.document.id).recordings).toMatchObject(
+        [
+          {
+            id: c.recording.id,
+            audio_retired_at: expect.any(String),
+            inspection: null,
+          },
+        ],
+      );
+      expect(
+        local.recordingUpload(profile, c.document.id, c.recording.id),
+      ).toEqual(c.intent);
+      await expect(
+        controller.inspect(profile, c.document.id, c.recording.id, () => {}),
+      ).rejects.toMatchObject({ code: 'local_audio_retired' });
     } finally {
       await client.close();
     }
+  });
+  it('keeps cloud deletion control and immutable paid-request input after native expiry without respawning or reuploading', async () => {
+    const c = saved();
+    local.rememberRecordingRetention(profile, c.api.base, c.status);
+    local.setRecordingRetentionDays(profile, 0);
+    await c.controller.reconcile(profile);
+    expect(
+      local.recordingUpload(profile, c.document.id, c.recording.id),
+    ).toEqual(c.intent);
+    await c.controller.removeSavedAudio(profile, c.document.id, c.recording.id);
+    expect(
+      local.recordingUpload(profile, c.document.id, c.recording.id),
+    ).toMatchObject({
+      state: 'delete_pending',
+      plan: c.intent.plan,
+    });
+    expect(c.request).not.toHaveBeenCalled();
+    expect(create).not.toHaveBeenCalled();
+    expect(
+      local.recordingRetentionCandidates(profile, null).recordings,
+    ).toEqual([]);
   });
   it('does not let one unavailable recording starve confirmation of another eligible recording', async () => {
     const a = saved(),

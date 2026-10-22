@@ -337,9 +337,12 @@ describe('encrypted local drafts and durable outbox', () => {
     )!;
     expect(store.expireRecordingRetention(proof.delete_after)).toBe(1);
     expect(store.pendingRecordingDeletions()).toEqual([c.recording.id]);
-    expect(() =>
-      store.getRecording(profile, c.draft.id, c.recording.id),
-    ).toThrow('not available');
+    expect(
+      store.getRecording(profile, c.draft.id, c.recording.id).audio_retired_at,
+    ).toBe(new Date(proof.delete_after).toISOString());
+    expect(
+      store.recordingUpload(profile, c.draft.id, c.recording.id)?.state,
+    ).toBe('complete');
     expect(store.get(profile, c.draft.id).title).toBe(c.draft.title);
     expect(
       store.getArtifact(profile, c.draft.id, 'transcript:1', z.string()),
@@ -360,7 +363,7 @@ describe('encrypted local drafts and durable outbox', () => {
       expect(
         inspect.prepare('SELECT count(*) count FROM recording_uploads').get()
           ?.count,
-      ).toBe(0);
+      ).toBe(1);
     } finally {
       inspect.close();
     }
@@ -383,6 +386,22 @@ describe('encrypted local drafts and durable outbox', () => {
     reopened.acknowledgeRecordingDeletion(c.recording.id);
     expect(reopened.pendingRecordingDeletions()).toEqual([]);
     expect(reopened.recordingRetentionDays(profile)).toBe(0);
+    expect(
+      reopened.recordingRetentionCandidates(profile, null).recordings,
+    ).toEqual([]);
+    expect(
+      reopened.rememberRecordingRetention(profile, c.service, c.status),
+    ).toBeNull();
+    expect(reopened.expireRecordingRetention(proof.delete_after + 1)).toBe(0);
+    expect(() =>
+      reopened.saveRecordingUpload(profile, {
+        ...intent,
+        state: 'queued',
+      }),
+    ).toThrow('cannot be reuploaded');
+    expect(
+      reopened.recordingUpload(profile, c.draft.id, c.recording.id)?.state,
+    ).toBe('delete_pending');
   });
   it.each(['service', 'canonical', 'counters'])(
     'preserves the deadline and raw copy when %s proof changes',
@@ -540,6 +559,76 @@ describe('encrypted local drafts and durable outbox', () => {
     inspect.exec('DROP TABLE recording_retention');
     inspect.close();
     expect(() => open()).toThrow('structure is incomplete');
+  });
+  it('upgrades v7 canonical deadlines without resetting grace, source receipt or encrypted proof', () => {
+    const store = open();
+    const c = retainedUpload(store);
+    const proof = store.rememberRecordingRetention(
+      profile,
+      c.service,
+      c.status,
+    );
+    const intent = store.recordingUpload(profile, c.draft.id, c.recording.id);
+    close(store);
+    const previous = new DatabaseSync(path);
+    const ciphertext = previous
+      .prepare('SELECT payload FROM recording_retention WHERE recording_id=?')
+      .get(c.recording.id)?.payload;
+    previous.exec(
+      'DROP INDEX recording_uploads_retention; ALTER TABLE recording_uploads DROP COLUMN local_retired; PRAGMA user_version=7',
+    );
+    previous.close();
+    const upgraded = open();
+    expect(
+      upgraded.recordingRetention(profile, c.draft.id, c.recording.id),
+    ).toEqual(proof);
+    expect(
+      upgraded.recordingUpload(profile, c.draft.id, c.recording.id),
+    ).toEqual(intent);
+    const inspect = new DatabaseSync(path, { readOnly: true });
+    try {
+      expect(inspect.prepare('PRAGMA user_version').get()?.user_version).toBe(
+        8,
+      );
+      expect(
+        inspect
+          .prepare(
+            'SELECT payload FROM recording_retention WHERE recording_id=?',
+          )
+          .get(c.recording.id)?.payload,
+      ).toEqual(ciphertext);
+    } finally {
+      inspect.close();
+    }
+  });
+  it('checks the retirement index against encrypted source ownership before exposing a cloud receipt', () => {
+    const store = open();
+    const c = retainedUpload(store);
+    store.rememberRecordingRetention(profile, c.service, c.status);
+    store.setRecordingRetentionDays(profile, 0);
+    store.expireRecordingRetention(Date.now());
+    const inspect = new DatabaseSync(path);
+    try {
+      inspect
+        .prepare(
+          'UPDATE recording_uploads SET local_retired=0 WHERE recording_id=?',
+        )
+        .run(c.recording.id);
+    } finally {
+      inspect.close();
+    }
+    expect(() =>
+      store.recordingUpload(profile, c.draft.id, c.recording.id),
+    ).toThrow('ownership or queue metadata');
+    expect(() =>
+      store.recordingUploadStatus(profile, c.draft.id, c.recording.id),
+    ).toThrow('ownership or queue metadata');
+    expect(() => store.recordingRetentionCandidates(profile, null)).toThrow(
+      'ownership or queue metadata',
+    );
+    expect(
+      store.getRecording(profile, c.draft.id, c.recording.id).audio_retired_at,
+    ).toBeTruthy();
   });
   it('persists encrypted scoped upload plans and separate lightweight status across restart without exposing source metadata', () => {
     const store = open();
@@ -739,7 +828,7 @@ describe('encrypted local drafts and durable outbox', () => {
             .get(`recording:${recording.id}`)?.payload,
         ).toEqual(bytes);
         expect(after.prepare('PRAGMA user_version').get()?.user_version).toBe(
-          7,
+          8,
         );
       } finally {
         after.close();
@@ -755,7 +844,7 @@ describe('encrypted local drafts and durable outbox', () => {
     inspect.close();
     expect(() => open()).toThrow('structure is incomplete');
   });
-  it.each([4, 5, 6])(
+  it.each([4, 5, 6, 7])(
     'upgrades v%s semantics without rewriting encrypted legacy transcript or upload evidence',
     (version) => {
       const store = open();
@@ -778,9 +867,8 @@ describe('encrypted local drafts and durable outbox', () => {
       store.putArtifact(profile, draft.id, 'transcript:1', transcript);
       close(store);
       const old = new DatabaseSync(path);
-      old.exec(
-        `DROP TABLE recording_retention; PRAGMA user_version=${version}`,
-      );
+      if (version < 7) old.exec('DROP TABLE recording_retention');
+      old.exec(`PRAGMA user_version=${version}`);
       const payloads = old
         .prepare('SELECT profile,id,payload FROM vault ORDER BY profile,id')
         .all();
@@ -795,7 +883,7 @@ describe('encrypted local drafts and durable outbox', () => {
       const inspect = new DatabaseSync(path, { readOnly: true });
       try {
         expect(inspect.prepare('PRAGMA user_version').get()?.user_version).toBe(
-          7,
+          8,
         );
         expect(
           inspect
@@ -878,7 +966,7 @@ describe('encrypted local drafts and durable outbox', () => {
     const inspect = new DatabaseSync(path, { readOnly: true });
     try {
       expect(inspect.prepare('PRAGMA user_version').get()?.user_version).toBe(
-        7,
+        8,
       );
     } finally {
       inspect.close();

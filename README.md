@@ -669,14 +669,23 @@ the local post-canonical clock.
 
 Canonical proof, service/source binding and deadlines are encrypted locally;
 the due-time index is authenticated against that proof before removal. Cleanup
+indices contain body-free plaintext queue metadata, not transcript or audio
+content; changing a due-time hint cannot authorize an earlier deletion. Cleanup
 runs at startup and every 30 seconds while the app is open, including offline
 for already confirmed recordings. It closes matching native review handles,
 uses the durable local deletion journal and reports failed filesystem cleanup
 for retry. It makes no remote DELETE request and preserves notes and all
-published text. New confirmation reads require the original authorized scope,
+published text. It also preserves the encrypted immutable cloud receipt, so
+cloud transcription, recovery of paid requests and explicit remote-audio deletion
+remain available after local files expire. Native inspection/recovery and
+reupload of the retired local source are denied rather than recreating it.
+New confirmation reads require the original authorized scope,
 share Main's bounded read budget and cannot recache after deletion or scope
 changes. Unavailable or older services leave unconfirmed audio intact and
 report confirmation failure rather than guessing eligibility.
+Local format 8 upgrades older encrypted recordings and version-7 deadlines
+without resetting their grace or receipts. Older applications reject the newer
+format instead of treating retired sources as locally readable audio.
 
 Disk-budget enforcement, independent backup deletion-ledger replay and
 production storage drills remain release work. Neither server expiry nor local

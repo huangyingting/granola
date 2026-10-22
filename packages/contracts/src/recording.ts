@@ -38,6 +38,7 @@ export const localRecordingSchema = z
       .max(2),
     error: recordingProblemSchema.nullable(),
     inspection: recoverySchema.nullable(),
+    audio_retired_at: z.iso.datetime().optional(),
   })
   .refine(
     ({ tracks }) =>

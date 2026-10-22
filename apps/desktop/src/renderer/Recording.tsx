@@ -485,7 +485,7 @@ const uploadLabels: Record<RecordingUploadStatus['state'], string> = {
   waiting: 'Waiting to retry',
   paused: 'Upload paused',
   attention: 'Upload needs attention',
-  complete: 'Verified remote copy',
+  complete: 'Upload verified',
   delete_pending: 'Audio deletion queued',
   deleting: 'Deleting remote audio',
 };
@@ -544,9 +544,9 @@ function UploadControls({
           )}
           {deleting && (
             <span>
-              Local audio is kept until the service confirms cleanup or its
-              existing local retention deadline is reached. Reconnect to the
-              original workspace if offline.
+              {recording.audio_retired_at
+                ? 'Cloud audio deletion is pending. Local retention cleanup is independent; reconnect to the original workspace to confirm cloud removal.'
+                : 'Local audio is kept until the service confirms cleanup or its existing local retention deadline is reached. Reconnect to the original workspace if offline.'}
             </span>
           )}
           {status.error && (
@@ -982,7 +982,11 @@ export function RecordingPanel({
             return (
               <article key={recording.id}>
                 <div>
-                  <strong>{labels[recording.state]}</strong>
+                  <strong>
+                    {recording.audio_retired_at
+                      ? 'Cloud recording receipt'
+                      : labels[recording.state]}
+                  </strong>
                   <span>{new Date(recording.created_at).toLocaleString()}</span>
                 </div>
                 <p>
@@ -999,9 +1003,11 @@ export function RecordingPanel({
                   <p className="account-alert">{recording.error.message}</p>
                 )}
                 <p className="quiet-note" role="status">
-                  {retention
-                    ? `Local audio scheduled for removal: ${new Date(retention.delete_after).toLocaleString()}. Notes and published transcripts stay.`
-                    : 'No automatic deletion deadline: waiting for a verified upload and canonical transcript confirmation.'}
+                  {recording.audio_retired_at
+                    ? `Local retention reached ${new Date(recording.audio_retired_at).toLocaleString()}. Cloud availability is checked when you request transcription or deletion.`
+                    : retention
+                      ? `Local audio scheduled for removal: ${new Date(retention.delete_after).toLocaleString()}. Notes and published transcripts stay.`
+                      : 'No automatic deletion deadline: waiting for a verified upload and canonical transcript confirmation.'}
                 </p>
                 {recording.inspection && (
                   <p>
@@ -1016,7 +1022,12 @@ export function RecordingPanel({
                 <div className="inline-actions">
                   <button
                     className="secondary"
-                    disabled={busy || !!state.active || deleting}
+                    disabled={
+                      busy ||
+                      !!state.active ||
+                      deleting ||
+                      !!recording.audio_retired_at
+                    }
                     onClick={() =>
                       void act({
                         operation: 'inspectRecording',

@@ -603,6 +603,11 @@ export class RecordingController {
       );
     context.authorize();
     const recording = this.local.getRecording(profile, document, id);
+    if (recording.audio_retired_at)
+      throw new LocalError(
+        'local_audio_retired',
+        'Local audio has reached its retention deadline. Use the remaining cloud recording controls.',
+      );
     if (
       this.client ||
       this.running ||
@@ -1074,7 +1079,11 @@ export class RecordingController {
           'recording_in_progress',
           'Stop capture before inspecting or recovering saved recordings.',
         );
-      this.local.getRecording(profile, document, id);
+      if (this.local.getRecording(profile, document, id).audio_retired_at)
+        throw new LocalError(
+          'local_audio_retired',
+          'Local audio has reached its retention deadline and cannot be inspected or recovered.',
+        );
       if (recover && this.local.recordingUpload(profile, document, id)?.plan)
         throw new LocalError(
           'upload_plan_frozen',
