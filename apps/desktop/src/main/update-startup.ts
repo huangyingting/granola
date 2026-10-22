@@ -97,7 +97,9 @@ export async function acquireStartupAdmission(
             rejected.data.code,
             rejected.data.code === 'update_worker_busy'
               ? 'An update or another app process still owns startup admission. Close this window and reopen the app after it finishes. Local data was not opened.'
-              : 'Startup protection rejected this application. Close and reopen the app, or reinstall a complete package. Existing local data was not opened.',
+              : rejected.data.code.startsWith('update_recovery_')
+                ? 'A previous update has incomplete or invalid recovery records. Startup is blocked for recovery; no installer was retried and no backup was restored. Existing notes were not opened or reset.'
+                : 'Startup protection rejected this application. Close and reopen the app, or reinstall a complete package. Existing local data was not opened.',
           );
           continue;
         }

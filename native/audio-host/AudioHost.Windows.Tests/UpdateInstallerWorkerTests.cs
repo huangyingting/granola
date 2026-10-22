@@ -210,6 +210,8 @@ public sealed class UpdateInstallerWorkerTests : IDisposable
 
     private UpdateWorkerJournal Journal()
     {
+        UpdateRuntimeState.Stage(runtime, new string('a', 64));
+        UpdateRuntimeState.Claim(runtime, new string('a', 64));
         var journal = new UpdateWorkerJournal(runtime, "0.1.0", "0.1.1");
         journal.Write("preparing", "update_worker_preparing");
         journal.Write("prepared", "update_worker_prepared");

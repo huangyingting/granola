@@ -102,6 +102,7 @@ public static class UpdateRuntimeStager
             }
             var result = new StagedUpdateRuntime(destination, Path.Combine(destination, "AudioHost.exe"),
                 inventory.Files.Count, inventory.Bytes, Convert.ToHexStringLower(manifest.GetHashAndReset()));
+            UpdateRuntimeState.Stage(destination, result.Sha256);
             retain?.Invoke(result);
             succeeded = true;
             return result;

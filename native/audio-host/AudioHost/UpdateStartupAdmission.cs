@@ -19,6 +19,7 @@ public static class UpdateStartupAdmission
             using var operation = UpdateOperationLock.Open();
             using var admission = UpdateOperationLock.OpenAdmission();
             RequireBundledApplication(application, version);
+            UpdateStartupRecovery.RequireSafe(UpdateStartupRecovery.Root);
             using var retained = UpdateRemoteRuntimeLease.Open(parent, admission.Handles);
             await FrameCodec.WriteJsonAsync(output,
                 new { Version = 1, Event = "update_startup_admitted", parent.Identity });

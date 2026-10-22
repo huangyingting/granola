@@ -66,6 +66,11 @@ internal sealed class UpdateRuntimeInventory : IDisposable
             throw new UpdateRuntimeException("update_worker_source");
         foreach (var path in Directory.EnumerateFileSystemEntries(directory))
         {
+            if (directory == root && string.Equals(Path.GetFileName(path), UpdateRuntimeState.Filename, StringComparison.OrdinalIgnoreCase))
+            {
+                UpdateInstallationVerifier.RequireRegularPath(path, directory: false);
+                continue;
+            }
             if ((File.GetAttributes(path) & FileAttributes.Directory) != 0)
             {
                 directories.Add(UpdatePathLock.OpenDirectory(path));

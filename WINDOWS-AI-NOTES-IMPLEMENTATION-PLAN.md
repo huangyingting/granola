@@ -542,6 +542,8 @@ request ID 串联 API、job、worker 和 provider request，生产 trace 默认�
 
 打包应用的启动已在解锁内容密钥和打开 SQLite 之前接入独立的内核准入租约。原始 bundled helper 验证实际 Main 创建者，在 operation 锁下取得 startup 文件及祖先目录锁，将不可继承副本转移给 Main，并正常退出；Main 必须收到严格身份响应和成功退出后才继续。租约保持到 Main 真正退出，启动失败不在同一进程内重新打开数据库，也不启动更新缓存服务。无策略的未签名/未注册预览包仍可使用；带更新策略的包还必须通过注册安装及原始签名 pin 验证。worker 在认证父进程退出后取得同一 startup 租约，通过 `CreateProcessW` 的显式 handle list 将准入与已验证安装包文件/祖先租约原子继承给安装器；worker 崩溃不会提前释放这些边界，私有协议管道及其他可继承句柄不进入安装器。Windows 内核用例覆盖关闭全部 worker 本地副本后子进程继续持有锁、Main 所有权转移、退出码 259、目录替换、ACL/hard-link 拒绝及无关句柄排除；真实打包探针要求准入被占用时不创建内容密钥或数据库，释放外部租约后仍须新进程重开。这只完成活跃安装的互斥，不代表中断安装恢复、独立健康验证或签名正向安装验收已经完成，安装及重启入口仍关闭。
 
+持久化恢复门禁已接到同一启动互斥内：staging 写入绑定 session 与 runtime manifest 的严格状态，worker 在全局 operation 锁下单次认领；`committed` / `installing` 意图 fence 先于对应 outcome、commit ACK 或进程创建落盘，后续失败不能擦除。共享状态写入使用当前用户/SYSTEM 专属 ACL、文件 flush 与 write-through 原子替换，mutable fence 不进入可执行 runtime 的不可变 hash/句柄租约。启动最多检查固定私有根下 128 个 session；未使用 staging、合法且尚未 commit 的准备/失败可继续，缺少旧格式 marker、损坏/矛盾记录、没有 outcome 的认领以及所有 commit 后状态（包括 `installed`）在打开内容密钥/SQLite 前阻断。保存的 PID、时间和成功 outcome 不构成健康授权，不自动删记录、重试安装或恢复旧快照。生产 activation 必须来自此固定根的真实物理父目录，任意其他目录的诊断 staging 不再能启动安装器。实际安装探针验证损坏或已 commit 记录会保持 key/数据库字节不变，恢复其合成 fixture 后旧失败 Main 仍不能重开，只能新进程重开。授权恢复、独立重启健康、软件协调接线及真实签名正向验收尚未完成，安装入口继续禁用。
+
 ## 12. 建议代码组织
 
 以下是未来建项布局，不是已经存在的目录：

@@ -474,8 +474,32 @@ copies close, exact process waits (including exit code 259), transfer into Main,
 ancestor replacement, ACL/hard-link rejection and unrelated-handle exclusion.
 The hosted packaged-app probe holds admission externally and requires no new
 content key or SQLite files, even after the external lease is released; only a
-fresh process may reopen. This is active-install exclusion, **not** durable
-interrupted-install recovery or successful startup-health evidence.
+fresh process may reopen. This is active-install exclusion, not successful
+startup-health evidence.
+
+Startup also inspects at most 128 sessions in the fixed private worker root,
+under the same operation/admission exclusion. Staging writes a strict,
+session/manifest-bound `update-runtime-state.json`; claiming is single-use.
+Durable `committed` and `installing` fences precede the corresponding outcome
+write and commit ACK/process creation, and later failures never erase them.
+Both state files use current-user/SYSTEM-only ACLs, flushed content and
+write-through atomic replacement. The mutable fence is deliberately excluded
+from executable-runtime hashes and Main's immutable runtime-file leases.
+Only unused staging or a valid uncommitted preparation/failure may pass this
+gate. Missing legacy markers, corrupt or contradictory records, uncertain
+claimed sessions and **all post-commit sessions, including `installed`, remain
+blocked before local-key/SQLite access**. No saved PID, timestamp, outcome,
+automatic deletion, retry or snapshot restore grants recovery/health authority.
+Fresh restart health and authorized resolution of these retained records are
+still unfinished. A repaired record does not reopen the failed Main process.
+
+Activation now requires the runtime's physical parent to be the fixed private
+worker root, so recovery cannot miss an installer launched from an arbitrary
+diagnostic staging directory. `--stage-update-runtime` still supports copy/
+inspection probes elsewhere; those copies cannot activate an installer.
+The real installed lifecycle probe checks corrupt and committed recovery
+records against unchanged encrypted key/database bytes, then restores only its
+synthetic records and requires a fresh process to reopen.
 
 **Desktop activation remains disconnected.** The activation coordinator must
 use the worker client and this shutdown barrier in its authenticated handoff,

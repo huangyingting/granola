@@ -1,8 +1,4 @@
 using System.Globalization;
-using System.ComponentModel;
-using System.Runtime.InteropServices;
-using System.Text.Json;
-using WindowsAiNotes.Audio;
 using WindowsAiNotes.Updates;
 
 namespace WindowsAiNotes.AudioHost;
@@ -13,8 +9,6 @@ public sealed record UpdateWorkerOutcome(int Version, string SessionId, string C
 internal sealed class UpdateWorkerJournal
 {
     internal const string Filename = "update-outcome.json";
-    private const uint ReplaceExisting = 1;
-    private const uint WriteThrough = 8;
     private readonly string directory;
     private readonly string current;
     private readonly string offered;
@@ -31,6 +25,8 @@ internal sealed class UpdateWorkerJournal
         this.current = current;
         this.offered = offered;
         if (File.Exists(Path.Combine(directory, Filename)))
+            throw new UpdateHandoffException("update_worker_used");
+        if (UpdateRuntimeState.Read(directory).Phase != "claimed")
             throw new UpdateHandoffException("update_worker_used");
     }
 
@@ -52,22 +48,9 @@ internal sealed class UpdateWorkerJournal
             throw new InvalidOperationException("An invalid update outcome transition was requested.");
         var outcome = new UpdateWorkerOutcome(1, Path.GetFileName(directory)[7..], current, offered, phase, code,
             installerStarted, exitCode, installerProcess, DateTime.UtcNow.ToString("O", CultureInfo.InvariantCulture));
-        var temporary = Path.Combine(directory, $".outcome-{Guid.NewGuid():N}.tmp");
-        try
-        {
-            using (var stream = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.Read))
-            {
-                JsonSerializer.Serialize(stream, outcome, AudioJson.Options);
-                stream.Flush(flushToDisk: true);
-            }
-            if (!MoveFile(temporary, Path.Combine(directory, Filename), WriteThrough | (Latest is null ? 0u : ReplaceExisting)))
-                throw new IOException("The durable update state could not be committed.", new Win32Exception(Marshal.GetLastPInvokeError()));
-            Latest = outcome;
-        }
-        finally
-        {
-            if (File.Exists(temporary)) File.Delete(temporary);
-        }
+        UpdateRuntimeState.RecordIntent(directory, phase);
+        UpdateStateFile.Write(directory, Filename, outcome, replace: Latest is not null);
+        Latest = outcome;
     }
 
     private static bool Allowed(string? previous, string next) => (previous, next) switch
@@ -79,7 +62,34 @@ internal sealed class UpdateWorkerJournal
         _ => false
     };
 
-    [DllImport("kernel32.dll", EntryPoint = "MoveFileExW", CharSet = CharSet.Unicode, SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool MoveFile(string source, string destination, uint flags);
+    internal static UpdateWorkerOutcome? Read(string directory)
+    {
+        if (!UpdateRuntimeLease.ValidDirectoryName(Path.GetFileName(directory)))
+            throw new UpdateHandoffException("update_recovery_invalid");
+        var outcome = UpdateStateFile.Read<UpdateWorkerOutcome>(directory, Filename);
+        if (outcome is null) return null;
+        if (outcome.Version != 1 || outcome.SessionId != Path.GetFileName(directory)[7..] ||
+            !UpdateTrustVerifier.IsStableVersion(outcome.CurrentVersion) ||
+            !UpdateTrustVerifier.IsStableVersion(outcome.OfferedVersion) ||
+            System.Version.Parse(outcome.OfferedVersion) <= System.Version.Parse(outcome.CurrentVersion) ||
+            outcome.Code.Length is 0 or > 100 || outcome.Code[0] is not (>= 'a' and <= 'z') ||
+            outcome.Code.Any(c => c is not (>= 'a' and <= 'z' or >= '0' and <= '9' or '_')) ||
+            !UpdateRuntimeState.ValidTime(outcome.UpdatedAt) ||
+            (outcome.InstallerProcess is { } process && (process.Pid <= 0 ||
+                !long.TryParse(process.CreationFileTime, NumberStyles.None, CultureInfo.InvariantCulture, out var created) ||
+                created <= 0 || created.ToString(CultureInfo.InvariantCulture) != process.CreationFileTime)) ||
+            (!outcome.InstallerStarted && (outcome.InstallerExitCode is not null || outcome.InstallerProcess is not null)) ||
+            !ValidPhase(outcome))
+            throw new UpdateHandoffException("update_recovery_invalid");
+        return outcome;
+    }
+
+    private static bool ValidPhase(UpdateWorkerOutcome outcome) => outcome.Phase switch
+    {
+        "preparing" or "prepared" or "committed" => !outcome.InstallerStarted,
+        "installing" => outcome.InstallerExitCode is null,
+        "installed" => outcome.InstallerStarted && outcome.InstallerExitCode == 0 && outcome.InstallerProcess is not null,
+        "failed" => true,
+        _ => false
+    };
 }

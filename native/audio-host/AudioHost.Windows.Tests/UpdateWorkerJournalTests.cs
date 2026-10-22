@@ -17,6 +17,8 @@ public sealed class UpdateWorkerJournalTests : IDisposable
         Directory.CreateDirectory(root);
         directory = Path.Combine(root, $"worker-{Guid.NewGuid():D}");
         new DirectoryInfo(directory).Create(UpdatePrivateDirectory.Security());
+        UpdateRuntimeState.Stage(directory, new string('a', 64));
+        UpdateRuntimeState.Claim(directory, new string('a', 64));
     }
 
     [Fact]
@@ -51,7 +53,7 @@ public sealed class UpdateWorkerJournalTests : IDisposable
             Assert.True(error is IOException or UnauthorizedAccessException);
             Assert.Equal(original, File.ReadAllBytes(Pathname));
             Assert.Equal("preparing", journal.Latest!.Phase);
-            Assert.Single(Directory.EnumerateFileSystemEntries(directory));
+            Assert.Equal(2, Directory.EnumerateFileSystemEntries(directory).Count());
         }
         finally { File.SetAttributes(Pathname, FileAttributes.Normal); }
     }

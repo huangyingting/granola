@@ -54,7 +54,10 @@ public static class UpdateInstallerWorker
             if (!identity.Matched || parent is null) return new(1, false, identity.Code, null);
             var directory = Path.GetDirectoryName(request.Application)!;
             var location = Path.TrimEndingDirectorySeparator(AppContext.BaseDirectory);
+            UpdateStartupRecovery.RequireRuntimeLocation(location);
             runtime = UpdateRuntimeLease.Open(location, directory, request.RuntimeSha256, UpdateRuntimeStager.RequiredFiles);
+            using var exclusive = UpdateOperationLock.Open();
+            UpdateRuntimeState.Claim(location, request.RuntimeSha256);
             journal = new(location, request.CurrentVersion, request.OfferedVersion);
             journal.Write("preparing", "update_worker_preparing");
             var policy = UpdateWorkerPolicy.Read(request.Application);
@@ -70,7 +73,6 @@ public static class UpdateInstallerWorker
                 TimeSpan.FromMinutes(10));
             VerifyApplication(services, request.CurrentVersion);
             RequireOutsideInstallation(request.Installer, directory);
-            using var exclusive = UpdateOperationLock.Open();
             var verification = PreparedInstaller.Open(request.Installer, policy.Trust(request.OfferedVersion),
                 request.CurrentVersion, request.Bytes, request.Sha512, out var installer);
             using (installer)

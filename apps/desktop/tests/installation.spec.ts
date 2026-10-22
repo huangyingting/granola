@@ -408,27 +408,13 @@ test('preserves encrypted data and new edits through actual installation, compat
           {
             version: 1,
             event: 'update_worker_failed',
-            code: 'update_signature_invalid',
+            code: 'update_worker_location',
           },
         ]);
         decoder.finish();
-        expect(
-          updateWorkerOutcomeSchema.parse(
-            JSON.parse(
-              await readFile(
-                join(runtime.directory, 'update-outcome.json'),
-                'utf8',
-              ),
-            ),
-          ),
-        ).toMatchObject({
-          phase: 'failed',
-          code: 'update_signature_invalid',
-          installer_started: false,
-          installer_process: null,
-          installer_exit_code: null,
-          current_version: version,
-        });
+        expect(existsSync(join(runtime.directory, 'update-outcome.json'))).toBe(
+          false,
+        );
       } finally {
         await rm(policyPath);
       }
@@ -568,6 +554,7 @@ test('preserves encrypted data and new edits through actual installation, compat
         installer_exit_code: null,
         current_version: version,
       });
+      await probeStartupRecovery(guarded.runtime.directory, current.directory);
     } finally {
       await rm(guarded.runtime.directory, {
         recursive: true,
@@ -591,6 +578,79 @@ test('preserves encrypted data and new edits through actual installation, compat
       throw new Error('The installed app is not running.');
     await close(lifecycle.application);
     lifecycle.application = null;
+  }
+
+  async function probeStartupRecovery(runtime: string, data: string) {
+    const path = join(runtime, 'update-runtime-state.json');
+    const original = await readFile(path);
+    await stopInstalled();
+    const protectedFiles = new Map<string, Buffer>();
+    for (const name of await readdir(data))
+      if (name.startsWith('notes.sqlite') || name === 'content-key.protected')
+        protectedFiles.set(name, await readFile(join(data, name)));
+    expect(protectedFiles.has('content-key.protected')).toBe(true);
+    expect(protectedFiles.has('notes.sqlite')).toBe(true);
+    try {
+      for (const [contents, code] of [
+        ['{', 'update_recovery_invalid'],
+        [
+          JSON.stringify({
+            ...JSON.parse(original.toString('utf8')),
+            phase: 'committed',
+          }),
+          'update_recovery_required',
+        ],
+      ] as const) {
+        await writeFile(path, contents);
+        lifecycle.application = await electron.launch({
+          executablePath: executable,
+        });
+        const page = await lifecycle.application.firstWindow();
+        await expect(page.getByRole('alert')).toContainText(
+          'Startup is blocked for recovery',
+        );
+        await expect(
+          page.getByRole('button', { name: '+ New meeting', exact: true }),
+        ).toBeDisabled();
+        expect(
+          await page.evaluate(() =>
+            window.notes.invoke({ operation: 'bootstrap' }),
+          ),
+        ).toMatchObject({ ok: false, error: { code } });
+        expect(
+          await page.evaluate(() =>
+            window.notes.invokeUpdate({ operation: 'getState' }),
+          ),
+        ).toMatchObject({
+          ok: true,
+          state: { phase: 'failed', installation_enabled: false },
+        });
+        await writeFile(path, original);
+        expect(
+          await page.evaluate(() =>
+            window.notes.invoke({ operation: 'bootstrap' }),
+          ),
+        ).toMatchObject({ ok: false, error: { code } });
+        await stopInstalled();
+        const names = (await readdir(data)).filter(
+          (name) =>
+            name.startsWith('notes.sqlite') || name === 'content-key.protected',
+        );
+        expect(names.sort()).toEqual([...protectedFiles.keys()].sort());
+        for (const [name, bytes] of protectedFiles)
+          expect(await readFile(join(data, name))).toEqual(bytes);
+      }
+    } finally {
+      if (lifecycle.application) await stopInstalled();
+      await writeFile(path, original);
+    }
+    lifecycle.application = await electron.launch({
+      executablePath: executable,
+    });
+    const page = await lifecycle.application.firstWindow();
+    await expect(
+      page.getByRole('button', { name: '+ New meeting', exact: true }),
+    ).toBeEnabled();
   }
 
   async function preserved(body: string) {

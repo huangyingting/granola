@@ -37,6 +37,28 @@ afterEach(() => {
 });
 
 describe('pre-storage Main startup admission', () => {
+  it.each([
+    'update_recovery_required',
+    'update_recovery_invalid',
+    'update_recovery_unavailable',
+    'update_recovery_limit',
+  ])(
+    'surfaces %s without offering a retry, rollback or database reset',
+    async (code) => {
+      const pending = claim();
+      child.stdout.write(
+        encodeJsonFrame({ version: 1, event: 'update_startup_failed', code }),
+      );
+      child.emit('close', 2, null);
+      await expect(pending).rejects.toMatchObject({
+        code,
+        message: expect.stringContaining(
+          'no installer was retried and no backup was restored',
+        ),
+      });
+    },
+  );
+
   it('requires an original bundled helper before spawning anything', async () => {
     await expect(
       acquireStartupAdmission('C:\\Other\\AudioHost.exe', application, '0.1.0'),

@@ -131,6 +131,8 @@ public sealed class UpdateRuntimeTests : IDisposable
         var staged = UpdateRuntimeStager.Copy(source, source, parent, ["AudioHost.exe"]);
         using (var runtime = UpdateRuntimeLease.Open(staged.Directory, source, staged.Sha256, ["AudioHost.exe"]))
         {
+            UpdateRuntimeState.Claim(staged.Directory, staged.Sha256);
+            UpdateRuntimeState.RecordIntent(staged.Directory, "committed");
             using var inventory = UpdateRuntimeInventory.Open(staged.Directory, ["AudioHost.exe"]);
             Assert.Equal(staged.Sha256, inventory.Manifest());
             Assert.Equal(staged.Bytes, inventory.Bytes);
