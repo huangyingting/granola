@@ -1255,10 +1255,18 @@ pnpm test
 ```
 
 CI runs both operating systems and publishes an **unsigned, self-contained
-Windows x64 helper**, not an installer. Automated tests use only generated audio.
+Windows x64 helper and developer-preview installer**. Automated tests use only generated audio.
 The portable test key protector exists solely in the test assembly; the host
 has no plaintext-key or non-DPAPI fallback. A Windows CI pass is not evidence of
 physical audio capture.
+
+CI installs the exact `packageManager` version using commit-pinned upstream
+`pnpm/setup` v3.1.1, which verifies npm's signature and checksum for the native
+pnpm package. The BuildKit server image uses upstream pnpm 12.3.4 release
+archives with fixed SHA-256 checksums for Linux amd64 and arm64, avoiding
+Corepack's wrapper bootstrap. Update those Docker release pins together with
+`packageManager`; the build rejects a mismatch. Frozen-lockfile installation,
+registry integrity verification and all test gates remain enabled.
 
 The server CI job also runs real PostgreSQL integration tests and builds the
 server image, without Azure credentials. Locally, set `TEST_DATABASE_URL` to run
