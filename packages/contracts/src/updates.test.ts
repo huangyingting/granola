@@ -9,7 +9,10 @@ import {
   stagedUpdateRuntimeSchema,
   updateFeedSchema,
   updateInstallationSchema,
+  updateHandoffDecisionSchema,
+  updateParentCommittedSchema,
   updateParentIdentitySchema,
+  updateParentReadySchema,
 } from './updates.js';
 
 const policy = {
@@ -145,6 +148,45 @@ describe('packaged update and feed contracts', () => {
       expect(
         updateParentIdentitySchema.safeParse({ ...parent, ...change }).success,
       ).toBe(false);
+  });
+  it('limits the private handoff channel to a challenge and exact process identity, never install metadata', () => {
+    const parent = { pid: 1234, creation_file_time: '134000000000000001' };
+    const challenge = 'ab'.repeat(32);
+    const ready = {
+      version: 1,
+      event: 'update_parent_ready',
+      challenge,
+      parent,
+    };
+    const committed = { version: 1, event: 'update_parent_committed', parent };
+    expect(updateParentReadySchema.parse(ready)).toEqual(ready);
+    expect(updateParentCommittedSchema.parse(committed)).toEqual(committed);
+    for (const operation of ['commit', 'cancel']) {
+      const decision = { version: 1, operation, challenge };
+      expect(updateHandoffDecisionSchema.parse(decision)).toEqual(decision);
+      for (const change of [
+        { version: 2 },
+        { operation: 'install' },
+        { challenge: challenge.toUpperCase() },
+        { challenge: 'short' },
+        { installer: 'C:\\Synthetic\\other.exe' },
+        { expected: policy },
+        { parent },
+      ])
+        expect(
+          updateHandoffDecisionSchema.safeParse({ ...decision, ...change })
+            .success,
+        ).toBe(false);
+    }
+    expect(
+      updateParentReadySchema.safeParse({ ...ready, verified: true }).success,
+    ).toBe(false);
+    expect(
+      updateParentCommittedSchema.safeParse({
+        ...committed,
+        installation_enabled: true,
+      }).success,
+    ).toBe(false);
   });
   it('bounds staged runtime metadata without granting installation or signature authority', () => {
     const runtime = {

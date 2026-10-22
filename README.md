@@ -381,8 +381,18 @@ a one-shot inspection: its lease is released before the helper exits. Neither
 process identity nor this inspection authorizes an update. A worker must retain
 its own lease and require a fresh, unpredictable prepare/commit challenge over
 Main-owned pipes; a saved PID or inspection result cannot substitute for that
-handshake. Authenticated worker coordination, application shutdown integration,
-durable outcomes and recovery remain unfinished.
+handshake.
+
+The parent-handoff primitive now generates a fresh 256-bit challenge, accepts
+exactly one framed `commit` or `cancel` decision and acknowledges a valid commit
+before waiting on the retained parent handle. Decisions are capped at 1 KiB;
+unknown/duplicate fields, stale challenges and repeated consumption are rejected.
+Decision and exit waits have separate deadlines, and caller cancellation never
+kills the parent. Failed handoffs require their private channels to be closed,
+not reused. This library primitive does not launch a worker, prepare or execute
+an installer, or prove installer trust. The independent worker must compose it
+with fresh registration/policy validation and the retained installer lease.
+Application shutdown integration, durable outcomes and recovery remain unfinished.
 
 ### Verified signed Windows candidates
 

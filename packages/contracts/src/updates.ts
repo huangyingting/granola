@@ -120,6 +120,23 @@ export const updateParentIdentitySchema = z.strictObject({
     .regex(/^[1-9][0-9]{0,18}$/u)
     .refine((value) => value.length < 19 || value <= '9223372036854775807'),
 });
+const handoffChallenge = z.string().regex(/^[0-9a-f]{64}$/u);
+export const updateParentReadySchema = z.strictObject({
+  version: z.literal(1),
+  event: z.literal('update_parent_ready'),
+  challenge: handoffChallenge,
+  parent: updateParentIdentitySchema,
+});
+export const updateHandoffDecisionSchema = z.strictObject({
+  version: z.literal(1),
+  operation: z.enum(['commit', 'cancel']),
+  challenge: handoffChallenge,
+});
+export const updateParentCommittedSchema = z.strictObject({
+  version: z.literal(1),
+  event: z.literal('update_parent_committed'),
+  parent: updateParentIdentitySchema,
+});
 export const cachedUpdateSchema = z.strictObject({
   version: z.literal(1),
   feed: updateFeedSchema,

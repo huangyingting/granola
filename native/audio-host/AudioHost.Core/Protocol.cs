@@ -92,21 +92,29 @@ public static class FrameCodec
 {
     public const int MaxControlBytes = 64 * 1024;
 
-    public static async Task<byte[]?> ReadAsync(Stream stream, CancellationToken token = default)
+    public static Task<byte[]?> ReadAsync(Stream stream, CancellationToken token = default)
+        => ReadAsync(stream, MaxControlBytes, token);
+
+    public static async Task<byte[]?> ReadAsync(Stream stream, int maximumBytes, CancellationToken token = default)
     {
+        if (maximumBytes is <= 0 or > MaxControlBytes)
+            throw new ArgumentOutOfRangeException(nameof(maximumBytes));
         var header = new byte[4];
         var read = await stream.ReadAsync(header.AsMemory(0, 4), token);
         if (read == 0) return null;
         await stream.ReadExactlyAsync(header.AsMemory(read), token);
         var length = BinaryPrimitives.ReadUInt32LittleEndian(header);
-        if (length is 0 or > MaxControlBytes)
+        if (length == 0 || length > maximumBytes)
             throw new AudioException("invalid_frame", "Control frame length is invalid.");
         var payload = new byte[(int)length];
         await stream.ReadExactlyAsync(payload, token);
         return payload;
     }
 
-    public static async Task WriteAsync(Stream stream, AudioEvent message, CancellationToken token = default)
+    public static Task WriteAsync(Stream stream, AudioEvent message, CancellationToken token = default)
+        => WriteJsonAsync(stream, message, token);
+
+    public static async Task WriteJsonAsync<T>(Stream stream, T message, CancellationToken token = default)
     {
         var body = JsonSerializer.SerializeToUtf8Bytes(message, AudioJson.Options);
         if (body.Length > MaxControlBytes)

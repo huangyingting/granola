@@ -122,7 +122,7 @@ public sealed class UpdateParentTests
         }
     }
 
-    private static Process StartFixture()
+    internal static Process StartFixture()
     {
         var start = new ProcessStartInfo(UpdateTrustTests.Reference)
         {
