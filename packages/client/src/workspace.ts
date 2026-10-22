@@ -27,6 +27,7 @@ import { SyncEngine, workspaceProfile } from './sync.js';
 import { DesktopSummaries, summaryIntentSchema } from './summaries.js';
 import { DesktopChat } from './chat.js';
 import type { DesktopDelivery } from './delivery.js';
+import { PendingWork } from './lifecycle.js';
 
 const workspaceSchema = z.strictObject({
   id: resourceId,
@@ -57,6 +58,7 @@ export class WorkspaceController {
   private api: ApiClient | null = null;
   private engine: SyncEngine | null = null;
   private running: Promise<void> | null = null;
+  private readonly background = new PendingWork();
   private timer: ReturnType<typeof setTimeout> | null = null;
   private timerDue = 0;
   private started = false;
@@ -396,6 +398,14 @@ export class WorkspaceController {
     this.session?.cancel();
     this.selection.clear();
     this.stopEngine();
+  }
+  async close() {
+    this.dispose();
+    await Promise.all([
+      this.background.drain(),
+      this.summaries.events.close(),
+      this.chat.events.close(),
+    ]);
   }
   private stopEngine() {
     this.summaries?.events.stop();
@@ -1006,9 +1016,11 @@ export class WorkspaceController {
       );
     const engine = this.engine;
     const session = this.session;
-    const work = this.runSync(engine, session).finally(() => {
-      if (this.running === work) this.running = null;
-    });
+    const work = this.background.track(
+      this.runSync(engine, session).finally(() => {
+        if (this.running === work) this.running = null;
+      }),
+    );
     this.running = work;
     return work;
   }

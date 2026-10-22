@@ -94,7 +94,7 @@ beforeEach(() => {
   });
 });
 afterEach(async () => {
-  events.stop();
+  await events.close();
   delivery.close();
   await Promise.resolve();
   vi.restoreAllMocks();
@@ -102,6 +102,34 @@ afterEach(async () => {
   local.close();
   key.fill(0);
   rmSync(directory, { recursive: true, force: true });
+});
+it('drains a cancelled summary stream before closing and does not allow it to restart', async () => {
+  let finish!: () => void;
+  let signal: AbortSignal | undefined;
+  const pending = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
+  vi.mocked(api.events).mockImplementation(
+    async (_id, _after, _received, abort) => {
+      signal = abort;
+      await pending;
+      abort.throwIfAborted();
+      return 0;
+    },
+  );
+  await events.start(1, id, job);
+  let closed = false;
+  const closing = events.close().then(() => {
+    closed = true;
+  });
+  expect(signal?.aborted).toBe(true);
+  await Promise.resolve();
+  expect(closed).toBe(false);
+  finish();
+  await closing;
+  await expect(events.start(1, id, job)).rejects.toMatchObject({
+    code: 'workspace_closed',
+  });
 });
 const message = (seq: number, text: string, attempt = 1) =>
   jobEventSchema.parse({

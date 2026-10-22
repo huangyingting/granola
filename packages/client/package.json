@@ -4,6 +4,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./lifecycle": {
+      "types": "./dist/lifecycle.d.ts",
+      "import": "./dist/lifecycle.js"
+    },
     "./delivery": {
       "types": "./dist/delivery.d.ts",
       "import": "./dist/delivery.js"

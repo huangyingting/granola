@@ -37,6 +37,22 @@ button {
   grid-template-columns: 280px minmax(0, 1fr);
   min-height: 100vh;
 }
+.shutdown-banner {
+  grid-column: 1 / -1;
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 18px 30px;
+  border-bottom: 1px solid #dce1ed;
+  background: #fff;
+  box-shadow: 0 4px 18px #24304612;
+}
+.shutdown-banner span {
+  flex: 1;
+}
 .sidebar {
   background: #f1f4f9;
   padding: 30px 18px 18px;

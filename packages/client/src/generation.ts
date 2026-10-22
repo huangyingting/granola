@@ -13,6 +13,7 @@ import {
 } from '@windows-ai-notes/contracts/generation';
 import { ApiClient, ClientError } from './http.js';
 import type { DesktopDelivery, DeliveryHandle } from './delivery.js';
+import { PendingWork } from './lifecycle.js';
 
 type Owner = { profile: string; api: ApiClient; authorize: () => void };
 type Subscription = Owner & {
@@ -47,6 +48,8 @@ const invalid = () =>
 
 export class SummaryEvents {
   private current: Subscription | null = null;
+  private readonly work = new PendingWork();
+  private closed = false;
   constructor(
     private readonly local: LocalStore,
     private readonly hooks: Hooks,
@@ -65,6 +68,11 @@ export class SummaryEvents {
     this.hooks.delivery?.cancel(this.current?.delivery);
     this.current?.abort.abort();
     this.current = null;
+  }
+  async close() {
+    this.closed = true;
+    this.stop();
+    await this.work.drain();
   }
   private authorize(current: Subscription) {
     current.abort.signal.throwIfAborted();
@@ -86,7 +94,14 @@ export class SummaryEvents {
     );
     this.hooks.changed();
   }
-  async start(scope: number, id: string, job: string) {
+  start(scope: number, id: string, job: string) {
+    if (this.closed)
+      return Promise.reject(
+        new ClientError('workspace_closed', 'Generation updates have closed.'),
+      );
+    return this.work.track(this.open(scope, id, job));
+  }
+  private async open(scope: number, id: string, job: string) {
     const owner = this.hooks.owner(scope);
     owner.authorize();
     this.local.get(owner.profile, id);
@@ -159,7 +174,14 @@ export class SummaryEvents {
       if (this.current === current) this.stop(job);
       throw error;
     }
-    void this.run(current);
+    void this.work.track(this.run(current)).catch((error: unknown) => {
+      console.error(
+        JSON.stringify({
+          code: 'generation_updates_unavailable',
+          kind: error instanceof Error ? error.name : 'unknown',
+        }),
+      );
+    });
   }
   private acceptJob(current: Subscription, job: z.infer<typeof jobSchema>) {
     if (

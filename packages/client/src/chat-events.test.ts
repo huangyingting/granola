@@ -149,7 +149,7 @@ describe('bounded isolated Main chat subscriptions', () => {
     });
   });
   afterEach(async () => {
-    events.stop();
+    await events.close();
     delivery.close();
     await Promise.resolve();
     vi.restoreAllMocks();
@@ -157,6 +157,33 @@ describe('bounded isolated Main chat subscriptions', () => {
     local.close();
     key.fill(0);
     rmSync(directory, { recursive: true, force: true });
+  });
+  it('waits for an aborted stream to finish and prevents a new subscription after close', async () => {
+    let finish!: () => void;
+    let signal: AbortSignal | undefined;
+    const pending = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    vi.mocked(api.chatEvents).mockImplementation(
+      async (_id, _after, _received, abort) => {
+        signal = abort;
+        await pending;
+        abort.throwIfAborted();
+        return 0;
+      },
+    );
+    await start();
+    let closed = false;
+    const closing = events.close().then(() => {
+      closed = true;
+    });
+    expect(signal?.aborted).toBe(true);
+    await Promise.resolve();
+    expect(closed).toBe(false);
+    finish();
+    await closing;
+    expect(reads.size).toBe(0);
+    await expect(start()).rejects.toMatchObject({ code: 'workspace_closed' });
   });
   it('offers only validated nonblank preview text and invalidates an unpresented older attempt', async () => {
     await start();

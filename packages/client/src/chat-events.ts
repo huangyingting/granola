@@ -13,6 +13,7 @@ import {
 } from '@windows-ai-notes/contracts/questions';
 import { ApiClient, ClientError } from './http.js';
 import type { DesktopDelivery, DeliveryHandle } from './delivery.js';
+import { PendingWork } from './lifecycle.js';
 
 type Owner = { profile: string; api: ApiClient; authorize: () => void };
 type Subscription = Owner & {
@@ -58,6 +59,8 @@ const progressSchema = z.union([
 
 export class ChatEvents {
   private current: Subscription | null = null;
+  private readonly work = new PendingWork();
+  private closed = false;
   constructor(
     private readonly local: LocalStore,
     private readonly hooks: Hooks,
@@ -79,6 +82,11 @@ export class ChatEvents {
       this.hooks.reads.delete(this.current.abort);
     }
     this.current = null;
+  }
+  async close() {
+    this.closed = true;
+    this.stop();
+    await this.work.drain();
   }
   clear(profile: string, id: string, thread: string, turn: string) {
     this.stop(turn);
@@ -136,7 +144,14 @@ export class ChatEvents {
       );
     this.hooks.changed();
   }
-  async start(scope: number, id: string, thread: string, turn: string) {
+  start(scope: number, id: string, thread: string, turn: string) {
+    if (this.closed)
+      return Promise.reject(
+        new ClientError('workspace_closed', 'Question updates have closed.'),
+      );
+    return this.work.track(this.open(scope, id, thread, turn));
+  }
+  private async open(scope: number, id: string, thread: string, turn: string) {
     const owner = this.hooks.owner(scope, id, thread);
     owner.authorize();
     const previous = this.current;
@@ -234,7 +249,14 @@ export class ChatEvents {
         if (this.current === current) this.stop(turn);
       }
     }
-    void this.run(current);
+    void this.work.track(this.run(current)).catch((error: unknown) => {
+      console.error(
+        JSON.stringify({
+          code: 'chat_updates_unavailable',
+          kind: error instanceof Error ? error.name : 'unknown',
+        }),
+      );
+    });
   }
   private received(current: Subscription, event: ChatEvent) {
     this.authorize(current);

@@ -35,7 +35,7 @@ import {
 } from '@windows-ai-notes/contracts/desktop';
 import { AccountSession, OidcClient } from './auth.js';
 import { WorkspaceController } from './workspace.js';
-import { workspaceProfile } from './sync.js';
+import { SyncEngine, workspaceProfile } from './sync.js';
 import { oidcFixture } from './oidc.fixture.js';
 import { ApiClient } from './http.js';
 import { transcriptPageSchema } from '@windows-ai-notes/contracts/server';
@@ -185,6 +185,35 @@ describe.skipIf(!databaseUrl)(
         await admin.pool.query(`DROP SCHEMA "${schema}" CASCADE`);
         await admin.close();
       }
+    });
+    it('drains a retired synchronization even after dispose clears its active reference', async () => {
+      await connect();
+      await activate();
+      await controller.synchronize();
+      let finish!: () => void;
+      const pending = new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      vi.spyOn(SyncEngine.prototype, 'synchronize').mockImplementationOnce(
+        async () => {
+          await pending;
+          return { more: false };
+        },
+      );
+      const synchronizing = controller.synchronize();
+      const rejected = expect(synchronizing).rejects.toMatchObject({
+        code: 'sync_cancelled',
+      });
+      controller.dispose();
+      let closed = false;
+      const closing = controller.close().then(() => {
+        closed = true;
+      });
+      await Promise.resolve();
+      expect(closed).toBe(false);
+      finish();
+      await Promise.all([closing, rejected]);
+      expect(closed).toBe(true);
     });
     it('loads current authenticated AI allowance without caching it and fences late results after a scope change', async () => {
       await expect(

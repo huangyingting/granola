@@ -50,6 +50,50 @@ function App() {
   const minimumVersion = useRef(0);
   const scope = useRef(1);
   const authAttempt = useRef(0);
+  const [closing, setClosing] = useState<{
+    nonce: string;
+    error: string | null;
+  } | null>(null);
+  const closeAttempt = useRef<Promise<void> | null>(null);
+  const closeFlushed = useRef(false);
+  function closeSafely(nonce: string) {
+    if (closeAttempt.current) return;
+    const attempt = async () => {
+      setClosing({ nonce, error: null });
+      try {
+        if (!closeFlushed.current) {
+          if (!(await flush.current())) {
+            setClosing(null);
+            return;
+          }
+          closeFlushed.current = true;
+        }
+        const response = await window.notes.invoke({
+          operation: 'closeReady',
+          nonce,
+        });
+        if (!response.ok) setClosing({ nonce, error: response.error.message });
+        else if (!('closing' in response) || !response.closing)
+          setClosing({
+            nonce,
+            error: 'Safe shutdown was not confirmed. Retry closing.',
+          });
+      } catch {
+        if (!closeFlushed.current) {
+          setClosing(null);
+          setError('Notes could not be saved. The window was kept open.');
+        } else
+          setClosing({
+            nonce,
+            error:
+              'The desktop connection did not confirm safe shutdown. Retry closing.',
+          });
+      }
+    };
+    closeAttempt.current = attempt().finally(() => {
+      closeAttempt.current = null;
+    });
+  }
   async function invoke(command: DesktopCommand, discardEditor = false) {
     const attempt =
       command.operation === 'connect' || command.operation === 'cancelConnect'
@@ -105,22 +149,7 @@ function App() {
     }
   }
   useEffect(() => {
-    const offFlush = window.notes.onFlush((nonce) => {
-      void flush
-        .current()
-        .then(async (saved) => {
-          if (saved) {
-            const response = await window.notes.invoke({
-              operation: 'closeReady',
-              nonce,
-            });
-            if (!response.ok) setError(response.error.message);
-          }
-        })
-        .catch(() =>
-          setError('Notes could not be saved. The window was kept open.'),
-        );
-    });
+    const offFlush = window.notes.onFlush(closeSafely);
     let refreshing = false;
     let requestedVersion = 0;
     const offChanged = window.notes.onChanged((change) => {
@@ -213,7 +242,28 @@ function App() {
     state?.connection.status === 'switching';
   return (
     <div className="shell">
-      <aside className="sidebar">
+      {closing && (
+        <section
+          className="shutdown-banner"
+          role={closing.error ? 'alert' : 'status'}
+        >
+          <strong>
+            {closing.error ? 'The window was kept open' : 'Closing safely'}
+          </strong>
+          <span>
+            {closing.error ?? 'Saving notes and finishing background work...'}
+          </span>
+          {closing.error && (
+            <button
+              className="secondary"
+              onClick={() => closeSafely(closing.nonce)}
+            >
+              Retry close
+            </button>
+          )}
+        </section>
+      )}
+      <aside className="sidebar" inert={closing !== null}>
         <div className="brand">
           <span className="brand-mark">n</span>
           <div>
@@ -381,7 +431,7 @@ function App() {
         </button>
         <div className="preview-label">Developer preview</div>
       </aside>
-      <main>
+      <main inert={closing !== null}>
         <header className="topbar">
           <span>
             {page === 'account'

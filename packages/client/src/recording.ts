@@ -21,6 +21,7 @@ import {
 import { RecordingLivePreview } from './recording-live.js';
 import type { DesktopDelivery } from './delivery.js';
 import { recordingRetentionSchema } from '@windows-ai-notes/contracts/uploads';
+import { PendingWork } from './lifecycle.js';
 
 type AudioClient = Pick<
   AudioHostClient,
@@ -62,6 +63,7 @@ function missing(error: unknown) {
 }
 
 export class RecordingController {
+  private readonly background = new PendingWork();
   private storage: AudioState['storage'] = null;
   private storageError: Problem | null = null;
   private levels: AudioState['levels'] = null;
@@ -350,15 +352,18 @@ export class RecordingController {
         const client = this.create((event) => this.observe(event));
         this.client = client;
         void client.failure
-          .catch(async (error: unknown) => {
-            if (this.client !== client) return;
-            try {
-              this.failRecording(error);
-            } catch (failure) {
-              this.report(failure);
-            }
-            this.report(error);
-            await this.release(client);
+          .catch((error: unknown) => {
+            const recover = async () => {
+              if (this.client !== client) return;
+              try {
+                this.failRecording(error);
+              } catch (failure) {
+                this.report(failure);
+              }
+              this.report(error);
+              await this.release(client);
+            };
+            return this.background.track(recover());
           })
           .catch((error: unknown) => this.report(error));
         await client.request({
@@ -451,6 +456,10 @@ export class RecordingController {
     await this.live?.preview.closed();
     if (this.uploadTask) await this.uploadTask;
     if (this.cleaning) await this.cleaning;
+  }
+  async close(authorize: () => void) {
+    await this.stop(authorize);
+    await this.background.drain();
   }
   startLive(
     profile: string,
@@ -986,16 +995,18 @@ export class RecordingController {
         }
       }
     };
-    void operation()
-      .catch((error: unknown) => {
-        if (!current()) return;
-        this.retentionFailed(error);
-      })
-      .finally(() => {
-        context.reads?.delete(read);
-        if (this.retentionRead === read) this.retentionRead = null;
-        if (current()) this.changed();
-      });
+    void this.background.track(
+      operation()
+        .catch((error: unknown) => {
+          if (!current()) return;
+          this.retentionFailed(error);
+        })
+        .finally(() => {
+          context.reads?.delete(read);
+          if (this.retentionRead === read) this.retentionRead = null;
+          if (current()) this.changed();
+        }),
+    );
   }
   private retentionFailed(error: unknown): boolean {
     const failure = problem(error);

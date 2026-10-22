@@ -22,6 +22,7 @@ import { ClientError } from '@windows-ai-notes/client/http';
 import { WorkspaceController } from '@windows-ai-notes/client/workspace';
 import { RecordingController } from '@windows-ai-notes/client/recording';
 import { DesktopDelivery } from '@windows-ai-notes/client/delivery';
+import { PendingWork } from '@windows-ai-notes/client/lifecycle';
 import {
   AudioHostClient,
   AudioHostError,
@@ -49,6 +50,7 @@ import {
   UpdateDownloads,
 } from './update-downloads.js';
 import { DesktopUpdateController } from './update-controller.js';
+import { DesktopShutdown } from './shutdown.js';
 
 let store: LocalStore | null = null;
 let controller: WorkspaceController | null = null;
@@ -61,6 +63,8 @@ let dataDirectory = '';
 let recordings: RecordingController | null = null;
 let delivery: DesktopDelivery | null = null;
 let updates: DesktopUpdateController | null = null;
+let shutdown: DesktopShutdown | null = null;
+const maintenance = new PendingWork();
 
 function audioHostExecutable() {
   if (process.platform !== 'win32')
@@ -101,20 +105,22 @@ function audio(): RecordingController {
 function audioMaintenance() {
   if (!recordings || !controller || closingAudio || allowClose) return;
   recordings.resumeUploads(controller.recordingUploadContext());
-  void recordings
-    .reconcile(controller.profile)
-    .then(() => {
-      if (!closingAudio && !allowClose && recordings && controller)
-        recordings.resumeUploads(controller.recordingUploadContext());
-    })
-    .catch((error: unknown) => {
-      console.error(
-        JSON.stringify({
-          code: 'recording_cleanup_pending',
-          kind: error instanceof Error ? error.name : 'unknown',
-        }),
-      );
-    });
+  void maintenance.track(
+    recordings
+      .reconcile(controller.profile)
+      .then(() => {
+        if (!closingAudio && !allowClose && recordings && controller)
+          recordings.resumeUploads(controller.recordingUploadContext());
+      })
+      .catch((error: unknown) => {
+        console.error(
+          JSON.stringify({
+            code: 'recording_cleanup_pending',
+            kind: error instanceof Error ? error.name : 'unknown',
+          }),
+        );
+      }),
+  );
 }
 
 function localKey(directory: string): Buffer {
@@ -273,6 +279,30 @@ async function start() {
     },
   });
   const current = window;
+  const closing = new DesktopShutdown({
+    cancel: () => {
+      closingAudio = true;
+      controller?.dispose();
+    },
+    drain: async () => {
+      await Promise.all([
+        maintenance.drain(),
+        updates?.close(),
+        controller?.close(),
+      ]);
+      await recordings?.close(() => {});
+      delivery?.close();
+    },
+    release: () => {
+      store?.close();
+      store = null;
+      controller = null;
+      recordings = null;
+      updates = null;
+      delivery = null;
+    },
+  });
+  shutdown = closing;
   current.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   current.webContents.on('will-navigate', (event, url) => {
     if (url !== page) event.preventDefault();
@@ -323,6 +353,7 @@ async function start() {
     (event, input: unknown): DesktopUpdateResponse => {
       try {
         authorizeSender(event);
+        closing.assertOpen();
         const command = desktopUpdateCommandSchema.safeParse(input);
         if (!command.success)
           throw new LocalError(
@@ -358,461 +389,467 @@ async function start() {
             'The desktop request is invalid.',
           );
         const command = parsed.data;
-        if (command.operation === 'observePresentation') {
-          workspace().assertScope(command.scope);
-          const current = workspace().snapshot();
-          return {
-            ok: true,
-            observed:
-              current.selected_id === command.id &&
-              (delivery?.present(command.scope, command.id, command.token) ??
-                false),
-          };
-        }
         if (command.operation === 'closeReady') {
           if (!closeNonce || command.nonce !== closeNonce)
             throw new LocalError(
               'invalid_close_request',
               'No matching close operation is pending.',
             );
-          closingAudio = true;
-          try {
-            await recordings?.stop(() => {});
-          } catch (error) {
-            closingAudio = false;
-            throw error;
-          }
-          await updates?.close();
+          await closing.close();
           allowClose = true;
           current.close();
           return { ok: true, closing: true };
         }
-        if (command.operation === 'openRecoveryFolder') {
-          if (await shell.openPath(dataDirectory))
-            throw new LocalError(
-              'recovery_folder_failed',
-              'The recovery folder could not be opened.',
-            );
-          return failure
-            ? { ok: false, error: failure }
-            : { ok: true, state: state() };
-        }
-        const db = database();
-        if (command.operation === 'getChat') {
-          const view = await workspace().chat.read(command);
-          return desktopResponseSchema.parse({
-            ok: true,
-            chat_view: { scope: command.scope, view },
-          });
-        }
-        if (command.operation === 'watchChat') {
-          const active = workspace();
-          await active.chat.watch(command);
-          return desktopResponseSchema.parse({
-            ok: true,
-            state: active.snapshot(),
-          });
-        }
-        if (command.operation === 'getChatSource') {
-          const source = await workspace().chat.source(command);
-          return desktopResponseSchema.parse({
-            ok: true,
-            chat_source: { scope: command.scope, source },
-          });
-        }
-        if (
-          command.operation === 'askMeeting' ||
-          command.operation === 'controlChatTurn' ||
-          command.operation === 'deleteChatThread'
-        ) {
-          const active = workspace();
-          let thread: string | null;
-          if (command.operation === 'deleteChatThread') {
-            await active.chat.remove(command);
-            thread = null;
-          } else {
-            const turn =
-              command.operation === 'askMeeting'
-                ? await active.chat.start(command)
-                : await active.chat.control(command);
-            thread = turn.thread_id;
+        return await closing.run(async (): Promise<DesktopResponse> => {
+          if (command.operation === 'observePresentation') {
+            workspace().assertScope(command.scope);
+            const current = workspace().snapshot();
+            return {
+              ok: true,
+              observed:
+                current.selected_id === command.id &&
+                (delivery?.present(command.scope, command.id, command.token) ??
+                  false),
+            };
           }
-          const view = await active.chat.read({
-            operation: 'getChat',
-            scope: command.scope,
-            id: command.id,
-            thread_id: thread,
-            offset: 0,
-            refresh: false,
-          });
-          return desktopResponseSchema.parse({
-            ok: true,
-            chat_view: { scope: command.scope, view },
-          });
-        }
-        if (command.operation === 'getAccountUsage') {
-          const account = await workspace().accountUsage(command.scope);
-          return desktopResponseSchema.parse({
-            ok: true,
-            account_usage: { scope: command.scope, account },
-          });
-        }
-        if (command.operation === 'getTranscriptPage') {
-          const page = await workspace().transcriptPage(
-            command.scope,
-            command.id,
-            command.revision,
-            command.offset,
-          );
-          return desktopResponseSchema.parse({
-            ok: true,
-            transcript_page: {
+          if (command.operation === 'openRecoveryFolder') {
+            if (await shell.openPath(dataDirectory))
+              throw new LocalError(
+                'recovery_folder_failed',
+                'The recovery folder could not be opened.',
+              );
+            return failure
+              ? { ok: false, error: failure }
+              : { ok: true, state: state() };
+          }
+          const db = database();
+          if (command.operation === 'getChat') {
+            const view = await workspace().chat.read(command);
+            return desktopResponseSchema.parse({
+              ok: true,
+              chat_view: { scope: command.scope, view },
+            });
+          }
+          if (command.operation === 'watchChat') {
+            const active = workspace();
+            await active.chat.watch(command);
+            return desktopResponseSchema.parse({
+              ok: true,
+              state: active.snapshot(),
+            });
+          }
+          if (command.operation === 'getChatSource') {
+            const source = await workspace().chat.source(command);
+            return desktopResponseSchema.parse({
+              ok: true,
+              chat_source: { scope: command.scope, source },
+            });
+          }
+          if (
+            command.operation === 'askMeeting' ||
+            command.operation === 'controlChatTurn' ||
+            command.operation === 'deleteChatThread'
+          ) {
+            const active = workspace();
+            let thread: string | null;
+            if (command.operation === 'deleteChatThread') {
+              await active.chat.remove(command);
+              thread = null;
+            } else {
+              const turn =
+                command.operation === 'askMeeting'
+                  ? await active.chat.start(command)
+                  : await active.chat.control(command);
+              thread = turn.thread_id;
+            }
+            const view = await active.chat.read({
+              operation: 'getChat',
               scope: command.scope,
-              page,
-              presentation: delivery
-                ?.markers(command.scope, command.id)
-                .find(
-                  (value) =>
-                    value.kind === 'transcript_page' &&
-                    value.revision === page.revision &&
-                    value.offset === page.offset,
-                ),
-            },
-          });
-        }
-        if (command.operation === 'getTranscriptTimeline') {
-          const page = await workspace().transcriptTimeline(
-            command.scope,
-            command.id,
-            command.revision,
-            command.offset,
-          );
-          return desktopResponseSchema.parse({
-            ok: true,
-            transcript_timeline: { scope: command.scope, page },
-          });
-        }
-        if (command.operation === 'finalizeRecordingTranscript')
-          return desktopResponseSchema.parse({
-            ok: true,
-            state: await workspace().finalizeRecording(command),
-          });
-        if (command.operation === 'controlTranscriptionJob')
-          return desktopResponseSchema.parse({
-            ok: true,
-            state: await workspace().controlTranscription(command),
-          });
-        if (command.operation === 'applyTranscript')
-          return desktopResponseSchema.parse({
-            ok: true,
-            state: await workspace().applyTranscript(command),
-          });
-        if (command.operation === 'getSummaryTemplates') {
-          const catalog = await workspace().summaries.templates(
-            command.scope,
-            command.id,
-          );
-          return desktopResponseSchema.parse({
-            ok: true,
-            summary_templates: {
-              scope: command.scope,
-              document_id: command.id,
-              catalog,
-            },
-          });
-        }
-        if (command.operation === 'getSummaryProgress') {
-          const progress = await workspace().summaries.progress(command);
-          return desktopResponseSchema.parse({
-            ok: true,
-            summary_progress: { scope: command.scope, progress },
-          });
-        }
-        if (command.operation === 'watchSummary') {
-          const active = workspace();
-          active.assertScope(command.scope);
-          if (command.action === 'start')
-            await active.summaries.events.start(
+              id: command.id,
+              thread_id: thread,
+              offset: 0,
+              refresh: false,
+            });
+            return desktopResponseSchema.parse({
+              ok: true,
+              chat_view: { scope: command.scope, view },
+            });
+          }
+          if (command.operation === 'getAccountUsage') {
+            const account = await workspace().accountUsage(command.scope);
+            return desktopResponseSchema.parse({
+              ok: true,
+              account_usage: { scope: command.scope, account },
+            });
+          }
+          if (command.operation === 'getTranscriptPage') {
+            const page = await workspace().transcriptPage(
               command.scope,
               command.id,
-              command.job_id,
+              command.revision,
+              command.offset,
             );
-          else active.summaries.events.stop(command.job_id);
-          return desktopResponseSchema.parse({
-            ok: true,
-            state: active.snapshot(),
-          });
-        }
-        if (
-          command.operation === 'startSummary' ||
-          command.operation === 'controlSummary' ||
-          command.operation === 'applySummaryReview'
-        ) {
-          const active = workspace();
-          if (command.operation === 'startSummary')
-            await active.summaries.start(command);
-          else if (command.operation === 'controlSummary')
-            await active.summaries.control(command);
-          else await active.summaries.apply(command);
-          return desktopResponseSchema.parse({
-            ok: true,
-            state: active.snapshot(),
-          });
-        }
-        if (
-          command.operation === 'openSummaryReview' ||
-          command.operation === 'saveSummaryReview'
-        ) {
-          const active = workspace();
-          const review =
-            command.operation === 'openSummaryReview'
-              ? await active.summaries.open(command)
-              : active.summaries.save(command);
-          return desktopResponseSchema.parse({
-            ok: true,
-            summary_review: { scope: command.scope, review },
-          });
-        }
-        if (command.operation === 'getSummarySource') {
-          const source = await workspace().summaries.source(command);
-          return desktopResponseSchema.parse({
-            ok: true,
-            summary_source: { scope: command.scope, source },
-          });
-        }
-        if (command.operation === 'listAudioDevices') {
-          const active = workspace();
-          active.assertScope(command.scope);
-          const devices = await audio().listDevices();
-          active.assertScope(command.scope);
-          return desktopResponseSchema.parse({
-            ok: true,
-            audio_devices: { scope: command.scope, devices },
-          });
-        }
-        if (
-          command.operation === 'getRecordingState' ||
-          command.operation === 'startRecording' ||
-          command.operation === 'controlRecording' ||
-          command.operation === 'inspectRecording' ||
-          command.operation === 'recoverRecording' ||
-          command.operation === 'removeRecording' ||
-          command.operation === 'uploadRecording' ||
-          command.operation === 'pauseRecordingUpload' ||
-          command.operation === 'startLivePreview' ||
-          command.operation === 'stopLivePreview' ||
-          command.operation === 'retryRecordingCleanup' ||
-          command.operation === 'checkAudioStorage' ||
-          command.operation === 'setAudioStorageQuota' ||
-          command.operation === 'setAudioRetentionDays'
-        ) {
-          const active = workspace();
-          const profile = active.profile;
-          const authorize = () => active.assertScope(command.scope);
-          authorize();
-          const capture = audio();
-          if (!closingAudio && !allowClose)
-            capture.resumeUploads(active.recordingUploadContext());
-          if (command.operation === 'startRecording')
-            await capture.start(profile, command.id, command.tracks, authorize);
-          else if (command.operation === 'startLivePreview')
-            capture.startLive(profile, command.id, command.recording_id, {
-              locale: command.locale,
-              confirmed: command.confirmed,
-              context: active.recordingUploadContext(),
-              authorize,
-              prepare: async () => {
-                await active.synchronize();
-                authorize();
+            return desktopResponseSchema.parse({
+              ok: true,
+              transcript_page: {
+                scope: command.scope,
+                page,
+                presentation: delivery
+                  ?.markers(command.scope, command.id)
+                  .find(
+                    (value) =>
+                      value.kind === 'transcript_page' &&
+                      value.revision === page.revision &&
+                      value.offset === page.offset,
+                  ),
               },
             });
-          else if (command.operation === 'stopLivePreview')
-            capture.stopLive(
-              profile,
+          }
+          if (command.operation === 'getTranscriptTimeline') {
+            const page = await workspace().transcriptTimeline(
+              command.scope,
               command.id,
-              command.recording_id,
-              authorize,
+              command.revision,
+              command.offset,
             );
-          else if (command.operation === 'controlRecording')
-            await capture.control(
-              profile,
+            return desktopResponseSchema.parse({
+              ok: true,
+              transcript_timeline: { scope: command.scope, page },
+            });
+          }
+          if (command.operation === 'finalizeRecordingTranscript')
+            return desktopResponseSchema.parse({
+              ok: true,
+              state: await workspace().finalizeRecording(command),
+            });
+          if (command.operation === 'controlTranscriptionJob')
+            return desktopResponseSchema.parse({
+              ok: true,
+              state: await workspace().controlTranscription(command),
+            });
+          if (command.operation === 'applyTranscript')
+            return desktopResponseSchema.parse({
+              ok: true,
+              state: await workspace().applyTranscript(command),
+            });
+          if (command.operation === 'getSummaryTemplates') {
+            const catalog = await workspace().summaries.templates(
+              command.scope,
               command.id,
-              command.recording_id,
-              command.action,
-              authorize,
             );
-          else if (command.operation === 'inspectRecording')
-            await capture.inspect(
-              profile,
-              command.id,
-              command.recording_id,
-              authorize,
-            );
-          else if (command.operation === 'recoverRecording')
-            await capture.recover(
-              profile,
-              command.id,
-              command.recording_id,
-              authorize,
-            );
-          else if (command.operation === 'removeRecording') {
-            await capture.removeSavedAudio(
-              profile,
-              command.id,
-              command.recording_id,
-            );
-          } else if (command.operation === 'uploadRecording')
-            capture.requestUpload(
-              profile,
-              command.id,
-              command.recording_id,
-              command.accept_incomplete,
-            );
-          else if (command.operation === 'pauseRecordingUpload')
-            await capture.pauseUpload(
-              profile,
-              command.id,
-              command.recording_id,
-            );
-          else if (command.operation === 'retryRecordingCleanup')
-            await capture.cleanup();
-          else if (command.operation === 'setAudioRetentionDays')
-            await capture.setRetentionDays(profile, command.days, authorize);
-          else if (
-            command.operation === 'checkAudioStorage' ||
-            command.operation === 'setAudioStorageQuota'
-          )
-            await capture.checkStorage(
-              authorize,
-              command.operation === 'setAudioStorageQuota'
-                ? command.quota_gib
-                : undefined,
-            );
-          authorize();
-          const document =
-            command.operation === 'getRecordingState'
-              ? command.document_id
-              : 'id' in command
-                ? command.id
-                : null;
-          return desktopResponseSchema.parse({
-            ok: true,
-            audio_state: {
-              scope: command.scope,
-              state: capture.snapshot(
-                profile,
-                document,
-                command.operation === 'getRecordingState' ? command.offset : 0,
-              ),
-            },
-          });
-        }
-        if (
-          command.operation === 'export' ||
-          command.operation === 'exportSummaryReview'
-        ) {
-          const active = workspace();
-          active.assertScope(command.scope);
-          const profile = active.profile;
-          const draft = db.get(profile, command.id);
-          const summary =
-            command.operation === 'exportSummaryReview'
-              ? await active.summaries.export(command)
-              : null;
-          const suffix = command.format === 'markdown' ? 'md' : 'txt';
-          let name =
-            Array.from(
-              draft.title
-                .replace(/[<>:"/\\|?*\u0000-\u001f]/g, '')
-                .trim()
-                .replace(/[. ]+$/g, ''),
-            )
-              .slice(0, 100)
-              .join('') || 'Meeting';
-          if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu.test(name))
-            name = `_${name}`;
-          const result = await dialog.showSaveDialog(current, {
-            title:
-              summary === null
-                ? 'Export unencrypted notes'
-                : 'Export unencrypted summary draft',
-            defaultPath: join(
-              app.getPath('documents'),
-              `${name}${summary === null ? '' : '-summary'}.${suffix}`,
-            ),
-            filters: [
-              {
-                name: command.format === 'markdown' ? 'Markdown' : 'Plain text',
-                extensions: [suffix],
+            return desktopResponseSchema.parse({
+              ok: true,
+              summary_templates: {
+                scope: command.scope,
+                document_id: command.id,
+                catalog,
               },
-            ],
-            properties: ['showOverwriteConfirmation'],
-          });
-          if (result.canceled || !result.filePath)
-            return { ok: true, state: state(), notice: 'export_cancelled' };
-          active.assertScope(command.scope);
-          db.get(profile, command.id);
-          if (command.operation === 'exportSummaryReview')
-            active.summaries.assertExport(command);
-          const temporary = `${result.filePath}.${randomUUID()}.tmp`;
-          try {
-            await writeFile(
-              temporary,
-              exportMeeting(
-                {
-                  ...draft,
-                  ...(summary === null
-                    ? {}
-                    : {
-                        title: `${draft.title} - Summary draft`,
-                        content: richTextFromPlainText(summary),
-                      }),
-                  notes: summary ?? richTextToPlainText(draft.content),
+            });
+          }
+          if (command.operation === 'getSummaryProgress') {
+            const progress = await workspace().summaries.progress(command);
+            return desktopResponseSchema.parse({
+              ok: true,
+              summary_progress: { scope: command.scope, progress },
+            });
+          }
+          if (command.operation === 'watchSummary') {
+            const active = workspace();
+            active.assertScope(command.scope);
+            if (command.action === 'start')
+              await active.summaries.events.start(
+                command.scope,
+                command.id,
+                command.job_id,
+              );
+            else active.summaries.events.stop(command.job_id);
+            return desktopResponseSchema.parse({
+              ok: true,
+              state: active.snapshot(),
+            });
+          }
+          if (
+            command.operation === 'startSummary' ||
+            command.operation === 'controlSummary' ||
+            command.operation === 'applySummaryReview'
+          ) {
+            const active = workspace();
+            if (command.operation === 'startSummary')
+              await active.summaries.start(command);
+            else if (command.operation === 'controlSummary')
+              await active.summaries.control(command);
+            else await active.summaries.apply(command);
+            return desktopResponseSchema.parse({
+              ok: true,
+              state: active.snapshot(),
+            });
+          }
+          if (
+            command.operation === 'openSummaryReview' ||
+            command.operation === 'saveSummaryReview'
+          ) {
+            const active = workspace();
+            const review =
+              command.operation === 'openSummaryReview'
+                ? await active.summaries.open(command)
+                : active.summaries.save(command);
+            return desktopResponseSchema.parse({
+              ok: true,
+              summary_review: { scope: command.scope, review },
+            });
+          }
+          if (command.operation === 'getSummarySource') {
+            const source = await workspace().summaries.source(command);
+            return desktopResponseSchema.parse({
+              ok: true,
+              summary_source: { scope: command.scope, source },
+            });
+          }
+          if (command.operation === 'listAudioDevices') {
+            const active = workspace();
+            active.assertScope(command.scope);
+            const devices = await audio().listDevices();
+            active.assertScope(command.scope);
+            return desktopResponseSchema.parse({
+              ok: true,
+              audio_devices: { scope: command.scope, devices },
+            });
+          }
+          if (
+            command.operation === 'getRecordingState' ||
+            command.operation === 'startRecording' ||
+            command.operation === 'controlRecording' ||
+            command.operation === 'inspectRecording' ||
+            command.operation === 'recoverRecording' ||
+            command.operation === 'removeRecording' ||
+            command.operation === 'uploadRecording' ||
+            command.operation === 'pauseRecordingUpload' ||
+            command.operation === 'startLivePreview' ||
+            command.operation === 'stopLivePreview' ||
+            command.operation === 'retryRecordingCleanup' ||
+            command.operation === 'checkAudioStorage' ||
+            command.operation === 'setAudioStorageQuota' ||
+            command.operation === 'setAudioRetentionDays'
+          ) {
+            const active = workspace();
+            const profile = active.profile;
+            const authorize = () => active.assertScope(command.scope);
+            authorize();
+            const capture = audio();
+            if (!closingAudio && !allowClose)
+              capture.resumeUploads(active.recordingUploadContext());
+            if (command.operation === 'startRecording')
+              await capture.start(
+                profile,
+                command.id,
+                command.tracks,
+                authorize,
+              );
+            else if (command.operation === 'startLivePreview')
+              capture.startLive(profile, command.id, command.recording_id, {
+                locale: command.locale,
+                confirmed: command.confirmed,
+                context: active.recordingUploadContext(),
+                authorize,
+                prepare: async () => {
+                  await active.synchronize();
+                  authorize();
                 },
-                command.format,
+              });
+            else if (command.operation === 'stopLivePreview')
+              capture.stopLive(
+                profile,
+                command.id,
+                command.recording_id,
+                authorize,
+              );
+            else if (command.operation === 'controlRecording')
+              await capture.control(
+                profile,
+                command.id,
+                command.recording_id,
+                command.action,
+                authorize,
+              );
+            else if (command.operation === 'inspectRecording')
+              await capture.inspect(
+                profile,
+                command.id,
+                command.recording_id,
+                authorize,
+              );
+            else if (command.operation === 'recoverRecording')
+              await capture.recover(
+                profile,
+                command.id,
+                command.recording_id,
+                authorize,
+              );
+            else if (command.operation === 'removeRecording') {
+              await capture.removeSavedAudio(
+                profile,
+                command.id,
+                command.recording_id,
+              );
+            } else if (command.operation === 'uploadRecording')
+              capture.requestUpload(
+                profile,
+                command.id,
+                command.recording_id,
+                command.accept_incomplete,
+              );
+            else if (command.operation === 'pauseRecordingUpload')
+              await capture.pauseUpload(
+                profile,
+                command.id,
+                command.recording_id,
+              );
+            else if (command.operation === 'retryRecordingCleanup')
+              await capture.cleanup();
+            else if (command.operation === 'setAudioRetentionDays')
+              await capture.setRetentionDays(profile, command.days, authorize);
+            else if (
+              command.operation === 'checkAudioStorage' ||
+              command.operation === 'setAudioStorageQuota'
+            )
+              await capture.checkStorage(
+                authorize,
+                command.operation === 'setAudioStorageQuota'
+                  ? command.quota_gib
+                  : undefined,
+              );
+            authorize();
+            const document =
+              command.operation === 'getRecordingState'
+                ? command.document_id
+                : 'id' in command
+                  ? command.id
+                  : null;
+            return desktopResponseSchema.parse({
+              ok: true,
+              audio_state: {
+                scope: command.scope,
+                state: capture.snapshot(
+                  profile,
+                  document,
+                  command.operation === 'getRecordingState'
+                    ? command.offset
+                    : 0,
+                ),
+              },
+            });
+          }
+          if (
+            command.operation === 'export' ||
+            command.operation === 'exportSummaryReview'
+          ) {
+            const active = workspace();
+            active.assertScope(command.scope);
+            const profile = active.profile;
+            const draft = db.get(profile, command.id);
+            const summary =
+              command.operation === 'exportSummaryReview'
+                ? await active.summaries.export(command)
+                : null;
+            const suffix = command.format === 'markdown' ? 'md' : 'txt';
+            let name =
+              Array.from(
+                draft.title
+                  .replace(/[<>:"/\\|?*\u0000-\u001f]/g, '')
+                  .trim()
+                  .replace(/[. ]+$/g, ''),
+              )
+                .slice(0, 100)
+                .join('') || 'Meeting';
+            if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu.test(name))
+              name = `_${name}`;
+            const result = await dialog.showSaveDialog(current, {
+              title:
+                summary === null
+                  ? 'Export unencrypted notes'
+                  : 'Export unencrypted summary draft',
+              defaultPath: join(
+                app.getPath('documents'),
+                `${name}${summary === null ? '' : '-summary'}.${suffix}`,
               ),
-              { flag: 'wx', mode: 0o600, flush: true },
-            );
+              filters: [
+                {
+                  name:
+                    command.format === 'markdown' ? 'Markdown' : 'Plain text',
+                  extensions: [suffix],
+                },
+              ],
+              properties: ['showOverwriteConfirmation'],
+            });
+            if (result.canceled || !result.filePath)
+              return { ok: true, state: state(), notice: 'export_cancelled' };
             active.assertScope(command.scope);
             db.get(profile, command.id);
             if (command.operation === 'exportSummaryReview')
               active.summaries.assertExport(command);
-            await rename(temporary, result.filePath);
-          } finally {
-            await rm(temporary, { force: true });
+            const temporary = `${result.filePath}.${randomUUID()}.tmp`;
+            try {
+              await writeFile(
+                temporary,
+                exportMeeting(
+                  {
+                    ...draft,
+                    ...(summary === null
+                      ? {}
+                      : {
+                          title: `${draft.title} - Summary draft`,
+                          content: richTextFromPlainText(summary),
+                        }),
+                    notes: summary ?? richTextToPlainText(draft.content),
+                  },
+                  command.format,
+                ),
+                { flag: 'wx', mode: 0o600, flush: true },
+              );
+              active.assertScope(command.scope);
+              db.get(profile, command.id);
+              if (command.operation === 'exportSummaryReview')
+                active.summaries.assertExport(command);
+              await rename(temporary, result.filePath);
+            } finally {
+              await rm(temporary, { force: true });
+            }
+            return { ok: true, state: state(), notice: 'exported' };
           }
-          return { ok: true, state: state(), notice: 'exported' };
-        }
-        if (
-          recordings?.capturing &&
-          [
-            'connect',
-            'activateWorkspace',
-            'workOffline',
-            'disconnect',
-          ].includes(command.operation)
-        )
-          throw new LocalError(
-            'recording_in_progress',
-            'Stop recording before changing accounts or workspaces.',
-          );
-        if (command.operation === 'delete' && recordings?.capturing) {
-          workspace().assertScope(command.scope);
-          const active = recordings.snapshot(workspace().profile, null).active;
-          if (active?.document_id === command.id)
-            await recordings.control(
-              workspace().profile,
-              command.id,
-              active.id,
-              'stop',
-              () => workspace().assertScope(command.scope),
+          if (
+            recordings?.capturing &&
+            [
+              'connect',
+              'activateWorkspace',
+              'workOffline',
+              'disconnect',
+            ].includes(command.operation)
+          )
+            throw new LocalError(
+              'recording_in_progress',
+              'Stop recording before changing accounts or workspaces.',
             );
-        }
-        const result = await workspace().execute(command);
-        audioMaintenance();
-        return desktopResponseSchema.parse({
-          ok: true,
-          state: result,
+          if (command.operation === 'delete' && recordings?.capturing) {
+            workspace().assertScope(command.scope);
+            const active = recordings.snapshot(
+              workspace().profile,
+              null,
+            ).active;
+            if (active?.document_id === command.id)
+              await recordings.control(
+                workspace().profile,
+                command.id,
+                active.id,
+                'stop',
+                () => workspace().assertScope(command.scope),
+              );
+          }
+          const result = await workspace().execute(command);
+          audioMaintenance();
+          return desktopResponseSchema.parse({
+            ok: true,
+            state: result,
+          });
         });
       } catch (error) {
         return { ok: false, error: safeError(error) };
@@ -826,13 +863,6 @@ async function start() {
     current.webContents.send('notes:flush', closeNonce);
   });
   current.on('closed', () => {
-    void updates?.close();
-    updates = null;
-    controller?.dispose();
-    delivery?.close();
-    controller = null;
-    store?.close();
-    store = null;
     window = null;
   });
   await current.loadURL(page);
@@ -848,7 +878,25 @@ else {
     window?.show();
     window?.focus();
   });
-  app.on('window-all-closed', () => app.quit());
+  const finishQuit = () => {
+    void (shutdown?.close() ?? Promise.resolve())
+      .then(() => app.quit())
+      .catch((error: unknown) => {
+        console.error(
+          JSON.stringify({
+            code: 'desktop_shutdown_failed',
+            kind: error instanceof Error ? error.name : 'unknown',
+          }),
+        );
+      });
+  };
+  app.on('before-quit', (event) => {
+    if (!shutdown || shutdown.complete) return;
+    event.preventDefault();
+    if (window) window.close();
+    else finishQuit();
+  });
+  app.on('window-all-closed', finishQuit);
   void app
     .whenReady()
     .then(start)

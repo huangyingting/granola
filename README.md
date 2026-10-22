@@ -439,8 +439,18 @@ probe exercises the guardian and client together against the unsigned app and
 requires a durable trust-rejection outcome and released runtime locks. This is
 negative-path evidence, not a signed installation acceptance.
 
+Normal window close and application quit now use a terminal shutdown barrier.
+The editor flushes once and stays mounted but read-only while Main seals both
+IPC surfaces, cancels workspace activity and drains admitted commands. Main
+awaits maintenance, downloads, live chat/summary subscriptions, retired
+synchronizations, audio helpers/uploads and retention reads before closing
+SQLite. A failed close keeps admission sealed and offers an in-page retry
+without attempting another save into the disposed workspace. This is final
+resource shutdown, not a reversible update-preparation pause or installation
+authorization.
+
 **Desktop activation remains disconnected.** The activation coordinator must
-use this client and coordinate editor/recording/background/database shutdown,
+use the worker client and this shutdown barrier in its authenticated handoff,
 then integrate restart health and interrupted-install/schema-compatible recovery.
 A worker's post-load manifest check alone is insufficient. Installation/restart
 controls remain disabled, and real first-party signed update acceptance is still

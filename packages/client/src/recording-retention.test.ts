@@ -140,6 +140,34 @@ describe('Main-owned local audio retention', () => {
   async function idle(reads: Set<AbortController>) {
     await vi.waitFor(() => expect(reads.size).toBe(0));
   }
+  it('waits for a cancelled retention read to settle before shutdown returns', async () => {
+    const c = saved();
+    let finish!: () => void;
+    let signal: AbortSignal | undefined;
+    const pending = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    c.request.mockImplementation(async (_path, schema, options) => {
+      signal = options?.signal;
+      await pending;
+      return schema.parse(c.status);
+    });
+    const remember = vi.spyOn(local, 'rememberRecordingRetention');
+    c.controller.resumeUploads(c.context);
+    let stopped = false;
+    const stopping = c.controller
+      .close(() => {})
+      .then(() => {
+        stopped = true;
+      });
+    expect(signal?.aborted).toBe(true);
+    await Promise.resolve();
+    expect(stopped).toBe(false);
+    finish();
+    await stopping;
+    expect(c.reads.size).toBe(0);
+    expect(remember).not.toHaveBeenCalled();
+  });
   it('reads authorized metadata only, caches a bounded deadline and deletes only local audio offline after restart', async () => {
     const c = saved();
     c.controller.resumeUploads(c.context);
