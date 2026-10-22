@@ -142,6 +142,15 @@ export function ChatPanel({ state, draft, beforeStart }: Props) {
       setConsent(false);
     }
   }, [unresolved ? saved.consent_id : null]);
+  useEffect(() => {
+    if (
+      saved?.rejected ||
+      (saved?.turn_id && saved.consent_id === consentId.current)
+    ) {
+      consentId.current = crypto.randomUUID();
+      setConsent(false);
+    }
+  }, [saved?.rejected, saved?.turn_id, saved?.consent_id]);
   async function mutate(command: DesktopCommand) {
     const version = epoch.current;
     const response = await window.notes.invoke(command);

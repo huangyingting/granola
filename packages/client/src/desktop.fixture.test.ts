@@ -111,13 +111,19 @@ describe('Windows desktop synthetic service contract', () => {
         refresh: true,
       });
     await read();
-    fixture.state.lose_chat_response = true;
+    fixture.state.change_chat_before_submit = true;
     await expect(controller.chat.start(command)).rejects.toMatchObject({
+      code: 'revision_conflict',
+    });
+    expect((await read()).submission?.rejected).toBe(true);
+    const request = { ...command, consent_id: randomUUID() };
+    fixture.state.lose_chat_response = true;
+    await expect(controller.chat.start(request)).rejects.toMatchObject({
       code: 'service_unavailable',
     });
     expect(fixture.state.chatTurns.size).toBe(1);
     const turn = await controller.chat.start({
-      ...command,
+      ...request,
       new_attempt: false,
     });
     fixture.failChat(turn.id);
@@ -160,7 +166,10 @@ describe('Windows desktop synthetic service contract', () => {
       turn_id: turn.id,
       citation: completed.result!.answer.answer.citations[0]!,
     });
-    expect(source.excerpts[0]?.text).toBe(document.notes);
+    expect(source.excerpts[0]?.text).toBe(
+      fixture.state.documents.get(document.id)!.notes,
+    );
+    expect(source.citation.revision).toBe(2);
     const remove = {
       operation: 'deleteChatThread' as const,
       scope: controller.scope,

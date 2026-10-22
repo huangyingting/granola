@@ -167,6 +167,7 @@ export async function desktopFixture() {
     summary_online: true,
     chatTurns,
     lose_chat_response: false,
+    change_chat_before_submit: false,
     lose_chat_resume_response: false,
     lose_chat_delete_response: false,
     chat_resume_tokens: [] as string[],
@@ -836,6 +837,14 @@ export async function desktopFixture() {
           return turn
             ? send(response, turn, 202)
             : error(response, 'chat_request_deleted', 410);
+        }
+        if (state.change_chat_before_submit) {
+          state.change_chat_before_submit = false;
+          change(
+            id,
+            `${existing.notes}\nNew synthetic evidence after preparation.`,
+          );
+          return error(response, 'revision_conflict', 409);
         }
         if (
           value.note_revision !== existing.revision ||

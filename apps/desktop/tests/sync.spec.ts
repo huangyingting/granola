@@ -93,6 +93,25 @@ test('recovers consented chat and recovery receipts across Windows restarts, ins
         name: 'Send this question and frozen meeting evidence to Azure for an answer.',
       })
       .check();
+    fixture.state.change_chat_before_submit = true;
+    await page
+      .getByRole('button', { name: 'Ask question', exact: true })
+      .click();
+    await expect(page.getByRole('alert')).toContainText('revision conflict');
+    expect(fixture.state.chatTurns.size).toBe(0);
+    await expect(
+      page.getByRole('button', { name: 'Ask question', exact: true }),
+    ).toBeDisabled();
+    await expect(
+      page.getByRole('checkbox', {
+        name: 'Send this question and frozen meeting evidence to Azure for an answer.',
+      }),
+    ).not.toBeChecked();
+    await page
+      .getByRole('checkbox', {
+        name: 'Send this question and frozen meeting evidence to Azure for an answer.',
+      })
+      .check();
     fixture.state.lose_chat_response = true;
     await page
       .getByRole('button', { name: 'Ask question', exact: true })
