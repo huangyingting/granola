@@ -14,7 +14,8 @@ public static class UpdateParentHandoff
         WaitForCommittedExitAsync(parent, input, output, TimeSpan.FromSeconds(30), TimeSpan.FromMinutes(2), token);
 
     internal static async Task WaitForCommittedExitAsync(UpdateParentLease parent, Stream input, Stream output,
-        TimeSpan prepareTimeout, TimeSpan exitTimeout, CancellationToken token = default)
+        TimeSpan prepareTimeout, TimeSpan exitTimeout, CancellationToken token = default,
+        Func<CancellationToken, Task>? onCommitted = null)
     {
         using var prepare = CancellationTokenSource.CreateLinkedTokenSource(token);
         using var exit = CancellationTokenSource.CreateLinkedTokenSource(token);
@@ -31,6 +32,7 @@ public static class UpdateParentHandoff
             var operation = challenge.Consume(message);
             if (operation == "cancel") throw new UpdateHandoffException("update_handoff_cancelled");
             if (parent.HasExited) throw new UpdateHandoffException("update_parent_missing");
+            if (onCommitted is not null) await onCommitted(prepare.Token).WaitAsync(prepare.Token);
             await FrameCodec.WriteJsonAsync(output,
                 new UpdateParentCommitted(1, "update_parent_committed", parent.Identity), prepare.Token).WaitAsync(prepare.Token);
             prepare.Token.ThrowIfCancellationRequested();

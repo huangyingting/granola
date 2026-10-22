@@ -13,6 +13,8 @@ import {
   updateParentCommittedSchema,
   updateParentIdentitySchema,
   updateParentReadySchema,
+  updateWorkerOutcomeSchema,
+  updateWorkerRequestSchema,
 } from './updates.js';
 
 const policy = {
@@ -212,6 +214,88 @@ describe('packaged update and feed contracts', () => {
       expect(
         stagedUpdateRuntimeSchema.safeParse({ ...runtime, ...change }).success,
       ).toBe(false);
+  });
+  it('keeps worker setup Main-only without caller-selected trust policy or installer commands', () => {
+    const request = {
+      parent_pid: 1234,
+      application: 'C:\\Installed app\\Windows AI Notes Preview.exe',
+      current_version: '0.1.0',
+      offered_version: '0.1.1',
+      installer: 'C:\\Private cache\\candidate.exe',
+      bytes: feed.bytes,
+      sha512: feed.sha512,
+      runtime_sha256: 'ab'.repeat(32),
+    };
+    expect(updateWorkerRequestSchema.parse(request)).toEqual(request);
+    for (const extra of [
+      { expected: policy },
+      { certificate_sha256: policy.certificate_sha256 },
+      { feed_url: policy.feed_url },
+      { arguments: ['/allusers'] },
+      { destination: 'C:\\Other application' },
+      { runtime_sha256: 'AB'.repeat(32) },
+      { parent_pid: 0 },
+    ])
+      expect(
+        updateWorkerRequestSchema.safeParse({ ...request, ...extra }).success,
+      ).toBe(false);
+  });
+  it('distinguishes durable installation intent and failure from verified installed files, not restart health', () => {
+    const outcome = {
+      version: 1,
+      session_id: '11111111-1111-4111-8111-111111111111',
+      current_version: '0.1.0',
+      offered_version: '0.1.1',
+      phase: 'installing',
+      code: 'update_installer_starting',
+      installer_started: false,
+      installer_process: null,
+      installer_exit_code: null,
+      updated_at: '2026-10-22T12:00:00.1234567Z',
+    };
+    expect(updateWorkerOutcomeSchema.parse(outcome)).toEqual(outcome);
+    expect(
+      updateWorkerOutcomeSchema.safeParse({
+        ...outcome,
+        installer_started: true,
+      }).success,
+    ).toBe(true);
+    for (const change of [
+      { phase: 'installed' },
+      { phase: 'prepared', installer_started: true },
+      { phase: 'installing', installer_exit_code: 0 },
+      { phase: 'failed', installer_exit_code: 0 },
+      { phase: 'healthy' },
+      { phase: 'installed', installer_started: true, installer_exit_code: 1 },
+      { phase: 'installed', installer_started: true, installer_exit_code: 0 },
+      {
+        installer_process: {
+          pid: 1234,
+          creation_file_time: '134000000000000001',
+        },
+      },
+      {
+        installer_started: true,
+        installer_process: { pid: 0, creation_file_time: '134000000000000001' },
+      },
+      { expected: policy },
+      { rollback_safe: true },
+    ])
+      expect(
+        updateWorkerOutcomeSchema.safeParse({ ...outcome, ...change }).success,
+      ).toBe(false);
+    expect(
+      updateWorkerOutcomeSchema.safeParse({
+        ...outcome,
+        phase: 'installed',
+        installer_started: true,
+        installer_exit_code: 0,
+        installer_process: {
+          pid: 1234,
+          creation_file_time: '134000000000000001',
+        },
+      }).success,
+    ).toBe(true);
   });
   it.each([
     'http://updates.example/stable.json',

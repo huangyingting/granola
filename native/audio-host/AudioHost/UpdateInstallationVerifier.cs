@@ -22,6 +22,15 @@ public static class UpdateInstallationVerifier
     private const string UninstallKey = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\" + ApplicationGuid;
 
     public static UpdateInstallationResult Verify(string executable, string version, string product)
+        => Verify(executable, version, product, bundled: true);
+
+    internal static UpdateInstallationResult VerifyWorkerApplication(UpdateParentLease parent, string version, string product)
+    {
+        ObjectDisposedException.ThrowIf(parent.IsDisposed, parent);
+        return Verify(parent.Executable, version, product, bundled: false);
+    }
+
+    private static UpdateInstallationResult Verify(string executable, string version, string product, bool bundled)
     {
         if (!UpdateTrustVerifier.IsStableVersion(version) || !ValidProduct(product) ||
             !CanonicalPath(executable) || !string.Equals(Path.GetFileName(executable), $"{product}.exe", StringComparison.OrdinalIgnoreCase))
@@ -35,7 +44,7 @@ public static class UpdateInstallationVerifier
             var directory = Path.GetDirectoryName(executable);
             if (directory is null)
                 return UpdateInstallationResult.Rejected("update_installation_arguments");
-            if (!UpdatePathLock.SameDirectory(Path.TrimEndingDirectorySeparator(AppContext.BaseDirectory),
+            if (bundled && !UpdatePathLock.SameDirectory(Path.TrimEndingDirectorySeparator(AppContext.BaseDirectory),
                 Path.Combine(directory, "resources", "audio-host")))
                 return UpdateInstallationResult.Rejected("update_installation_helper");
             RequireRegularPath(executable, directory: false);

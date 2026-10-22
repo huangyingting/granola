@@ -18,16 +18,18 @@ public sealed class UpdateParentLease : IDisposable
 {
     private readonly Process process;
     public UpdateParentIdentity Identity { get; }
+    internal string Executable { get; }
     public bool IsDisposed { get; private set; }
     public bool HasExited
     {
         get { ObjectDisposedException.ThrowIf(IsDisposed, this); return process.HasExited; }
     }
 
-    private UpdateParentLease(Process process, UpdateParentIdentity identity)
+    private UpdateParentLease(Process process, UpdateParentIdentity identity, string executable)
     {
         this.process = process;
         Identity = identity;
+        Executable = executable;
     }
 
     public static UpdateParentResult Open(int expectedPid, string executable, out UpdateParentLease? lease)
@@ -97,7 +99,7 @@ public sealed class UpdateParentLease : IDisposable
                 return UpdateParentResult.Rejected("update_parent_mismatch");
             var parent = new UpdateParentIdentity(pid,
                 candidate.StartTime.ToUniversalTime().ToFileTimeUtc().ToString(CultureInfo.InvariantCulture));
-            lease = new(candidate, parent);
+            lease = new(candidate, parent, executable);
             candidate = null;
             return new(1, true, "update_parent_matched", parent);
         }

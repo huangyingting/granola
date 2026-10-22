@@ -99,15 +99,21 @@ public sealed class UpdateParentHandoffTests
         Assert.False(fixture.Process.HasExited);
     }
 
-    private sealed class Fixture(NamedPipeServerStream worker, NamedPipeClientStream main) : IAsyncDisposable
+    internal sealed class Fixture(NamedPipeServerStream worker, NamedPipeClientStream main) : IAsyncDisposable
     {
         internal readonly CancellationTokenSource Deadline = new(TimeSpan.FromSeconds(30));
         private UpdateParentLease? parent;
         private Process? process;
         internal NamedPipeClientStream Main => main;
+        internal Stream Worker => worker;
         internal UpdateParentLease Parent => parent ?? throw new InvalidOperationException("No fixture lease was opened.");
         internal Process Process => process ?? throw new InvalidOperationException("No fixture process was started.");
         internal Task? Pending { get; private set; }
+        internal void Track(Task task)
+        {
+            if (Pending is not null) throw new InvalidOperationException("A fixture session is already running.");
+            Pending = task;
+        }
 
         internal static async Task<Fixture> OpenAsync()
         {

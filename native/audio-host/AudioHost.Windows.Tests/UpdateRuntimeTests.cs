@@ -125,5 +125,58 @@ public sealed class UpdateRuntimeTests : IDisposable
         Assert.Empty(Directory.EnumerateFileSystemEntries(parent));
     }
 
+    [Fact]
+    public void ReopensTheExactStagedManifestAndRetainsEveryRuntimeFileAndAncestorUntilDisposal()
+    {
+        var staged = UpdateRuntimeStager.Copy(source, source, parent, ["AudioHost.exe"]);
+        using (var runtime = UpdateRuntimeLease.Open(staged.Directory, source, staged.Sha256, ["AudioHost.exe"]))
+        {
+            using var inventory = UpdateRuntimeInventory.Open(staged.Directory, ["AudioHost.exe"]);
+            Assert.Equal(staged.Sha256, inventory.Manifest());
+            Assert.Equal(staged.Bytes, inventory.Bytes);
+            Assert.Throws<IOException>(() => File.WriteAllText(staged.Executable, "Replacement must fail."));
+            Assert.Throws<IOException>(() => File.Delete(Path.Combine(staged.Directory, "licenses0.txt")));
+            Assert.Throws<IOException>(() => Directory.Move(staged.Directory, staged.Directory + "-moved"));
+            Assert.Throws<IOException>(() => Directory.Move(parent, parent + "-moved"));
+        }
+        File.WriteAllText(staged.Executable, "Replacement after runtime lease disposal.");
+    }
+
+    [Fact]
+    public void RejectsAChangedRuntimeManifestAndReleasesItsFailedPreparationHandles()
+    {
+        var staged = UpdateRuntimeStager.Copy(source, source, parent, ["AudioHost.exe"]);
+        File.WriteAllText(staged.Executable, "Modified runtime bytes.");
+        Assert.Equal("update_worker_source", Assert.Throws<UpdateRuntimeException>(() =>
+            UpdateRuntimeLease.Open(staged.Directory, source, staged.Sha256, ["AudioHost.exe"])).Code);
+        File.Delete(staged.Executable);
+        Directory.Move(staged.Directory, staged.Directory + "-moved");
+    }
+
+    [Fact]
+    public void RejectsAStagedDirectoryThatWasMadeAccessibleToAnotherPrincipal()
+    {
+        var staged = UpdateRuntimeStager.Copy(source, source, parent, ["AudioHost.exe"]);
+        var directory = new DirectoryInfo(staged.Directory);
+        var permissions = directory.GetAccessControl();
+        permissions.AddAccessRule(new FileSystemAccessRule(new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null),
+            FileSystemRights.ReadAndExecute, AccessControlType.Allow));
+        directory.SetAccessControl(permissions);
+        Assert.Throws<UnauthorizedAccessException>(() =>
+            UpdateRuntimeLease.Open(staged.Directory, source, staged.Sha256, ["AudioHost.exe"]));
+        File.Delete(staged.Executable);
+    }
+
+    [Fact]
+    public async Task SerializesWorkerOperationsWithAnOsFileLeaseRatherThanAThreadAffineMutex()
+    {
+        var path = Path.Combine(parent, "activation.lock");
+        using (var first = UpdateOperationLock.OpenFile(path))
+            Assert.Equal("update_worker_busy", (await Assert.ThrowsAsync<WindowsAiNotes.Updates.UpdateHandoffException>(
+                () => Task.Run(() => { using var second = UpdateOperationLock.OpenFile(path); }))).Code);
+        using var reopened = UpdateOperationLock.OpenFile(path);
+        Assert.True(reopened.CanWrite);
+    }
+
     public void Dispose() => Directory.Delete(root, recursive: true);
 }

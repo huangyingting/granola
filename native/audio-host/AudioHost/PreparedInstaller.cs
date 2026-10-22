@@ -91,7 +91,7 @@ public sealed class PreparedInstaller : IDisposable
         }
     }
 
-    private static bool ValidHash(string value)
+    internal static bool ValidHash(string value)
     {
         Span<byte> bytes = stackalloc byte[64];
         return value.Length == 88 && Convert.TryFromBase64String(value, bytes, out var length) &&

@@ -9,6 +9,38 @@ if (!OperatingSystem.IsWindows())
     Console.Error.WriteLine("platform_unsupported: AudioHost capture and DPAPI require Windows 11.");
     return 1;
 }
+if (args.Length > 0 && args[0] == "--apply-update")
+{
+    await using var workerInput = Console.OpenStandardInput();
+    await using var workerOutput = Console.OpenStandardOutput();
+    UpdateWorkerResult result;
+    try
+    {
+        if (args.Length != 1) throw new WindowsAiNotes.Updates.UpdateHandoffException("update_worker_arguments");
+        using var initialDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var bytes = await FrameCodec.ReadAsync(workerInput, 16_384, initialDeadline.Token).WaitAsync(initialDeadline.Token);
+        if (bytes is null) throw new WindowsAiNotes.Updates.UpdateHandoffException("update_worker_arguments");
+        result = await UpdateInstallerWorker.RunAsync(UpdateWorkerRequest.Parse(bytes), workerInput, workerOutput);
+    }
+    catch (Exception error) when (error is WindowsAiNotes.Updates.UpdateHandoffException or AudioException or
+        IOException or OperationCanceledException or UnauthorizedAccessException)
+    {
+        result = new(1, false, error switch
+        {
+            WindowsAiNotes.Updates.UpdateHandoffException handoff => handoff.Code,
+            OperationCanceledException => "update_handoff_timeout",
+            AudioException or EndOfStreamException => "update_worker_arguments",
+            _ => "update_worker_unavailable"
+        }, null);
+    }
+    if (!result.Installed)
+    {
+        try { await FrameCodec.WriteJsonAsync(workerOutput, new { Version = 1, Event = "update_worker_failed", result.Code }); }
+        // After committed parent exit, only the durable journal and nonzero exit can report failure.
+        catch (IOException) { }
+    }
+    return result.Installed ? 0 : 2;
+}
 if (args.Length > 0 && args[0] == "--verify-update-parent")
 {
     UpdateParentLease? lease = null;

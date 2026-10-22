@@ -357,7 +357,7 @@ authorization to install.
 Native `PreparedInstaller` additionally opens only a newer stable first-party
 installer with pinned trust, size and SHA-512, retaining its read-only file handle
 and non-delete-sharing handles for every ancestor until disposal. This supplies
-the locked preparation primitive for a future independent update worker; it does
+the locked preparation primitive for the independent update worker; it does
 not execute an installer. Windows lock-mechanics tests use an explicitly internal
 generic signed-runtime fixture, not a production installer-signature bypass or
 positive first-party signing acceptance.
@@ -390,9 +390,37 @@ unknown/duplicate fields, stale challenges and repeated consumption are rejected
 Decision and exit waits have separate deadlines, and caller cancellation never
 kills the parent. Failed handoffs require their private channels to be closed,
 not reused. This library primitive does not launch a worker, prepare or execute
-an installer, or prove installer trust. The independent worker must compose it
-with fresh registration/policy validation and the retained installer lease.
-Application shutdown integration, durable outcomes and recovery remain unfinished.
+an installer, or prove installer trust.
+
+The native `--apply-update` entrypoint now composes these primitives over private
+inherited framed pipes. It retains the real Main process, reopens the private
+runtime against its exact manifest, reads trust pins only from the original
+installed application's packaged policy, and rechecks registration and signing
+before preparing a newer first-party installer. A per-user application lease
+prevents concurrent workers. The single-use journal flushes each phase and uses
+write-through atomic replacement: `committed` precedes acknowledgment, and
+`installing` precedes process launch. Only authenticated commit followed by exact
+parent exit permits the final original-policy/registration/signature recheck and
+shell-free, current-user silent NSIS launch. Its `/D=` destination remains the
+registered installation, and provider/signing secrets are not inherited.
+
+After launch, cancellation or a deadline never kills the installer or releases
+its path leases early. The journal records the installer PID and exact creation
+time when available; exit zero alone is insufficient—new registration and
+installed executable trust must also match before `installed` is recorded.
+An interrupted `installing` intent, even with `installer_started:false`, is
+ambiguous, not permission to retry. A saved PID or journal is not fresh process
+authorization or startup-health evidence. Windows orchestration tests use real
+pipes, retained processes and file locks with explicitly synthetic installer
+services; the actual installed unsigned app exercises worker rejection and its
+failed outcome, not first-party signed success.
+
+**Desktop activation remains disconnected.** Main must still secure runtime
+paths before process loading, coordinate editor/recording/background/database
+shutdown, and integrate restart health and interrupted-install/schema-compatible
+recovery. A worker's post-load manifest check does not close a pre-launch path
+substitution window. Installation/restart controls remain disabled, and real
+first-party signed update acceptance is still a release gate.
 
 ### Verified signed Windows candidates
 

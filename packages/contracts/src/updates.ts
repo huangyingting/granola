@@ -137,6 +137,57 @@ export const updateParentCommittedSchema = z.strictObject({
   event: z.literal('update_parent_committed'),
   parent: updateParentIdentitySchema,
 });
+export const updateWorkerRequestSchema = z.strictObject({
+  parent_pid: updateParentIdentitySchema.shape.pid,
+  application: localWindowsPath,
+  current_version: updateVersionSchema,
+  offered_version: updateVersionSchema,
+  installer: localWindowsPath,
+  bytes,
+  sha512,
+  runtime_sha256: handoffChallenge,
+});
+export const updateWorkerOutcomeSchema = z
+  .strictObject({
+    version: z.literal(1),
+    session_id: z.uuidv4(),
+    current_version: updateVersionSchema,
+    offered_version: updateVersionSchema,
+    phase: z.enum([
+      'preparing',
+      'prepared',
+      'committed',
+      'installing',
+      'installed',
+      'failed',
+    ]),
+    code: z.string().regex(/^[a-z][a-z0-9_]{0,99}$/u),
+    installer_started: z.boolean(),
+    installer_process: updateParentIdentitySchema.nullable(),
+    installer_exit_code: z
+      .number()
+      .int()
+      .min(-(2 ** 31))
+      .max(2 ** 31 - 1)
+      .nullable(),
+    updated_at: z.iso.datetime(),
+  })
+  .refine((value) =>
+    value.phase === 'installed'
+      ? value.installer_started &&
+        value.installer_exit_code === 0 &&
+        value.installer_process !== null
+      : ['preparing', 'prepared', 'committed'].includes(value.phase)
+        ? !value.installer_started &&
+          value.installer_exit_code === null &&
+          value.installer_process === null
+        : value.phase === 'installing'
+          ? value.installer_exit_code === null &&
+            (value.installer_started || value.installer_process === null)
+          : value.installer_started ||
+            (value.installer_exit_code === null &&
+              value.installer_process === null),
+  );
 export const cachedUpdateSchema = z.strictObject({
   version: z.literal(1),
   feed: updateFeedSchema,

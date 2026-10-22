@@ -23,6 +23,8 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { z } from 'zod';
 import { audioHostEnvironment } from '@windows-ai-notes/client/audio';
+import { FrameDecoder } from '@windows-ai-notes/contracts';
+import { updateWorkerOutcomeSchema } from '@windows-ai-notes/contracts/updates';
 import {
   stageUpdateRuntime,
   verifyInstallerUpdateArtifact,
@@ -308,6 +310,128 @@ test('preserves encrypted data and new edits through actual installation, compat
       await expect(
         verifyUpdateParent(runtime.executable, parent.pid, executable),
       ).rejects.toMatchObject({ code: 'update_parent_mismatch' });
+      const policyPath = join(current.resources, 'update-policy.json');
+      await writeFile(
+        policyPath,
+        JSON.stringify({
+          version: 1,
+          feed_url: 'https://updates.example/windows/stable.json',
+          certificate_sha256: '00'.repeat(32),
+          publisher: 'Synthetic nonexistent publisher',
+          product_name: base.productName,
+        }),
+        { flag: 'wx' },
+      );
+      try {
+        const rejected = await lifecycle.application.evaluate(
+          async (
+            _electron,
+            input: {
+              helper: string;
+              manifest: string;
+              version: string;
+              environment: NodeJS.ProcessEnv;
+            },
+          ) => {
+            const { spawn } = process.getBuiltinModule('node:child_process');
+            const { dirname } = process.getBuiltinModule('node:path');
+            const version = input.version.split('.').map(Number);
+            const body = Buffer.from(
+              JSON.stringify({
+                parent_pid: process.pid,
+                application: process.execPath,
+                current_version: input.version,
+                offered_version: `${version[0]}.${version[1]}.${Number(version[2]) + 1}`,
+                installer: input.helper,
+                bytes: 1,
+                sha512: Buffer.alloc(64).toString('base64'),
+                runtime_sha256: input.manifest,
+              }),
+            );
+            const header = Buffer.alloc(4);
+            header.writeUInt32LE(body.length);
+            return new Promise<{
+              code: number | null;
+              stdout: string;
+              stderr: string;
+            }>((resolve, reject) => {
+              const child = spawn(input.helper, ['--apply-update'], {
+                cwd: dirname(input.helper),
+                env: input.environment,
+                windowsHide: true,
+                stdio: 'pipe',
+                timeout: 60_000,
+              });
+              const output: Buffer[] = [];
+              const errors: Buffer[] = [];
+              let length = 0;
+              let errorLength = 0;
+              child.once('error', reject);
+              child.stdin.on('error', reject);
+              child.stdout.on('data', (bytes: Buffer) => {
+                length += bytes.length;
+                if (length > 16_384) {
+                  child.kill();
+                  reject(new Error('The worker exceeded its response bound.'));
+                } else output.push(bytes);
+              });
+              child.stderr.on('data', (bytes: Buffer) => {
+                errorLength += bytes.length;
+                if (errorLength > 16_384) {
+                  child.kill();
+                  reject(
+                    new Error('The worker exceeded its diagnostic bound.'),
+                  );
+                } else errors.push(bytes);
+              });
+              child.once('close', (code) =>
+                resolve({
+                  code,
+                  stdout: Buffer.concat(output).toString('base64'),
+                  stderr: Buffer.concat(errors).toString('utf8'),
+                }),
+              );
+              child.stdin.end(Buffer.concat([header, body]));
+            });
+          },
+          {
+            helper: runtime.executable,
+            manifest: runtime.sha256,
+            version,
+            environment: audioHostEnvironment(process.env),
+          },
+        );
+        expect(rejected.code).toBe(2);
+        expect(rejected.stderr).toBe('');
+        const decoder = new FrameDecoder();
+        expect(decoder.push(Buffer.from(rejected.stdout, 'base64'))).toEqual([
+          {
+            version: 1,
+            event: 'update_worker_failed',
+            code: 'update_signature_invalid',
+          },
+        ]);
+        decoder.finish();
+        expect(
+          updateWorkerOutcomeSchema.parse(
+            JSON.parse(
+              await readFile(
+                join(runtime.directory, 'update-outcome.json'),
+                'utf8',
+              ),
+            ),
+          ),
+        ).toMatchObject({
+          phase: 'failed',
+          code: 'update_signature_invalid',
+          installer_started: false,
+          installer_process: null,
+          installer_exit_code: null,
+          current_version: version,
+        });
+      } finally {
+        await rm(policyPath);
+      }
     } finally {
       await rm(runtime.directory, {
         recursive: true,
