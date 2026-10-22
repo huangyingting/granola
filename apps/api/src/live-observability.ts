@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { Writable } from 'node:stream';
 import type { FastifyInstance } from 'fastify';
-import { boundedTelemetry } from './observability.js';
+import { boundedTelemetry } from '@windows-ai-notes/ai/telemetry';
 
 export function liveObservability(
   app: FastifyInstance,

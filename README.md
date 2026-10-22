@@ -808,8 +808,8 @@ Completion duration covers the full response, not first-token latency or
 live-frame backlog; disconnected/incomplete responses may have no completion
 record. Restrict log access and configure the deployment's
 log sink for at most **30 days**; this command does not manage external log storage.
-End-to-end provider correlation, canonical transcription/LLM first-token
-instrumentation, lifetime outcome rates and independent deletion-ledger
+Speech SDK request bridging, end-to-end capture/canonical/client-delivery
+timing, measured lease-loss/lifetime outcome rates and independent deletion-ledger
 restore remain unfinished production-release requirements.
 
 ### Measured live gateway telemetry
@@ -847,6 +847,69 @@ intentional omissions and periodic snapshots refresh current socket counts.
 `live_gateway_telemetry_unavailable` reports output failure. Apply the same
 restricted-access, at-most-30-day external log retention as request telemetry;
 these best-effort records are neither durable audit nor a deletion ledger.
+
+### Azure HTTP request correlation and timing
+
+Migration **012** captures the server-generated originating request UUID on new
+jobs, chat turns and live leases. Existing rows remain **null**, not fabricated
+history. The origin stays with that retained resource independently of the
+30-day audit window. It identifies original acceptance, not a later
+resume/cancel request. Workers read the committed usage reservation's resource
+links and bind a fresh validated provider scope for each operation; concurrent
+calls do not inherit another task's context. Late usage callbacks retain their
+existing separate audit/accounting attribution.
+
+The normal worker subscribes to body-free version-1
+`provider_request_started` / `provider_call_completed` events for Azure HTTP
+summary, evidence extraction/merge, fact-summary, question-answer and batch
+Speech calls. Each invocation generates its own client request UUID, sent as
+`x-ms-client-request-id` when actual HTTP dispatch begins. Events link this UUID
+to the reserved usage call, original request and job/turn IDs; unscoped library
+calls are labeled `system` with null parent IDs. Embedders can explicitly use
+`registerProviderTelemetry` / `withProviderContext` from
+`@windows-ai-notes/ai/observability`; the library itself does not install global
+logging listeners. The worker unsubscribes and removes its sink listeners on
+shutdown.
+
+Completion records distinguish `returned`, `failed`, `cancelled` and `timed_out`.
+`dispatched=false` identifies pre-dispatch validation/cancellation or a
+zero-evidence answer; a dispatch record is **not proof of provider receipt or
+billable usage**. Durations use a monotonic clock:
+
+- `duration_ms` covers adapter validation, transport, output validation and
+  awaited preview/usage callbacks, not subsequent worker publication.
+- `response_headers_ms` runs from HTTP dispatch to response headers.
+- `first_content_ms` runs from dispatch to the first parsed nonempty SSE
+  content delta, before projecting or awaiting a preview. It is not the
+  provider's internal token-generation timestamp or first client rendering.
+- `response_body_ms` measures successful bounded response decoding/stream
+  reading, including awaited preview/usage backpressure; it is not pure wire
+  download time. Failed readers and non-streamed first-content timings remain
+  **null**, not zero.
+
+Only a 32-hex or dashed-GUID value from the first available
+`apim-request-id`, `x-request-id` or `x-ms-request-id` response header is admitted,
+normalized to lowercase 32-hex. Missing/rejected values are reported explicitly
+without their contents. Sending a client ID does not establish that a particular
+Azure deployment echoes or retains it; actual response correlation is available
+only when an admitted provider ID is present. No other headers, endpoint/model
+configuration, notes, prompts, answers, audio, payloads or exception text/names
+are logged.
+
+Provider completion is **not job success, semantic approval, canonical
+publication or final billing**: deletion can fence publication after the adapter
+returns, and known usage remains settled. Database accounting and durable
+lifecycle audit remain authoritative. Live Speech SDK/thread request bridging
+is separate and not covered by these HTTP adapter events.
+
+The same bounded writer serves request/live/provider telemetry. Backpressure
+produces exact intentional `provider_telemetry_dropped` counts rather than an
+unbounded queue; output failure emits `provider_telemetry_unavailable` without
+changing provider results. Unexpected diagnostic shapes emit
+`provider_telemetry_invalid_event`, never their bodies. Configure restricted
+external log access and at most **30 days** of retention; dropped/crashed/missing
+telemetry must not be interpreted as complete lifetime outcomes or a deletion
+ledger.
 
 ### Durable lifecycle audits
 

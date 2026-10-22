@@ -13,6 +13,7 @@ import { canonicalJson } from '@windows-ai-notes/contracts/content';
 import type { Database, Transaction, ClaimedJob } from './index.js';
 import { LIVE_MEDIA_MS, type LiveClaim } from './live.js';
 import type { ClaimedChat } from './chat.js';
+import { providerContextSchema } from '@windows-ai-notes/contracts/observability';
 
 const units = ['input_tokens', 'output_tokens', 'audio_ms'] as const;
 type Totals = z.infer<typeof usageTotalsSchema>;
@@ -67,6 +68,28 @@ interface Call {
 }
 export class UsageStore {
   constructor(private readonly database: Database) {}
+  async correlation(id: string) {
+    const call = z.uuid().parse(id);
+    const row = (
+      await this.database.pool.query<{
+        usage_call_id: string;
+        origin_request_id: string | null;
+        job_id: string | null;
+        turn_id: string | null;
+        live_lease_id: string | null;
+      }>(
+        `SELECT c.id usage_call_id,
+         coalesce(j.origin_request_id,t.origin_request_id,l.origin_request_id) origin_request_id,
+         c.job_id,c.chat_turn_id turn_id,c.live_lease_id FROM ai_usage_calls c
+         LEFT JOIN jobs j ON j.id=c.job_id
+         LEFT JOIN chat_turns t ON t.id=c.chat_turn_id
+         LEFT JOIN live_leases l ON l.id=c.live_lease_id WHERE c.id=$1`,
+        [call],
+      )
+    ).rows[0];
+    if (!row) throw new Error('The reserved provider call is missing.');
+    return providerContextSchema.parse(row);
+  }
   private async account(tx: Transaction, owner: string) {
     await tx.query(
       'INSERT INTO ai_usage_accounts VALUES ($1,$2) ON CONFLICT DO NOTHING',

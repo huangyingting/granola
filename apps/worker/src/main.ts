@@ -1,6 +1,7 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import { createAzureProviders } from '@windows-ai-notes/ai';
 import { loadAzureConfig } from '@windows-ai-notes/ai/config';
+import { registerProviderTelemetry } from '@windows-ai-notes/ai/observability';
 import {
   Database,
   requireDatabaseUrl,
@@ -18,6 +19,7 @@ async function main() {
   process.once('SIGTERM', () => shutdown.abort());
   process.once('SIGINT', () => shutdown.abort());
   let nextCleanup = 0;
+  const closeTelemetry = registerProviderTelemetry();
   try {
     await db.assertReady();
     await storage?.assertReady();
@@ -44,6 +46,7 @@ async function main() {
       }
     }
   } finally {
+    closeTelemetry();
     storage?.close();
     await db.close();
   }

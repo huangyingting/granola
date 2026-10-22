@@ -2,6 +2,7 @@ import { usageSchema, type Usage } from '@windows-ai-notes/contracts/server';
 import { canonicalJson } from '@windows-ai-notes/contracts/content';
 import { bindAuditContext, type Database } from '@windows-ai-notes/db';
 import type { UsageReporter } from '@windows-ai-notes/ai';
+import { withProviderContext } from '@windows-ai-notes/ai/observability';
 
 export async function withUsage<T extends { usage: Usage }>(
   db: Database,
@@ -16,7 +17,11 @@ export async function withUsage<T extends { usage: Usage }>(
     await db.usage.settle(call, usage);
     reported = usage;
   });
-  const generated = await invoke(report);
+  const correlation = await db.usage.correlation(call);
+  const generated = await withProviderContext(
+    { ...correlation, source: 'worker' },
+    () => invoke(report),
+  );
   await report(generated.usage);
   return generated;
 }

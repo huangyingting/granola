@@ -90,6 +90,7 @@ export async function readAzureStream(
   preview: PreviewReporter,
   reportUsage?: (usage: Usage) => Promise<void>,
   project: (content: string) => string | null = overviewPreview,
+  firstContent?: () => void,
 ) {
   if (
     !response.headers
@@ -106,6 +107,7 @@ export async function readAzureStream(
     finish: string | null = null,
     done = false,
     refused = false;
+  let contentObserved = false;
   let usage: z.infer<typeof receipt> | null = null;
   let previousPreview: string | null = null;
   try {
@@ -140,6 +142,10 @@ export async function readAzureStream(
         for (const choice of parsed.data.choices) {
           if (finish !== null) throw invalid();
           refused ||= Boolean(choice.delta.refusal);
+          if (!contentObserved && choice.delta.content) {
+            contentObserved = true;
+            firstContent?.();
+          }
           content += choice.delta.content ?? '';
           if (Buffer.byteLength(content) > 512 * 1024)
             throw new ServiceError(

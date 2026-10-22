@@ -556,6 +556,25 @@ describe.skipIf(!url)(
         expect(event).toMatchObject({ source: 'api', actor_id: user.user_id });
       expect(new Set(audit.map((event) => event.request_id)).size).toBe(1);
       expect(audit[0]!.request_id).not.toBeNull();
+      expect(
+        (
+          await db.pool.query(
+            `SELECT l.origin_request_id FROM live_leases l
+             JOIN ai_usage_calls c ON c.live_lease_id=l.id WHERE c.owner_id=$1`,
+            [user.user_id],
+          )
+        ).rows,
+      ).toEqual([{ origin_request_id: audit[0]!.request_id }]);
+      const reserved = audit.find(
+        (event) => event.action === 'usage_reserved',
+      )!;
+      expect(await db.usage.correlation(reserved.resource_id)).toMatchObject({
+        usage_call_id: reserved.resource_id,
+        origin_request_id: audit[0]!.request_id,
+        job_id: null,
+        turn_id: null,
+        live_lease_id: expect.any(String),
+      });
       expect(JSON.stringify(audit)).not.toContain('Synthetic Orion evidence.');
       await vi.waitFor(() => {
         const rows = telemetry.mock.calls.map(([line]) =>
