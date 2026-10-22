@@ -544,6 +544,8 @@ request ID 串联 API、job、worker 和 provider request，生产 trace 默认�
 
 持久化恢复门禁已接到同一启动互斥内：staging 写入绑定 session 与 runtime manifest 的严格状态，worker 在全局 operation 锁下单次认领；`committed` / `installing` 意图 fence 先于对应 outcome、commit ACK 或进程创建落盘，后续失败不能擦除。共享状态写入使用当前用户/SYSTEM 专属 ACL、文件 flush 与 write-through 原子替换，mutable fence 不进入可执行 runtime 的不可变 hash/句柄租约。启动最多检查固定私有根下 128 个 session；未使用 staging、合法且尚未 commit 的准备/失败可继续，缺少旧格式 marker、损坏/矛盾记录、没有 outcome 的认领以及所有 commit 后状态（包括 `installed`）在打开内容密钥/SQLite 前阻断。保存的 PID、时间和成功 outcome 不构成健康授权，不自动删记录、重试安装或恢复旧快照。生产 activation 必须来自此固定根的真实物理父目录，任意其他目录的诊断 staging 不再能启动安装器。实际安装探针验证损坏或已 commit 记录会保持 key/数据库字节不变，恢复其合成 fixture 后旧失败 Main 仍不能重开，只能新进程重开。授权恢复、独立重启健康、软件协调接线及真实签名正向验收尚未完成，安装入口继续禁用。
 
+已增加单次原生重启健康 receiver 原语，但尚未接到 activation：启动新 Main 前创建不可预测、当前用户专属的独占命名管道，使用 OS 返回的 pipe peer PID 对照 `CreateProcessW` 创建时保留的精确内核句柄，并检查该进程仍存活；不能用消息中的 PID/创建时间重新打开进程充当授权。新鲜挑战绑定 session、精确创建身份、目标版本及有界整数 schema 报告，1 KiB 严格帧拒绝未知/重复字段、旧挑战及复用。只有 owner 的持久化回调实际成功结束后才发送确认；超时、取消、通道故障或 Main 退出都关闭通道，不终止可能已经持有写入的新 Main，且须 drain 已接纳的持久化回调才返回。Windows 样机使用真正新启动的合成子进程及 OS peer 身份，不代替签名应用的正向健康验收。此 receiver 不授予数据库准入、不修改恢复 fence、不自行判定 schema 兼容；Main 对 worker/server 的认证、首次启动准入转移、健康状态持久授权及协调接线仍须完成，安装与重启入口继续关闭。
+
 ## 12. 建议代码组织
 
 以下是未来建项布局，不是已经存在的目录：

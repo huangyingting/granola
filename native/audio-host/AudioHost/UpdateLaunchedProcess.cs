@@ -1,17 +1,21 @@
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Text;
 using Microsoft.Win32.SafeHandles;
 
 namespace WindowsAiNotes.AudioHost;
 
-internal sealed class UpdateInstallerProcess : IDisposable
+internal sealed class UpdateLaunchedProcess : IDisposable
 {
     private readonly SafeProcessHandle? handle;
     private readonly Process? surrogate;
     private Task? exited;
     internal int Id { get; }
+    internal bool IsNativeLaunch => handle is not null;
+    internal UpdateParentIdentity Identity => new(Id,
+        StartTime.ToUniversalTime().ToFileTimeUtc().ToString(CultureInfo.InvariantCulture));
     internal DateTime StartTime => surrogate?.StartTime ?? CreationTime();
     internal bool HasExited => surrogate?.HasExited ?? Signaled(0);
     internal int ExitCode
@@ -19,19 +23,19 @@ internal sealed class UpdateInstallerProcess : IDisposable
         get
         {
             if (surrogate is not null) return surrogate.ExitCode;
-            if (!HasExited) throw new InvalidOperationException("The installer has not exited.");
+            if (!HasExited) throw new InvalidOperationException("The child process has not exited.");
             if (!GetExitCodeProcess(handle!, out var code)) throw LastError();
             return unchecked((int)code);
         }
     }
 
-    internal UpdateInstallerProcess(Process surrogate)
+    internal UpdateLaunchedProcess(Process surrogate)
     {
         this.surrogate = surrogate;
         Id = surrogate.Id;
     }
 
-    private UpdateInstallerProcess(SafeProcessHandle handle, int id)
+    private UpdateLaunchedProcess(SafeProcessHandle handle, int id)
     {
         this.handle = handle;
         Id = id;
@@ -40,7 +44,7 @@ internal sealed class UpdateInstallerProcess : IDisposable
     internal Task WaitForExitAsync(CancellationToken token) =>
         (exited ??= surrogate?.WaitForExitAsync(CancellationToken.None) ?? Task.Run(() => Signaled(uint.MaxValue))).WaitAsync(token);
 
-    internal static UpdateInstallerProcess Start(ProcessStartInfo start, IEnumerable<SafeFileHandle> retained)
+    internal static UpdateLaunchedProcess Start(ProcessStartInfo start, IEnumerable<SafeFileHandle> retained)
     {
         if (start.UseShellExecute || start.RedirectStandardInput || start.RedirectStandardOutput ||
             start.RedirectStandardError || start.ArgumentList.Count != 0 ||
@@ -79,7 +83,7 @@ internal sealed class UpdateInstallerProcess : IDisposable
                 .Select(pair => $"{pair.Key}={pair.Value}");
             environment = Marshal.StringToHGlobalUni(string.Join('\0', entries) + "\0\0");
             var startup = new StartupInfoEx { Startup = new() { Size = (uint)Marshal.SizeOf<StartupInfoEx>() }, Attributes = attributes };
-            // Only the explicit lease list is inherited; never hand the installer private protocol pipes or other handles.
+            // Only the explicit lease list is inherited, never private protocol pipes or other handles.
             if (!CreateProcess(start.FileName, new StringBuilder($"\"{start.FileName}\" {start.Arguments}"),
                 0, 0, true, 0x00080000u | 0x00000400u | (start.CreateNoWindow ? 0x08000000u : 0u),
                 environment, start.WorkingDirectory, ref startup, out var process)) throw LastError();

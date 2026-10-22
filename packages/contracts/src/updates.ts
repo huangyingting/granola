@@ -142,6 +142,26 @@ export const updateRuntimeFailureSchema = z.strictObject({
   code: z.string().regex(/^[a-z][a-z0-9_]{0,99}$/u),
 });
 const handoffChallenge = z.string().regex(/^[0-9a-f]{64}$/u);
+const restartIdentity = {
+  version: z.literal(1),
+  session_id: z.uuidv4(),
+  challenge: handoffChallenge,
+  identity: updateParentIdentitySchema,
+  application_version: updateVersionSchema,
+};
+export const updateRestartChallengeSchema = z.strictObject({
+  ...restartIdentity,
+  event: z.literal('update_restart_challenge'),
+});
+export const updateRestartReadySchema = z.strictObject({
+  ...restartIdentity,
+  event: z.literal('update_restart_ready'),
+  storage_schema: z.number().int().min(1).max(65_535),
+});
+export const updateRestartConfirmedSchema = z.strictObject({
+  ...restartIdentity,
+  event: z.literal('update_restart_confirmed'),
+});
 export const updateParentReadySchema = z.strictObject({
   version: z.literal(1),
   event: z.literal('update_parent_ready'),

@@ -72,7 +72,7 @@ public sealed class UpdateStartupAdmissionTests : IDisposable
         start.Arguments = $"-NoLogo -NoProfile -NonInteractive -Command \"$ErrorActionPreference='Stop'; " +
             $"[IO.File]::WriteAllText('{Literal(ready)}','ready'); " +
             $"while(![IO.File]::Exists('{Literal(finish)}')){{Start-Sleep -Milliseconds 20}}; exit {exitCode}\"";
-        using var process = UpdateInstallerProcess.Start(start, admission.Handles.Append(candidate));
+        using var process = UpdateLaunchedProcess.Start(start, admission.Handles.Append(candidate));
         try
         {
             while (!File.Exists(ready)) await Task.Delay(10, deadline.Token);
@@ -107,7 +107,7 @@ public sealed class UpdateStartupAdmissionTests : IDisposable
     {
         using var admission = UpdateOperationLock.Open(Locks, admission: true);
         var start = UpdateInstallerWorker.InstallerStart(Path.Combine(root, "missing.exe"), root);
-        Assert.Throws<Win32Exception>(() => UpdateInstallerProcess.Start(start, admission.Handles));
+        Assert.Throws<Win32Exception>(() => UpdateLaunchedProcess.Start(start, admission.Handles));
         admission.Dispose();
         using var released = UpdateOperationLock.Open(Locks, admission: true);
     }

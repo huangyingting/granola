@@ -13,6 +13,9 @@ import {
   updateParentCommittedSchema,
   updateParentIdentitySchema,
   updateParentReadySchema,
+  updateRestartChallengeSchema,
+  updateRestartReadySchema,
+  updateRestartConfirmedSchema,
   updateWorkerFailureSchema,
   updateWorkerOutcomeSchema,
   updateWorkerRequestSchema,
@@ -213,6 +216,64 @@ describe('packaged update and feed contracts', () => {
         installation_enabled: true,
       }).success,
     ).toBe(false);
+  });
+  describe('fresh restart-health framing without saved-process or admission authority', () => {
+    const identity = { pid: 1234, creation_file_time: '134000000000000001' };
+    const common = {
+      version: 1,
+      session_id: '11111111-1111-4111-8111-111111111111',
+      challenge: 'ab'.repeat(32),
+      identity,
+      application_version: '0.1.1',
+    };
+    it.each([
+      [updateRestartChallengeSchema, 'update_restart_challenge'],
+      [updateRestartConfirmedSchema, 'update_restart_confirmed'],
+    ] as const)(
+      'keeps owner messages strict and bound to the session',
+      (schema, event) => {
+        const message = { ...common, event };
+        expect(schema.parse(message)).toEqual(message);
+        for (const change of [
+          { version: 2 },
+          { event: 'update_restart_ready' },
+          { session_id: '11111111-1111-1111-8111-111111111111' },
+          { challenge: common.challenge.toUpperCase() },
+          { identity: { ...identity, creation_file_time: 1234 } },
+          { application_version: '01.1.1' },
+          { storage_schema: 8 },
+          { admission: true },
+          { healthy: true },
+          { worker_pid: 1234 },
+        ])
+          expect(schema.safeParse({ ...message, ...change }).success).toBe(
+            false,
+          );
+      },
+    );
+    it('requires a bounded integer schema and accepts no health or recovery authorization claim', () => {
+      const ready = {
+        ...common,
+        event: 'update_restart_ready',
+        storage_schema: 8,
+      };
+      expect(updateRestartReadySchema.parse(ready)).toEqual(ready);
+      for (const change of [
+        { storage_schema: 0 },
+        { storage_schema: 65_536 },
+        { storage_schema: 1.5 },
+        { storage_schema: '8' },
+        { storage_schema: null },
+        { storage_schema: undefined },
+        { identity: { ...identity, authorized: true } },
+        { installed: true },
+        { recovery_complete: true },
+        { installer: 'C:\\Synthetic\\setup.exe' },
+      ])
+        expect(
+          updateRestartReadySchema.safeParse({ ...ready, ...change }).success,
+        ).toBe(false);
+    });
   });
   it('bounds staged runtime metadata without granting installation or signature authority', () => {
     const runtime = {

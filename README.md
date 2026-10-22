@@ -493,6 +493,22 @@ automatic deletion, retry or snapshot restore grants recovery/health authority.
 Fresh restart health and authorized resolution of these retained records are
 still unfinished. A repaired record does not reopen the failed Main process.
 
+The native restart-health receiver is a separate, single-use primitive, not yet
+an activation path. It creates an unpredictable, exclusive current-user pipe
+before launch, then checks the OS pipe peer against the fresh child's retained
+`CreateProcessW` handle and physical lifetime. A new challenge binds the exact
+session, process creation identity, target version and bounded integer storage
+schema. Strict 1 KiB framing rejects malformed, duplicate or unknown fields.
+Only successful completion of the owner's persistence callback permits a
+confirmation; cancellation, timeout, transport failure or child exit closes
+the channel without killing Main and drains any admitted persistence first.
+Windows cases use actual newly launched synthetic peers, including wrong-OS-peer
+and stale-challenge rejection. These cases do not prove signed-app restart health.
+The receiver grants no pre-database admission, changes no recovery fence and
+does not itself validate schema compatibility. Main-side worker authentication,
+first-start admission, durable healthy resolution and coordinator wiring are
+still required before installation/restart controls can be enabled.
+
 Activation now requires the runtime's physical parent to be the fixed private
 worker root, so recovery cannot miss an installer launched from an arbitrary
 diagnostic staging directory. `--stage-update-runtime` still supports copy/

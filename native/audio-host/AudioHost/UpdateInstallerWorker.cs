@@ -36,7 +36,7 @@ public sealed record UpdateWorkerResult(int Version, bool Installed, string Code
 
 internal sealed record UpdateWorkerServices(Func<string, UpdateInstallationResult> Installation,
     Func<string, UpdateTrustResult> Application,
-    Func<ProcessStartInfo, IEnumerable<SafeFileHandle>, UpdateInstallerProcess> Start, TimeSpan InstallerTimeout);
+    Func<ProcessStartInfo, IEnumerable<SafeFileHandle>, UpdateLaunchedProcess> Start, TimeSpan InstallerTimeout);
 
 public static class UpdateInstallerWorker
 {
@@ -69,7 +69,7 @@ public static class UpdateInstallerWorker
                         throw new UpdateHandoffException("update_policy_changed");
                     return UpdateTrustVerifier.Verify(request.Application, policy.Trust(version));
                 },
-                UpdateInstallerProcess.Start,
+                UpdateLaunchedProcess.Start,
                 TimeSpan.FromMinutes(10));
             VerifyApplication(services, request.CurrentVersion);
             RequireOutsideInstallation(request.Installer, directory);
