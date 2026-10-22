@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   assertVerifiedInstaller,
   assertVerifiedUpdate,
+  stageUpdateRuntime,
   verifyInstallerUpdateArtifact,
   verifyUpdateArtifact,
   verifyUpdateInstallation,
@@ -74,6 +75,187 @@ const report = {
     product_version: policy.version,
   },
 };
+
+describe('independent native update runtime staging', () => {
+  const helper = 'C:\\Installed app\\resources\\audio-host\\AudioHost.exe';
+  const executable = 'C:\\Installed app\\Windows AI Notes Preview.exe';
+  const parent = 'C:\\Private data\\update-workers';
+  const directory = `${parent}\\worker-11111111-1111-4111-8111-111111111111`;
+  const staged = {
+    version: 1,
+    staged: true,
+    code: 'update_worker_staged',
+    runtime: {
+      directory,
+      executable: `${directory}\\AudioHost.exe`,
+      files: 12,
+      bytes: 123_456,
+      sha256: 'ab'.repeat(32),
+    },
+  };
+  it('requests only a bounded native copy and verifies the private child directory without executing it', async () => {
+    execution.mockImplementation((_file, _args, _options, callback) =>
+      callback(null, JSON.stringify(staged), ''),
+    );
+    const signal = new AbortController().signal;
+    await expect(
+      stageUpdateRuntime(
+        helper,
+        executable,
+        '0.1.0',
+        policy.product_name,
+        parent,
+        signal,
+      ),
+    ).resolves.toEqual(staged.runtime);
+    expect(execution).toHaveBeenCalledExactlyOnceWith(
+      helper,
+      [
+        '--stage-update-runtime',
+        executable,
+        '0.1.0',
+        policy.product_name,
+        parent,
+      ],
+      expect.objectContaining({
+        signal,
+        timeout: 60_000,
+        maxBuffer: 16_384,
+        windowsHide: true,
+      }),
+      expect.any(Function),
+    );
+  });
+  it.each([
+    { directory: 'C:\\Different\\worker-11111111-1111-4111-8111-111111111111' },
+    { directory: `${parent}\\other` },
+    { executable: `${directory}\\different.exe` },
+  ])(
+    'rejects a copied runtime outside its exact private location: %j',
+    async (change) => {
+      execution.mockImplementation((_file, _args, _options, callback) =>
+        callback(
+          null,
+          JSON.stringify({
+            ...staged,
+            runtime: { ...staged.runtime, ...change },
+          }),
+          '',
+        ),
+      );
+      await expect(
+        stageUpdateRuntime(
+          helper,
+          executable,
+          '0.1.0',
+          policy.product_name,
+          parent,
+        ),
+      ).rejects.toMatchObject({ code: 'update_worker_mismatch' });
+    },
+  );
+  it.each([
+    { files: 513 },
+    { files: 0 },
+    { bytes: 512 * 1024 ** 2 + 1 },
+    { sha256: 'invalid' },
+    { installation_enabled: true },
+  ])(
+    'rejects invalid or success-shaped extra runtime metadata: %j',
+    async (change) => {
+      execution.mockImplementation((_file, _args, _options, callback) =>
+        callback(
+          null,
+          JSON.stringify({
+            ...staged,
+            runtime: { ...staged.runtime, ...change },
+          }),
+          '',
+        ),
+      );
+      await expect(
+        stageUpdateRuntime(
+          helper,
+          executable,
+          '0.1.0',
+          policy.product_name,
+          parent,
+        ),
+      ).rejects.toMatchObject({ code: 'update_verifier_protocol' });
+    },
+  );
+  it.each([
+    'relative',
+    'C:\\Private data\\..\\different',
+    '\\\\server\\share',
+    'C:\\Private data\\cache:stream',
+  ])(
+    'rejects invalid destination directories before invoking the native helper: %s',
+    async (path) => {
+      await expect(
+        stageUpdateRuntime(
+          helper,
+          executable,
+          '0.1.0',
+          policy.product_name,
+          path,
+        ),
+      ).rejects.toMatchObject({ code: 'update_worker_arguments' });
+      expect(execution).not.toHaveBeenCalled();
+    },
+  );
+  it.each([
+    'update_worker_source',
+    'update_worker_capacity',
+    'update_installation_missing',
+  ])('surfaces a fixed native staging rejection: %s', async (code) => {
+    execution.mockImplementation((_file, _args, _options, callback) =>
+      callback(
+        Object.assign(new Error('Synthetic staging error.'), {
+          code: 2,
+          stdout: JSON.stringify({
+            version: 1,
+            staged: false,
+            code,
+            runtime: null,
+          }),
+        }),
+        '',
+        '',
+      ),
+    );
+    await expect(
+      stageUpdateRuntime(
+        helper,
+        executable,
+        '0.1.0',
+        policy.product_name,
+        parent,
+      ),
+    ).rejects.toMatchObject({ code, message: expect.stringContaining(code) });
+  });
+  it('does not accept staged success from a failed helper process', async () => {
+    execution.mockImplementation((_file, _args, _options, callback) =>
+      callback(
+        Object.assign(new Error('Synthetic failed copy.'), {
+          code: 2,
+          stdout: JSON.stringify(staged),
+        }),
+        '',
+        '',
+      ),
+    );
+    await expect(
+      stageUpdateRuntime(
+        helper,
+        executable,
+        '0.1.0',
+        policy.product_name,
+        parent,
+      ),
+    ).rejects.toMatchObject({ code: 'update_verifier_protocol' });
+  });
+});
 
 describe('native registered installation preflight', () => {
   const helper = 'C:\\Installed app\\resources\\audio-host\\AudioHost.exe';

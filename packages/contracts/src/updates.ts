@@ -98,6 +98,17 @@ export const updateInstallationSchema = z.strictObject({
   product_name: label,
   architecture: z.literal('x64'),
 });
+export const stagedUpdateRuntimeSchema = z.strictObject({
+  directory: localWindowsPath,
+  executable: localWindowsPath,
+  files: z.number().int().min(1).max(512),
+  bytes: z
+    .number()
+    .int()
+    .positive()
+    .max(512 * 1024 ** 2),
+  sha256: z.string().regex(/^[0-9a-f]{64}$/u),
+});
 export const cachedUpdateSchema = z.strictObject({
   version: z.literal(1),
   feed: updateFeedSchema,

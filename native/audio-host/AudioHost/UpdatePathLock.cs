@@ -4,7 +4,7 @@ using Microsoft.Win32.SafeHandles;
 
 namespace WindowsAiNotes.AudioHost;
 
-internal sealed class UpdatePathInvalidException() : IOException("An update path is not a regular directory.");
+internal sealed class UpdatePathInvalidException() : IOException("An update path is not a regular file or directory.");
 
 internal static class UpdatePathLock
 {
@@ -12,14 +12,22 @@ internal static class UpdatePathLock
         Path.GetPathRoot(path) is { } root && new DriveInfo(root).DriveType == DriveType.Fixed;
 
     internal static SafeFileHandle OpenDirectory(string path)
+        => Open(path, directory: true);
+
+    internal static SafeFileHandle OpenFile(string path)
+        => Open(path, directory: false);
+
+    private static SafeFileHandle Open(string path, bool directory)
     {
         // Do not follow reparse points or share DELETE access.
-        var handle = CreateFile(path, 0x80, 1 | 2, IntPtr.Zero, 3, 0x02000000 | 0x00200000, IntPtr.Zero);
+        var handle = CreateFile(path, directory ? 0x80u : 0x80000000u, directory ? 1u | 2u : 1u,
+            IntPtr.Zero, 3, (directory ? 0x02000000u : 0u) | 0x00200000u, IntPtr.Zero);
         try
         {
             if (handle.IsInvalid || !GetFileInformationByHandle(handle, out var information))
                 throw new Win32Exception(Marshal.GetLastPInvokeError());
-            if ((information.Attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != FileAttributes.Directory)
+            if ((information.Attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint)) !=
+                (directory ? FileAttributes.Directory : 0))
                 throw new UpdatePathInvalidException();
             return handle;
         }

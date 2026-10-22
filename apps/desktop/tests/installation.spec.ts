@@ -24,6 +24,7 @@ import { promisify } from 'node:util';
 import { z } from 'zod';
 import { audioHostEnvironment } from '@windows-ai-notes/client/audio';
 import {
+  stageUpdateRuntime,
   verifyInstallerUpdateArtifact,
   verifyUpdateInstallation,
 } from '../src/main/update-trust.js';
@@ -209,6 +210,7 @@ test('preserves encrypted data and new edits through actual installation, compat
     expect(current.resources.toLowerCase()).toBe(
       join(installation, 'resources').toLowerCase(),
     );
+    await assertInstallerRole(uninstaller, version, base.productName!, true);
     expect(
       await verifyUpdateInstallation(
         join(current.resources, 'audio-host', 'AudioHost.exe'),
@@ -231,6 +233,46 @@ test('preserves encrypted data and new edits through actual installation, compat
         base.productName!,
       ),
     ).rejects.toMatchObject({ code: 'update_installation_mismatch' });
+    const workerParent = join(root, 'Independent worker runtimes');
+    await mkdir(workerParent, { recursive: true });
+    const runtime = await stageUpdateRuntime(
+      join(current.resources, 'audio-host', 'AudioHost.exe'),
+      executable,
+      version,
+      base.productName!,
+      workerParent,
+    );
+    try {
+      expect(runtime.files).toBeGreaterThan(100);
+      expect(runtime.bytes).toBeGreaterThan(10 * 1024 ** 2);
+      for (const name of [
+        'AudioHost.exe',
+        'AudioHost.dll',
+        'AudioHost.Core.dll',
+        'AudioHost.deps.json',
+        'AudioHost.runtimeconfig.json',
+        'coreclr.dll',
+        'hostfxr.dll',
+        'System.Private.CoreLib.dll',
+      ])
+        expect(await fingerprint(join(runtime.directory, name))).toBe(
+          await fingerprint(join(current.resources, 'audio-host', name)),
+        );
+      await expect(
+        verifyUpdateInstallation(
+          runtime.executable,
+          executable,
+          version,
+          base.productName!,
+        ),
+      ).rejects.toMatchObject({ code: 'update_installation_helper' });
+    } finally {
+      await rm(runtime.directory, {
+        recursive: true,
+        force: true,
+        maxRetries: 3,
+      });
+    }
     const location = relative(installation, current.directory);
     expect(isAbsolute(location) || location.startsWith('..')).toBe(true);
     if (identity) expect(current).toMatchObject(identity);

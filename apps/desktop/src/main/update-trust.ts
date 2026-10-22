@@ -6,6 +6,7 @@ import { audioHostEnvironment } from '@windows-ai-notes/client/audio';
 import { LocalError } from '@windows-ai-notes/local';
 import {
   compareUpdateVersions,
+  stagedUpdateRuntimeSchema,
   updateExpectationSchema,
   updateInstallationSchema,
   verifiedUpdateArtifactSchema,
@@ -60,6 +61,26 @@ const installationRejectionSchema = z.strictObject({
     'update_installation_unavailable',
   ]),
   installation: z.null(),
+});
+const stagedRuntimeSchema = z.strictObject({
+  version: z.literal(1),
+  staged: z.literal(true),
+  code: z.literal('update_worker_staged'),
+  runtime: stagedUpdateRuntimeSchema,
+});
+const runtimeRejectionSchema = z.strictObject({
+  version: z.literal(1),
+  staged: z.literal(false),
+  code: installationRejectionSchema.shape.code.or(
+    z.enum([
+      'update_worker_arguments',
+      'update_worker_location',
+      'update_worker_source',
+      'update_worker_capacity',
+      'update_worker_unavailable',
+    ]),
+  ),
+  runtime: z.null(),
 });
 function expectation(value: unknown): UpdateExpectation {
   const parsed = updateExpectationSchema.safeParse(value);
@@ -143,6 +164,108 @@ export async function verifyUpdateInstallation(
   productName: string,
   signal?: AbortSignal,
 ) {
+  const expected = installationArguments(
+    helper,
+    executable,
+    version,
+    productName,
+  );
+  const { value, exitCode } = await invokeVerifier(
+    helper,
+    ['--verify-update-installation', executable, version, productName],
+    signal,
+  );
+  if (exitCode !== 0) {
+    const rejected = installationRejectionSchema.safeParse(value);
+    const code = rejected.success
+      ? rejected.data.code
+      : 'update_verifier_protocol';
+    throw new LocalError(
+      code,
+      `This application is not a verified per-user installation (${code}). No installer was started.`,
+    );
+  }
+  const verified = installationResultSchema.safeParse(value);
+  if (!verified.success)
+    throw new LocalError(
+      'update_verifier_protocol',
+      'The native installation verifier returned invalid metadata.',
+    );
+  const installation = verified.data.installation;
+  if (
+    installation.executable.toLowerCase() !== executable.toLowerCase() ||
+    installation.directory.toLowerCase() !== expected.directory.toLowerCase() ||
+    installation.application_version !== version ||
+    installation.product_name !== productName
+  )
+    throw new LocalError(
+      'update_installation_mismatch',
+      'The registered installation does not match the running application.',
+    );
+  return installation;
+}
+
+export async function stageUpdateRuntime(
+  helper: string,
+  executable: string,
+  version: string,
+  productName: string,
+  parent: string,
+  signal?: AbortSignal,
+) {
+  installationArguments(helper, executable, version, productName);
+  if (
+    !updateInstallationSchema.shape.directory.safeParse(parent).success ||
+    win32.normalize(parent) !== parent ||
+    /[:"<>|?*]/u.test(parent.slice(2))
+  )
+    throw new LocalError(
+      'update_worker_arguments',
+      'A canonical local parent directory is required for the independent update runtime.',
+    );
+  const { value, exitCode } = await invokeVerifier(
+    helper,
+    ['--stage-update-runtime', executable, version, productName, parent],
+    signal,
+  );
+  if (exitCode !== 0) {
+    const rejected = runtimeRejectionSchema.safeParse(value);
+    const code = rejected.success
+      ? rejected.data.code
+      : 'update_verifier_protocol';
+    throw new LocalError(
+      code,
+      `The independent update runtime could not be staged (${code}). No installer was started.`,
+    );
+  }
+  const parsed = stagedRuntimeSchema.safeParse(value);
+  if (!parsed.success)
+    throw new LocalError(
+      'update_verifier_protocol',
+      'The native runtime stager returned invalid metadata.',
+    );
+  const runtime = parsed.data.runtime;
+  if (
+    win32.dirname(runtime.directory).toLowerCase() !== parent.toLowerCase() ||
+    !/^worker-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(
+      win32.basename(runtime.directory),
+    ) ||
+    runtime.executable.toLowerCase() !==
+      win32.join(runtime.directory, 'AudioHost.exe').toLowerCase()
+  )
+    throw new LocalError(
+      'update_worker_mismatch',
+      'The independent update runtime does not match the selected private directory.',
+    );
+  return runtime;
+}
+
+function installationArguments(
+  helper: string,
+  executable: string,
+  version: string,
+  productName: string,
+) {
   assertExecutablePaths(helper, executable);
   const expected = updateInstallationSchema.safeParse({
     directory: win32.dirname(executable),
@@ -156,37 +279,7 @@ export async function verifyUpdateInstallation(
       'update_installation_arguments',
       'A canonical installed executable, stable version and product identity are required.',
     );
-  const { value, exitCode } = await invokeVerifier(
-    helper,
-    ['--verify-update-installation', executable, version, productName],
-    signal,
-  );
-  if (exitCode !== 0) {
-    const rejected = installationRejectionSchema.safeParse(value);
-    throw new LocalError(
-      rejected.success ? rejected.data.code : 'update_verifier_protocol',
-      'This application is not a verified per-user installation. No installer was started.',
-    );
-  }
-  const verified = installationResultSchema.safeParse(value);
-  if (!verified.success)
-    throw new LocalError(
-      'update_verifier_protocol',
-      'The native installation verifier returned invalid metadata.',
-    );
-  const installation = verified.data.installation;
-  if (
-    installation.executable.toLowerCase() !== executable.toLowerCase() ||
-    installation.directory.toLowerCase() !==
-      expected.data.directory.toLowerCase() ||
-    installation.application_version !== version ||
-    installation.product_name !== productName
-  )
-    throw new LocalError(
-      'update_installation_mismatch',
-      'The registered installation does not match the running application.',
-    );
-  return installation;
+  return expected.data;
 }
 
 function assertExecutablePaths(...paths: string[]) {

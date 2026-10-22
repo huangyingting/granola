@@ -362,6 +362,17 @@ not execute an installer. Windows lock-mechanics tests use an explicitly interna
 generic signed-runtime fixture, not a production installer-signature bypass or
 positive first-party signing acceptance.
 
+The bundled helper can also stage a bounded, self-contained native runtime in a
+fresh current-user/SYSTEM-only directory outside the registered installation.
+Source files and directory paths remain locked while copying; every copied file
+is flushed and rehashed before a sorted path/size/content manifest digest is returned.
+Missing runtime components, reparse points, excessive source inventories and
+insufficient capacity reject staging. Installed lifecycle probes execute the
+copied helper at each version without using the SDK or treating that copy as a
+bundled installation inspector. **Staging does not start a worker or installer,
+and is not authorization to install.** Authenticated worker coordination,
+exact-parent exit, durable outcomes and recovery remain unfinished.
+
 ### Verified signed Windows candidates
 
 `pnpm desktop:package:signed` is a separate, Windows-only producer command.

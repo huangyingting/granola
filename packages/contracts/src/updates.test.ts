@@ -6,6 +6,7 @@ import {
   desktopUpdateResponseSchema,
   desktopUpdateStateSchema,
   packagedUpdatePolicySchema,
+  stagedUpdateRuntimeSchema,
   updateFeedSchema,
   updateInstallationSchema,
 } from './updates.js';
@@ -125,6 +126,31 @@ describe('packaged update and feed contracts', () => {
             .success,
         ).toBe(false);
     });
+  });
+  it('bounds staged runtime metadata without granting installation or signature authority', () => {
+    const runtime = {
+      directory:
+        'C:\\Private cache\\worker-11111111-1111-4111-8111-111111111111',
+      executable:
+        'C:\\Private cache\\worker-11111111-1111-4111-8111-111111111111\\AudioHost.exe',
+      files: 200,
+      bytes: 100 * 1024 ** 2,
+      sha256: 'ab'.repeat(32),
+    };
+    expect(stagedUpdateRuntimeSchema.parse(runtime)).toEqual(runtime);
+    for (const change of [
+      { files: 0 },
+      { files: 513 },
+      { bytes: 0 },
+      { bytes: 512 * 1024 ** 2 + 1 },
+      { sha256: 'AB'.repeat(32) },
+      { executable: 'relative.exe' },
+      { verified: true },
+      { installation_enabled: true },
+    ])
+      expect(
+        stagedUpdateRuntimeSchema.safeParse({ ...runtime, ...change }).success,
+      ).toBe(false);
   });
   it.each([
     'http://updates.example/stable.json',
