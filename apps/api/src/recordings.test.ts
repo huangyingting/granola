@@ -1817,69 +1817,110 @@ describe.skipIf(!databaseUrl || !endpoint)(
       );
     }
     it('resumes missing uploads after sealing, verifies the full WAV and does not expose the bucket publicly', async () => {
-      const c = await context();
-      const registered = await register(c);
-      const descriptor = registered.upload;
-      const sealKey = randomUUID();
-      const frozen = await app.inject({
-        method: 'POST',
-        url: `/v1/recordings/${c.input.id}/seal`,
-        headers: { ...c.headers, 'idempotency-key': sealKey },
-        payload: seal(c, [descriptor]),
-      });
-      expect(frozen.statusCode).toBe(200);
-      expect(frozen.json()).toMatchObject({
-        state: 'sealed_pending',
-        verified_chunks: 0,
-      });
-      const grant = await authorize(c, descriptor.chunk.chunk_id);
-      expect(await authorize(c, descriptor.chunk.chunk_id, grant.key)).toEqual(
-        grant,
-      );
-      const missing = await complete(c, descriptor.chunk.chunk_id, grant.id);
-      expect(missing.json()).toMatchObject({ code: 'upload_missing' });
-      await put(grant, c.wav);
-      const publicUrl = new URL(grant.url);
-      publicUrl.search = '';
-      expect((await fetch(publicUrl)).status).toBe(403);
-      const done = await complete(c, descriptor.chunk.chunk_id, grant.id);
-      expect(done.statusCode).toBe(200);
-      expect(done.json()).toMatchObject({ state: 'verified' });
-      expect(
-        (
-          await app.inject({
-            url: `/v1/recordings/${c.input.id}`,
-            headers: c.headers,
-          })
-        ).json(),
-      ).toMatchObject({
-        state: 'ready',
-        partial: false,
-        chunk_count: 1,
-        verified_chunks: 1,
-      });
-      const final = await db.pool.query<{ verified_object: string }>(
-        'SELECT verified_object FROM recording_chunks WHERE id=$1',
-        [descriptor.chunk.chunk_id],
-      );
-      const stored = await blobs.read(
-        { id: final.rows[0]!.verified_object, kind: 'verified' },
-        c.wav.length,
-        AbortSignal.timeout(10_000),
-      );
-      expect(stored).toEqual(c.wav);
-      const replay = await complete(c, descriptor.chunk.chunk_id, grant.id);
-      expect(replay.statusCode).toBe(200);
-      expect(
-        (
-          await app.inject({
-            method: 'POST',
-            url: `/v1/recordings/${c.input.id}/chunks`,
-            headers: { ...c.headers, 'idempotency-key': randomUUID() },
-            payload: c.chunk(1),
-          })
-        ).json(),
-      ).toMatchObject({ code: 'recording_sealed' });
+      const telemetry = vi
+        .spyOn(process.stdout, 'write')
+        .mockImplementation(() => true);
+      try {
+        const c = await context();
+        const registered = await register(c);
+        const descriptor = registered.upload;
+        const sealKey = randomUUID();
+        const frozen = await app.inject({
+          method: 'POST',
+          url: `/v1/recordings/${c.input.id}/seal`,
+          headers: { ...c.headers, 'idempotency-key': sealKey },
+          payload: seal(c, [descriptor]),
+        });
+        expect(frozen.statusCode).toBe(200);
+        expect(frozen.json()).toMatchObject({
+          state: 'sealed_pending',
+          verified_chunks: 0,
+        });
+        const grant = await authorize(c, descriptor.chunk.chunk_id);
+        expect(
+          await authorize(c, descriptor.chunk.chunk_id, grant.key),
+        ).toEqual(grant);
+        const missing = await complete(c, descriptor.chunk.chunk_id, grant.id);
+        expect(missing.json()).toMatchObject({ code: 'upload_missing' });
+        await put(grant, c.wav);
+        const publicUrl = new URL(grant.url);
+        publicUrl.search = '';
+        expect((await fetch(publicUrl)).status).toBe(403);
+        const done = await complete(c, descriptor.chunk.chunk_id, grant.id);
+        expect(done.statusCode).toBe(200);
+        expect(done.json()).toMatchObject({ state: 'verified' });
+        expect(
+          (
+            await app.inject({
+              url: `/v1/recordings/${c.input.id}`,
+              headers: c.headers,
+            })
+          ).json(),
+        ).toMatchObject({
+          state: 'ready',
+          partial: false,
+          chunk_count: 1,
+          verified_chunks: 1,
+        });
+        const final = await db.pool.query<{ verified_object: string }>(
+          'SELECT verified_object FROM recording_chunks WHERE id=$1',
+          [descriptor.chunk.chunk_id],
+        );
+        const stored = await blobs.read(
+          { id: final.rows[0]!.verified_object, kind: 'verified' },
+          c.wav.length,
+          AbortSignal.timeout(10_000),
+        );
+        expect(stored).toEqual(c.wav);
+        const replay = await complete(c, descriptor.chunk.chunk_id, grant.id);
+        expect(replay.statusCode).toBe(200);
+        const records = telemetry.mock.calls
+          .map(([line]) => JSON.parse(String(line)))
+          .filter((row) => row.code === 'upload_verification_completed');
+        expect(records).toMatchObject([
+          {
+            request_id: missing.headers['x-request-id'],
+            outcome: 'upload_missing',
+            stage: 'read',
+            aborted: false,
+          },
+          {
+            request_id: done.headers['x-request-id'],
+            outcome: 'verified',
+            stage: 'commit',
+            aborted: false,
+          },
+        ]);
+        expect(
+          records.every(
+            (row) => Number.isFinite(row.duration_ms) && row.duration_ms >= 0,
+          ),
+        ).toBe(true);
+        const logs = JSON.stringify(telemetry.mock.calls);
+        for (const privateValue of [
+          c.user_id,
+          c.doc.id,
+          c.input.id,
+          descriptor.chunk.chunk_id,
+          grant.id,
+          descriptor.sha256,
+          descriptor.chunk.pcm_sha256,
+          grant.url,
+        ])
+          expect(logs).not.toContain(privateValue);
+        expect(
+          (
+            await app.inject({
+              method: 'POST',
+              url: `/v1/recordings/${c.input.id}/chunks`,
+              headers: { ...c.headers, 'idempotency-key': randomUUID() },
+              payload: c.chunk(1),
+            })
+          ).json(),
+        ).toMatchObject({ code: 'recording_sealed' });
+      } finally {
+        telemetry.mockRestore();
+      }
     });
     it('binds creation, immutable chunks, seals and completion receipts to their input', async () => {
       const c = await context();
@@ -2119,44 +2160,172 @@ describe.skipIf(!databaseUrl || !endpoint)(
     it.each(['sha256', 'pcm', 'oversized', 'wav'])(
       'does not promote invalid %s audio',
       async (damage) => {
-        const c = await context();
-        const upload = c.chunk();
-        let bytes = c.wav;
-        if (damage === 'pcm') upload.chunk.pcm_sha256 = '0'.repeat(64);
-        if (damage === 'wav') {
-          bytes = Buffer.from(bytes);
-          bytes[0] = 0;
-          upload.sha256 = createHash('sha256').update(bytes).digest('hex');
-        }
-        const registered = await register(c, upload);
-        const grant = await authorize(c, registered.upload.chunk.chunk_id);
-        if (damage === 'sha256' || damage === 'oversized') {
-          bytes =
-            damage === 'oversized'
-              ? Buffer.concat([bytes, Buffer.from([0])])
-              : Buffer.from(bytes);
-          if (damage === 'sha256') bytes[bytes.length - 1] = 1;
-          await s3.send(
-            new PutObjectCommand({
-              Bucket: bucket,
-              Key: objectKey({ id: grant.id, kind: 'staging' }),
-              Body: bytes,
-            }),
+        const telemetry = vi
+          .spyOn(process.stdout, 'write')
+          .mockImplementation(() => true);
+        try {
+          const c = await context();
+          const upload = c.chunk();
+          let bytes = c.wav;
+          if (damage === 'pcm') upload.chunk.pcm_sha256 = '0'.repeat(64);
+          if (damage === 'wav') {
+            bytes = Buffer.from(bytes);
+            bytes[0] = 0;
+            upload.sha256 = createHash('sha256').update(bytes).digest('hex');
+          }
+          const registered = await register(c, upload);
+          const grant = await authorize(c, registered.upload.chunk.chunk_id);
+          if (damage === 'sha256' || damage === 'oversized') {
+            bytes =
+              damage === 'oversized'
+                ? Buffer.concat([bytes, Buffer.from([0])])
+                : Buffer.from(bytes);
+            if (damage === 'sha256') bytes[bytes.length - 1] = 1;
+            await s3.send(
+              new PutObjectCommand({
+                Bucket: bucket,
+                Key: objectKey({ id: grant.id, kind: 'staging' }),
+                Body: bytes,
+              }),
+            );
+          } else await put(grant, bytes);
+          const result = await complete(
+            c,
+            registered.upload.chunk.chunk_id,
+            grant.id,
           );
-        } else await put(grant, bytes);
-        const result = await complete(
+          expect(result.json()).toMatchObject({
+            code: damage === 'wav' ? 'invalid_audio' : 'checksum_mismatch',
+          });
+          expect(
+            (await db.recordings.chunk(c.user_id, upload.chunk.chunk_id)).state,
+          ).toBe('pending');
+          const records = telemetry.mock.calls
+            .map(([line]) => JSON.parse(String(line)))
+            .filter((row) => row.code === 'upload_verification_completed');
+          expect(records).toEqual([
+            {
+              code: 'upload_verification_completed',
+              finished_at: expect.any(String),
+              request_id: result.headers['x-request-id'],
+              stage: damage === 'oversized' ? 'read' : 'validate',
+              outcome: damage === 'wav' ? 'invalid_audio' : 'checksum_mismatch',
+              aborted: false,
+              duration_ms: expect.any(Number),
+            },
+          ]);
+        } finally {
+          telemetry.mockRestore();
+        }
+      },
+    );
+    it('keeps verified publication and byte wiping independent of a throwing telemetry sink', async () => {
+      const c = await context();
+      const registered = await register(c);
+      const grant = await authorize(c, registered.upload.chunk.chunk_id);
+      await put(grant, c.wav);
+      const original = blobs.read.bind(blobs);
+      let received: Buffer | undefined;
+      const read = vi
+        .spyOn(blobs, 'read')
+        .mockImplementationOnce(async (...args) => {
+          received = await original(...args);
+          return received;
+        });
+      const telemetry = vi
+        .spyOn(process.stdout, 'write')
+        .mockImplementation((line) => {
+          if (JSON.parse(String(line)).code === 'upload_verification_completed')
+            throw new Error('private-upload-telemetry-sink');
+          return true;
+        });
+      const errors = vi
+        .spyOn(console, 'error')
+        .mockImplementation(() => undefined);
+      try {
+        const response = await complete(
           c,
           registered.upload.chunk.chunk_id,
           grant.id,
         );
-        expect(result.json()).toMatchObject({
-          code: damage === 'wav' ? 'invalid_audio' : 'checksum_mismatch',
-        });
+        expect(response.statusCode).toBe(200);
+        expect(response.json()).toMatchObject({ state: 'verified' });
+        expect(received?.every((byte) => byte === 0)).toBe(true);
         expect(
-          (await db.recordings.chunk(c.user_id, upload.chunk.chunk_id)).state,
+          errors.mock.calls.map(([line]) => JSON.parse(String(line))),
+        ).toContainEqual(
+          expect.objectContaining({
+            code: 'upload_verification_telemetry_unavailable',
+          }),
+        );
+        expect(JSON.stringify(errors.mock.calls)).not.toContain('private-');
+        expect(
+          (
+            await db.recordings.chunk(
+              c.user_id,
+              registered.upload.chunk.chunk_id,
+            )
+          ).state,
+        ).toBe('verified');
+      } finally {
+        read.mockRestore();
+        telemetry.mockRestore();
+        errors.mockRestore();
+      }
+    });
+    it('reports a superseded verification lease separately from valid media without publishing the candidate', async () => {
+      const c = await context();
+      const registered = await register(c);
+      const grant = await authorize(c, registered.upload.chunk.chunk_id);
+      await put(grant, c.wav);
+      const original = blobs.promote.bind(blobs);
+      const promote = vi
+        .spyOn(blobs, 'promote')
+        .mockImplementationOnce(async (...args) => {
+          await original(...args);
+          await db.pool.query(
+            "UPDATE recording_chunks SET verification_until=now()-interval '1 second' WHERE id=$1",
+            [registered.upload.chunk.chunk_id],
+          );
+        });
+      const telemetry = vi
+        .spyOn(process.stdout, 'write')
+        .mockImplementation(() => true);
+      try {
+        const response = await complete(
+          c,
+          registered.upload.chunk.chunk_id,
+          grant.id,
+        );
+        expect(response.statusCode).toBe(409);
+        expect(response.json()).toMatchObject({
+          code: 'verification_superseded',
+          retryable: true,
+        });
+        const records = telemetry.mock.calls
+          .map(([line]) => JSON.parse(String(line)))
+          .filter((row) => row.code === 'upload_verification_completed');
+        expect(records).toMatchObject([
+          {
+            request_id: response.headers['x-request-id'],
+            stage: 'commit',
+            outcome: 'verification_superseded',
+            aborted: false,
+          },
+        ]);
+        expect(
+          (
+            await db.recordings.chunk(
+              c.user_id,
+              registered.upload.chunk.chunk_id,
+            )
+          ).state,
         ).toBe('pending');
-      },
-    );
+      } finally {
+        promote.mockRestore();
+        telemetry.mockRestore();
+      }
+    });
     it('promotes the exact verified bytes instead of copying a staging object that can change', async () => {
       const c = await context();
       const registered = await register(c);
@@ -2247,13 +2416,27 @@ describe.skipIf(!databaseUrl || !endpoint)(
             [c.workspace_id, c.user_id],
           );
         });
+      const telemetry = vi
+        .spyOn(process.stdout, 'write')
+        .mockImplementation(() => true);
       try {
         expect(
           (await complete(c, registered.upload.chunk.chunk_id, grant.id))
             .statusCode,
         ).toBe(404);
+        const records = telemetry.mock.calls
+          .map(([line]) => JSON.parse(String(line)))
+          .filter((row) => row.code === 'upload_verification_completed');
+        expect(records).toMatchObject([
+          {
+            stage: 'commit',
+            outcome: 'document_not_found',
+            aborted: false,
+          },
+        ]);
       } finally {
         promote.mockRestore();
+        telemetry.mockRestore();
       }
       expect(
         (

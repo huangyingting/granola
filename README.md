@@ -865,6 +865,30 @@ wire headers or URLs. Session metadata neither signals readiness nor advances
 recognition sequencing, audio finalization, acknowledgements or usage receipts.
 Duplicate observations and observations after transport close are ignored.
 
+### Upload verification telemetry
+
+Each actual, leased server-side upload verification emits one bounded
+`upload_verification_completed` record with the generated request UUID, final
+processing stage, controlled outcome, abort flag and monotonic duration.
+The stage distinguishes bounded object reads, WAV/descriptor validation,
+authority rechecks, immutable promotion and transactional publication.
+Only `verified` means publication returned successfully; a missing upload,
+storage outage, lost authority or superseded lease is **not a checksum failure**.
+Unknown errors become `operation_failed`, never arbitrary error codes or names.
+
+Measurement starts after the verification lease commits and ends at publication
+or the first processing failure, before failure-release cleanup. Idempotent
+completion receipts that perform no verification emit no additional observation.
+These are server verification attempts, not unique chunks, client PUT results,
+all rejected HTTP requests, network throughput or a durable lifetime counter.
+Worker-side canonical-input verification remains a distinct operation.
+
+No bytes, hashes, resource/account IDs, object keys, signed URLs, request
+headers/bodies, storage configuration or exception details are recorded.
+The shared bounded writer reports `upload_verification_telemetry_dropped` and
+`upload_verification_telemetry_unavailable` without changing verification or
+recovery behavior. Restrict log access and retain externally for at most 30 days.
+
 ### Azure HTTP request correlation and timing
 
 Migration **012** captures the server-generated originating request UUID on new

@@ -19,6 +19,7 @@ import {
 import { validateWav } from '@windows-ai-notes/ai/wav';
 import { principal } from './auth.js';
 import { parse } from './parse.js';
+import { uploadObservability } from './upload-observability.js';
 
 const idParams = z.strictObject({ id: resourceId });
 const pageQuery = z.strictObject({
@@ -55,6 +56,7 @@ export function registerRecordingRoutes(
   db: Database,
   configured: RecordingBlobs | null,
 ) {
+  const measurements = uploadObservability(app);
   const shutdown = new AbortController();
   let interval: NodeJS.Timeout | undefined;
   let maintenance: Promise<void> | null = null;
@@ -210,9 +212,11 @@ export function registerRecordingRoutes(
       shutdown.signal,
       AbortSignal.timeout(30_000),
     ]);
+    const measured = measurements.start(request.id);
     let bytes: Buffer | undefined;
     try {
       bytes = await blobs.read(lease.staging, lease.upload.size_bytes, signal);
+      measured.stage('validate');
       if (
         bytes.length !== lease.upload.size_bytes ||
         createHash('sha256').update(bytes).digest('hex') !==
@@ -226,10 +230,16 @@ export function registerRecordingRoutes(
           409,
         );
       validateWav(bytes);
+      measured.stage('authorize');
       await db.recordings.get(user, lease.recordingId);
+      measured.stage('promote');
       await blobs.promote(lease.candidate, bytes, signal);
-      return await db.recordings.finishVerification(user, lease);
+      measured.stage('commit');
+      const result = await db.recordings.finishVerification(user, lease);
+      measured.verified(signal.aborted);
+      return result;
     } catch (error) {
+      measured.failed(error, signal.aborted);
       try {
         await db.recordings.failVerification(lease);
       } catch (failure) {
