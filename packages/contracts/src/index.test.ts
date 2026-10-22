@@ -73,6 +73,16 @@ describe('capture boundaries', () => {
       code: null,
     };
     expect(audioStorageSchema.safeParse(base).success).toBe(true);
+    for (const difference of [-1, 0, 1]) {
+      expect(
+        audioStorageSchema.safeParse({
+          ...base,
+          quota_bytes: 2 * AUDIO_GIB,
+          used_bytes: Math.ceil((2 * AUDIO_GIB * 4) / 5) + difference,
+          state: difference < 0 ? 'ready' : 'warning',
+        }).success,
+      ).toBe(true);
+    }
     const blocked = {
       ...base,
       used_bytes: 5 * AUDIO_GIB,

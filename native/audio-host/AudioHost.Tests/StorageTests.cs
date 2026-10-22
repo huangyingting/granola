@@ -48,6 +48,20 @@ public sealed class StorageTests : IDisposable
     }
 
     [Theory]
+    [InlineData(-1, "ready")]
+    [InlineData(0, "warning")]
+    [InlineData(1, "warning")]
+    public void QuotaWarningRoundsUpToTheFirstWholeByteAtEightyPercent(int difference, string expected)
+    {
+        var quota = 2 * StorageBudget.GiB;
+        Sized("unique-copy", (quota * 4 + 4) / 5 + difference);
+        var status = new StorageBudget(root, quota, () => 10 * StorageBudget.GiB).Read();
+        Assert.Equal(expected, status.State);
+        Assert.Null(status.Code);
+        Assert.True(File.Exists(Path.Combine(root, "unique-copy")));
+    }
+
+    [Theory]
     [InlineData(-1, false)]
     [InlineData(0, false)]
     [InlineData(1, true)]

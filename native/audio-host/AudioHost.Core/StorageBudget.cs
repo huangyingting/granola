@@ -1,3 +1,5 @@
+using System.Runtime.InteropServices;
+
 namespace WindowsAiNotes.Audio;
 
 public sealed record StorageStatus(long UsedBytes, long QuotaBytes, long FreeBytes,
@@ -23,7 +25,7 @@ public sealed class StorageBudget
         this.root = Path.GetFullPath(root);
         ValidateQuota(quotaBytes);
         this.quotaBytes = quotaBytes;
-        this.freeSpace = freeSpace ?? (() => new DriveInfo(Path.GetPathRoot(this.root)!).AvailableFreeSpace);
+        this.freeSpace = freeSpace ?? (() => AvailableSpace(this.root));
     }
 
     public static void ValidateQuota(long bytes)
@@ -31,6 +33,21 @@ public sealed class StorageBudget
         if (bytes < GiB || bytes > MaxQuotaBytes || bytes % GiB != 0)
             throw new AudioException("invalid_request", "Choose a local audio limit from 1 to 50 whole GiB.");
     }
+
+    private static long AvailableSpace(string path)
+    {
+        if (!OperatingSystem.IsWindows()) return new DriveInfo(path).AvailableFreeSpace;
+        if (!GetDiskFreeSpaceEx(Path.TrimEndingDirectorySeparator(path) + Path.DirectorySeparatorChar,
+            out var available, out _, out _))
+            throw new IOException("The recording volume did not report available disk space.",
+                new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError()));
+        return checked((long)available);
+    }
+
+    [DllImport("kernel32.dll", EntryPoint = "GetDiskFreeSpaceExW", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetDiskFreeSpaceEx(string directory, out ulong available, out ulong total, out ulong free);
 
     public StorageStatus Read(long? quota = null)
     {
@@ -44,7 +61,7 @@ public sealed class StorageBudget
             var (used, free) = Measure();
             var code = quotaBytes - used - MetadataReserveBytes < CaptureHeadroomBytes ? "storage_limit" :
                 free - DiskReserveBytes < CaptureHeadroomBytes ? "disk_full" : null;
-            var warning = used >= quotaBytes * 4 / 5
+            var warning = used >= (quotaBytes * 4 + 4) / 5
                 || Math.Min(quotaBytes - used - MetadataReserveBytes, free - DiskReserveBytes) < 256L * 1024 * 1024;
             return new(used, quotaBytes, free, MetadataReserveBytes, DiskReserveBytes, CaptureHeadroomBytes,
                 code is not null ? "blocked" : warning ? "warning" : "ready", code);

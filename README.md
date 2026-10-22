@@ -691,7 +691,9 @@ format instead of treating retired sources as locally readable audio.
 (default 5 GiB), encrypted in Main's local settings and shared across accounts.
 Capacity checks count all native recording files, including partial writes,
 orphan files and failed cleanup; they do not infer usage from upload receipts.
-Idle checks are explicit and timestamped. The native helper checks admission
+Windows free space is queried for the actual recording directory and calling
+user, including redirected volumes and OS disk quotas, not an assumed drive
+letter. Idle checks are explicit and timestamped. The native helper checks admission
 and resume, monitors capacity every five seconds during recording or pause,
 and reserves the exact encrypted envelope size before each write, including
 the temporary replacement of a manifest. Main reuses the active or review
