@@ -64,6 +64,7 @@ const migrationFiles = [
   '010_audio_retention.sql',
   '011_audit.sql',
   '012_provider_origin.sql',
+  '013_deletion_journal.sql',
 ];
 
 export type Transaction = pg.PoolClient;

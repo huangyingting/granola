@@ -722,6 +722,32 @@ WAVs one at a time, never concatenates WAV headers or truncates to the short-cli
 limit, and zeroes each media buffer after processing. Provider calls do not hold
 database transactions. Local recordings are never removed by the transfer core.
 
+### Deletion recovery intent capture
+
+Migration **013** adds an append-only, body-free **primary-database journal** for
+document/audio/chat deletion, account/membership revocation, retention restrictions,
+staged clip removal and external object-disposal intent. Object intent is recorded
+when cleanup is first claimed, before the storage request; failures and tombstone
+rechecks do not create an unbounded stream of duplicate intents. Capture and its
+source mutation commit or roll back together. Journal/origin updates, deletes and
+truncation are rejected; retention cleanup does not prune these records.
+
+Only opaque resource IDs, controlled events/reasons, transaction identity and
+necessary retention bounds are retained, not content, object keys, credentials,
+identity subjects or actor attribution. Migration bootstraps currently observable
+restrictions and stores a deployment UUID and initialization time. It cannot
+reconstruct already-purged history: pre-initialization backups need a separately
+verified inventory and must not silently become eligible for recovery.
+Events are not a commit-ordered incremental export cursor. Privileged source-table
+truncation or trigger/schema changes are outside row capture and are not safe
+application deletion operations.
+
+**This journal is not yet an independent deletion ledger or restore safeguard.**
+Restoring its database also rolls it back. Independently retained, completeness-
+verified archival and a fail-closed replay/startup gate remain required before
+backup recovery or production readiness can be claimed. No HTTP administration
+endpoint or new end-user setting is introduced.
+
 ### AI allowances
 
 Each provisioned account defaults to **8 hours of audio, 2,000,000 input tokens
