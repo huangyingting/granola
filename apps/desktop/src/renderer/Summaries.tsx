@@ -139,6 +139,31 @@ export function SummaryPanel(props: Props) {
     !['offline', 'connecting', 'disconnecting', 'reauth_required'].includes(
       state.connection.status,
     );
+  const generation =
+    state.summary_generation?.job_id === job?.id
+      ? state.summary_generation
+      : null;
+  useEffect(() => {
+    if (!connected || !job || !pending(job.state)) return;
+    let alive = true;
+    void window.notes
+      .invoke({
+        operation: 'watchSummary',
+        scope: state.scope,
+        id: draft.id,
+        job_id: job.id,
+        action: 'start',
+      })
+      .then((response) => {
+        if (alive && !response.ok) setError(response.error.message);
+      })
+      .catch((error) => {
+        if (alive) setError(message(error));
+      });
+    return () => {
+      alive = false;
+    };
+  }, [connected, state.scope, draft.id, job?.id, job?.state]);
   const submission = state.summary_submission;
   useEffect(() => {
     if (submission?.rejected) {
@@ -512,6 +537,66 @@ export function SummaryPanel(props: Props) {
       )}
       {job && (
         <div className="summary-result">
+          {pending(job.state) && (
+            <section
+              aria-label="Live summary generation"
+              className="summary-consent"
+            >
+              <p role="status">
+                {generation?.status === 'paused'
+                  ? 'Live updates paused'
+                  : generation?.status === 'reconnecting'
+                    ? 'Reconnecting live updates'
+                    : generation?.phase === 'extract'
+                      ? 'Extracting meeting evidence'
+                      : generation?.phase === 'merge'
+                        ? 'Merging confirmed evidence'
+                        : generation?.phase === 'generate'
+                          ? 'Generating summary'
+                          : 'Waiting for generation'}
+                {generation
+                  ? ` - ${generation.completed_stages} saved stages`
+                  : ''}
+              </p>
+              {generation?.preview && (
+                <div
+                  aria-label="Unfinished summary preview"
+                  className="summary-preview"
+                >
+                  <strong>Unverified draft</strong>
+                  <p>{generation.preview}</p>
+                  <p className="quiet-note">
+                    Sources have not been validated. This preview cannot be
+                    reviewed, appended or exported.
+                  </p>
+                </div>
+              )}
+              {generation?.error && (
+                <p className="account-alert">{generation.error}</p>
+              )}
+              <button
+                disabled={busy || !connected}
+                onClick={() =>
+                  void action(async () => {
+                    await invoke({
+                      operation: 'watchSummary',
+                      scope: state.scope,
+                      id: draft.id,
+                      job_id: job.id,
+                      action:
+                        generation && generation.status !== 'paused'
+                          ? 'stop'
+                          : 'start',
+                    });
+                  })
+                }
+              >
+                {generation && generation.status !== 'paused'
+                  ? 'Pause live updates'
+                  : 'Resume live updates'}
+              </button>
+            </section>
+          )}
           {templateVersion && (
             <p className="quiet-note">
               Template:{' '}

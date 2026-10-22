@@ -25,6 +25,7 @@ import {
 } from '@windows-ai-notes/contracts/evidence';
 import { digest, type Database, type ClaimedJob } from '@windows-ai-notes/db';
 import { withUsage } from './usage.js';
+import { summaryPreview } from './preview.js';
 
 const interrupted = () =>
   new ServiceError(
@@ -225,7 +226,7 @@ export async function summarizeLongMeeting(
     SUMMARY_USAGE_RESERVATION,
   );
   const generated = await withUsage(db, call, (report) =>
-    generate(evidence, signal, report),
+    generate(evidence, signal, report, summaryPreview(db, job)),
   );
   const result = {
     kind: 'summary' as const,

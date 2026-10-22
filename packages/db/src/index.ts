@@ -98,9 +98,10 @@ type JobStatusRow = Pick<
   | 'current_note_revision'
   | 'current_transcript_revision'
   | 'progress'
+  | 'event_seq'
 >;
 const jobStatusQuery = `
- SELECT j.id,j.document_id,j.kind,j.state,j.attempt,j.input,j.result,j.error,j.created_at,j.progress,
+ SELECT j.id,j.document_id,j.kind,j.state,j.attempt,j.input,j.result,j.error,j.created_at,j.progress,j.event_seq,
  d.revision current_note_revision,d.transcript_revision current_transcript_revision FROM jobs j
  JOIN documents d ON d.id=j.document_id
  JOIN memberships m ON m.workspace_id=d.workspace_id AND m.user_id=j.owner_id AND m.active
@@ -852,7 +853,13 @@ export class Database {
     });
     return this.job(userId, jobId);
   }
-  async event(tx: Transaction, id: string, type: string, payload: unknown) {
+  async event(
+    tx: Transaction,
+    id: string,
+    type: string,
+    payload: unknown,
+    notify = true,
+  ) {
     const result = await tx.query<{ event_seq: number }>(
       'UPDATE jobs SET event_seq=event_seq+1 WHERE id=$1 RETURNING event_seq',
       [id],
@@ -861,6 +868,7 @@ export class Database {
       'INSERT INTO job_events (job_id,seq,event_type,payload) VALUES ($1,$2,$3,$4)',
       [id, result.rows[0]!.event_seq, type, JSON.stringify(payload)],
     );
+    if (!notify) return;
     const source = (
       await tx.query<{ document_id: string }>(
         'SELECT document_id FROM jobs WHERE id=$1',
@@ -1025,6 +1033,26 @@ export class Database {
           payload: row.payload,
         }),
       ),
+    };
+  }
+  async eventState(userId: string, id: string) {
+    const row = (
+      await this.pool.query<JobStatusRow & { completed_stages: number }>(
+        `SELECT v.*,(SELECT count(*)::integer FROM summary_steps s WHERE s.job_id=v.id AND s.state='completed') completed_stages
+       FROM (${jobStatusQuery} WHERE j.id=$1 AND j.owner_id=$2 AND d.deleted_at IS NULL) v`,
+        [id, userId],
+      )
+    ).rows[0];
+    if (!row)
+      throw new ServiceError(
+        'job_not_found',
+        'The job is unavailable or not accessible.',
+        404,
+      );
+    return {
+      job: jobView(row),
+      last_event_id: row.event_seq,
+      completed_stages: row.completed_stages,
     };
   }
   async cancel(userId: string, id: string) {

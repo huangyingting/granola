@@ -360,8 +360,45 @@ therefore pause when their account allowance cannot reserve another stage.
 Original cited segments remain inspectable after a newer canonical transcript
 replaces the selected revision. These structural checks do not prove semantic
 support, complete decision/action recall or language quality; approved
-real-meeting evaluation remains a release gate. Current-meeting chat and
-token-streamed generation are not implemented yet.
+real-meeting evaluation remains a release gate. Current-meeting chat is not
+implemented yet.
+
+### Live generation and replay
+
+Main opens authenticated, bounded `/v1/jobs/:id/events` streams for the selected
+active summary. The renderer receives only scoped desktop state, never service
+credentials or a renderer-owned `EventSource`. Main encrypts each replay cursor
+and unfinished overview together with the owning document; restart reconnects
+with that exact cursor. A cursor older than event retention is reset only from the
+authorized `/v1/jobs/:id/event-state` snapshot, whose job, event sequence and saved
+stage count share one database snapshot. Terminal streams drain every replay batch
+instead of stopping after the first 50 events.
+
+The configured Azure deployment streams structured final generation for both
+short and long summaries. Extraction and merge remain bounded structured requests.
+Only the leading overview string becomes a plain-text **Unverified draft**; raw
+JSON, incomplete escapes and unvalidated citations are never displayed as results.
+Its events retain the existing `job.progress` envelope and a versioned, fenced
+preview payload. The worker emits at most 80 text updates per attempt and rechecks
+the active lease, document and workspace before persisting each one.
+
+An unfinished preview cannot be reviewed, appended or exported. Main fetches the
+authorized job snapshot before exposing a validated result. Cancellation, failure,
+deletion, scope changes and observed revocation remove the active preview. **Pause
+live updates** stops the read subscription, not the accepted server job; the
+separate summary cancellation control cancels that job. Interrupted reads retry
+with bounded backoff without creating or retrying model work. Malformed streams or
+repeated connection failures pause visibly and preserve the last accepted cursor.
+Connections renew authorization every minute, reject redirects, and bound frame,
+connection and event counts. Heartbeats keep idle reads alive while the API
+rechecks resource access and token expiry.
+
+Known streaming usage is settled before final schema/citation validation. A
+truncated stream without a usage receipt retains its existing uncertain hold and
+requires explicit resume consent before another provider request. Streaming has no
+silent non-streaming/provider/region fallback. Stop old workers and run matching
+API, worker and desktop builds when upgrading; legacy request bodies, immutable
+prompt identities and final-result recovery remain unchanged.
 
 ## Server setup
 

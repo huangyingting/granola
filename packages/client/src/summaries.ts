@@ -18,6 +18,7 @@ import {
   summaryReferences,
   summaryReviewSchema,
   summarySourceSchema,
+  summaryWatchSchema,
   type SummaryReview,
 } from '@windows-ai-notes/contracts/generation';
 import type { DesktopCommand } from '@windows-ai-notes/contracts/desktop';
@@ -27,6 +28,7 @@ import {
 } from '@windows-ai-notes/contracts/templates';
 import { ApiClient, ClientError } from './http.js';
 import { summaryProgressSchema } from '@windows-ai-notes/contracts/evidence';
+import { SummaryEvents } from './generation.js';
 
 export const summaryIntentSchema = z.strictObject({
   body: summaryRequestSchema,
@@ -78,11 +80,33 @@ function summaryJob(
 }
 
 export class DesktopSummaries {
+  readonly events: SummaryEvents;
   private readonly writes = new Set<string>();
   constructor(
     private readonly local: LocalStore,
     private readonly hooks: Hooks,
-  ) {}
+  ) {
+    this.events = new SummaryEvents(local, {
+      ...hooks,
+      owner: (scope) => {
+        const owner = hooks.owner(scope);
+        const remote = owner.remote;
+        if (!remote)
+          throw problem(
+            'workspace_not_connected',
+            'Reconnect the original workspace for generation updates.',
+          );
+        return {
+          profile: owner.profile,
+          api: remote.api,
+          authorize: () => {
+            owner.authorize();
+            remote.authorize();
+          },
+        };
+      },
+    });
+  }
   private async remote<T>(
     scope: number,
     id: string,
@@ -395,6 +419,21 @@ export class DesktopSummaries {
         command.id,
         summaryJob(job, command.id, command.job_id),
       );
+      if (!active(job)) {
+        this.events.stop(job.id);
+        const saved = this.local.getArtifact(
+          context.profile,
+          command.id,
+          'summary-events',
+          summaryWatchSchema,
+        );
+        if (saved?.job_id === job.id)
+          this.local.deleteArtifact(
+            context.profile,
+            command.id,
+            'summary-events',
+          );
+      }
     });
   }
   async progress(command: Command<'getSummaryProgress'>) {

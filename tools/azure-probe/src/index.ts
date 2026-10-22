@@ -90,9 +90,14 @@ async function probeEvidence(
   );
   if (!accepted.facts.length)
     throw new Error('Synthetic merge lost all evidence.');
+  let previews = 0;
   const generated = await providers.summarizeFacts(
     input(accepted.facts),
     signal,
+    undefined,
+    async () => {
+      previews++;
+    },
   );
   account(generated.usage);
   validateSummaryCitations(generated.summary, factCitations(accepted.facts));
@@ -106,6 +111,7 @@ async function probeEvidence(
       input_tokens: inputTokens,
       output_tokens: outputTokens,
       credentials_logged: false,
+      preview_updates: previews,
     }),
   );
 }

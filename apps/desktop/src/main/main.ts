@@ -380,6 +380,21 @@ async function start() {
             summary_progress: { scope: command.scope, progress },
           });
         }
+        if (command.operation === 'watchSummary') {
+          const active = workspace();
+          active.assertScope(command.scope);
+          if (command.action === 'start')
+            await active.summaries.events.start(
+              command.scope,
+              command.id,
+              command.job_id,
+            );
+          else active.summaries.events.stop(command.job_id);
+          return desktopResponseSchema.parse({
+            ok: true,
+            state: active.snapshot(),
+          });
+        }
         if (
           command.operation === 'startSummary' ||
           command.operation === 'controlSummary' ||

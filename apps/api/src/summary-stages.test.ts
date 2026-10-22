@@ -152,6 +152,90 @@ describe.skipIf(!databaseUrl)(
       await db.summaries.prepare(job, stage);
       return { job, stage };
     }
+    it('drains every terminal replay batch and snapshots the cursor with its saved stage count', async () => {
+      const { job, stage } = await ready();
+      const call = await db.summaries.sending(job, stage, budget);
+      for (let index = 1; index <= 60; index++)
+        await db.summaries.preview(
+          job,
+          `Synthetic unfinished ${'x'.repeat(index)}`,
+        );
+      await db.usage.settle(call, actual);
+      await db.summaries.save(job, stage, {
+        kind: 'summary',
+        result: output(job),
+      });
+      await db.finish(job, output(job), null);
+      const response = await app.inject({
+        method: 'GET',
+        url: `/v1/jobs/${job.id}/events`,
+        headers,
+      });
+      const ids = [...response.body.matchAll(/^id: (\d+)$/gmu)].map((match) =>
+        Number(match[1]),
+      );
+      expect(ids.length).toBeGreaterThan(50);
+      const snapshot = await app.inject({
+        method: 'GET',
+        url: `/v1/jobs/${job.id}/event-state`,
+        headers,
+      });
+      expect(snapshot.statusCode).toBe(200);
+      expect(snapshot.json()).toMatchObject({
+        job: { id: job.id, state: 'succeeded' },
+        last_event_id: ids.at(-1),
+        completed_stages: 1,
+      });
+      expect(ids).toEqual(
+        Array.from({ length: ids.length }, (_, index) => index + 1),
+      );
+      expect(response.body).toContain('event: output.completed');
+    }, 30_000);
+    it('keeps known usage but never publishes a streamed draft rejected after the provider receipt', async () => {
+      const accepted = await queued();
+      await runOnce(db, {
+        ...providers,
+        summarize: async (_input, _signal, report, preview) => {
+          await preview!('This unfinished output is not a committed summary.');
+          await report!(actual);
+          throw new ServiceError(
+            'invalid_citation',
+            'Synthetic rejected output.',
+            502,
+          );
+        },
+      });
+      expect(await db.job(actor.user_id, accepted.id)).toMatchObject({
+        state: 'failed',
+        result: null,
+        error: { code: 'invalid_citation' },
+      });
+      expect(await db.usage.snapshot(actor.user_id)).toMatchObject({
+        settled_requests: '1',
+        uncertain_requests: '0',
+      });
+      expect(await db.eventState(actor.user_id, accepted.id)).toMatchObject({
+        completed_stages: 0,
+      });
+    });
+    it('fences late previews after lease loss, cancellation and deletion', async () => {
+      const { job, stage } = await ready();
+      await db.summaries.sending(job, stage, budget);
+      await db.summaries.preview(job, 'Unverified first prefix.');
+      await db.cancel(actor.user_id, job.id);
+      await expect(
+        db.summaries.preview(job, 'Unverified first prefix. Late.'),
+      ).rejects.toMatchObject({ code: 'job_lease_lost' });
+      const snapshot = await db.eventState(actor.user_id, job.id);
+      expect(snapshot.job.state).toBe('cancelled');
+      await db.deleteDocument(actor.user_id, job.documentId);
+      await expect(db.eventState(actor.user_id, job.id)).rejects.toMatchObject({
+        code: 'job_not_found',
+      });
+      await expect(
+        db.summaries.preview(job, 'Late deleted data.'),
+      ).rejects.toThrow();
+    });
     const expireLease = (job: ClaimedJob) =>
       db.pool.query(
         "UPDATE jobs SET lease_until=now()-interval '1 second' WHERE id=$1",

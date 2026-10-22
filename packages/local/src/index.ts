@@ -428,6 +428,10 @@ export class LocalStore {
       )
       .run(profile, id, this.seal(value, aad('vault2', profile, id, '')));
   }
+  deleteArtifact(profile: string, document: string, id: string): void {
+    this.get(profile, document);
+    this.deleteValue(profile, `artifact:${document}:${id}`);
+  }
   putArtifact(
     profile: string,
     document: string,

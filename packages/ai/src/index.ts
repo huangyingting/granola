@@ -1,4 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { readAzureStream, type PreviewReporter } from './stream.js';
+export type { PreviewReporter } from './stream.js';
 import { z } from 'zod';
 import {
   ServiceError,
@@ -94,11 +96,13 @@ export interface AiProviders {
     input: SummaryFactsInput,
     signal: AbortSignal,
     reportUsage?: UsageReporter,
+    preview?: PreviewReporter,
   ): Promise<{ summary: Summary; usage: Usage }>;
   summarize(
     snapshot: SummarySnapshot,
     signal: AbortSignal,
     reportUsage?: UsageReporter,
+    preview?: PreviewReporter,
   ): Promise<{ summary: Summary; usage: Usage }>;
   transcribe(
     wav: Buffer,
@@ -248,13 +252,18 @@ export function createAzureProviders(
     url: URL,
     init: RequestInit,
     signal: AbortSignal,
+    preview?: PreviewReporter,
+    reportUsage?: UsageReporter,
   ): Promise<unknown> {
     try {
+      const bounded = AbortSignal.any([signal, AbortSignal.timeout(90_000)]);
       const response = await transport(url, {
         ...init,
         redirect: 'error',
-        signal: AbortSignal.any([signal, AbortSignal.timeout(90_000)]),
+        signal: bounded,
       });
+      if (preview && response.ok)
+        return await readAzureStream(response, bounded, preview, reportUsage);
       return await readAzureResponse(response);
     } catch (error) {
       if (error instanceof ServiceError) throw error;
@@ -280,6 +289,7 @@ export function createAzureProviders(
     label: string,
     signal: AbortSignal,
     reportUsage?: UsageReporter,
+    preview?: PreviewReporter,
   ) {
     const url = new URL(
       `/openai/deployments/${encodeURIComponent(config.AZURE_OPENAI_DEPLOYMENT)}/chat/completions`,
@@ -295,6 +305,9 @@ export function createAzureProviders(
           'content-type': 'application/json',
         },
         body: JSON.stringify({
+          ...(preview
+            ? { stream: true, stream_options: { include_usage: true } }
+            : {}),
           messages: [
             {
               role: 'system',
@@ -314,9 +327,11 @@ export function createAzureProviders(
         }),
       },
       signal,
+      preview,
+      reportUsage,
     );
     const receipt = tokenReceipt.safeParse(value);
-    if (receipt.success)
+    if (receipt.success && !preview)
       await reportUsage?.({
         input_tokens: receipt.data.usage.prompt_tokens,
         output_tokens: receipt.data.usage.completion_tokens,
@@ -360,7 +375,7 @@ export function createAzureProviders(
   return {
     provider: 'azure',
     configurationVersion,
-    async summarize(snapshot, signal, reportUsage) {
+    async summarize(snapshot, signal, reportUsage, preview) {
       const evidence = summaryEvidence(snapshot);
       const template = summaryPromptVersion(snapshot);
       const generated = await generate(
@@ -371,6 +386,7 @@ export function createAzureProviders(
         'summary',
         signal,
         reportUsage,
+        preview,
       );
       return {
         summary: validateSummary(generated.value, snapshot),
@@ -417,7 +433,7 @@ export function createAzureProviders(
         usage: generated.usage,
       };
     },
-    async summarizeFacts(value, signal, reportUsage) {
+    async summarizeFacts(value, signal, reportUsage, preview) {
       const input = summaryFactsInputSchema.parse(value);
       const template = summaryPromptVersion(input);
       if (!input.facts.length)
@@ -434,6 +450,7 @@ export function createAzureProviders(
         'summary',
         signal,
         reportUsage,
+        preview,
       );
       return {
         summary: validateSummaryCitations(

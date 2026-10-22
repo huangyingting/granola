@@ -20,6 +20,7 @@ import type { RecordingBlobs } from '@windows-ai-notes/storage';
 import { transcribeRecording } from './recording.js';
 import { withUsage } from './usage.js';
 import { summarizeLongMeeting } from './summary.js';
+import { summaryPreview } from './preview.js';
 
 export async function runOnce(
   db: Database,
@@ -98,7 +99,12 @@ export async function runOnce(
             SUMMARY_USAGE_RESERVATION,
           );
           const generated = await withUsage(db, call, (report) =>
-            providers.summarize(snapshot, signal, report),
+            providers.summarize(
+              snapshot,
+              signal,
+              report,
+              summaryPreview(db, job),
+            ),
           );
           result = {
             kind: 'summary',

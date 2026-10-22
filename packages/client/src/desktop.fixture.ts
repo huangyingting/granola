@@ -14,6 +14,7 @@ import {
   transcriptHeaderSchema,
   transcriptTimelineEntrySchema,
   jobSchema,
+  jobEventSchema,
   finalizeTranscriptSchema,
   applyTranscriptSchema,
   accountUsageSchema,
@@ -65,6 +66,25 @@ export async function desktopFixture() {
     z.infer<typeof transcriptTimelineEntrySchema>[]
   >();
   const jobs = new Map<string, Job>();
+  const events = new Map<string, z.infer<typeof jobEventSchema>[]>();
+  function event(
+    id: string,
+    type: z.infer<typeof jobEventSchema>['event_type'],
+    payload: unknown,
+  ) {
+    const rows = events.get(id) ?? [];
+    rows.push(
+      jobEventSchema.parse({
+        job_id: id,
+        seq: rows.length + 1,
+        event_type: type,
+        payload,
+        schema_version: 1,
+        created_at: new Date().toISOString(),
+      }),
+    );
+    events.set(id, rows);
+  }
   const summarySnapshots = new Map<string, SummarySnapshot>();
   const summaryStages = new Map<
     string,
@@ -122,6 +142,7 @@ export async function desktopFixture() {
     lose_summary_response: false,
     lose_summary_resume_response: false,
     summary_resume_tokens: [] as string[],
+    summary_event_cursors: [] as number[],
     summary_online: true,
     workspaces: [{ id: workspace, name: 'Synthetic cloud workspace' }],
     failures: [] as unknown[],
@@ -382,7 +403,21 @@ export async function desktopFixture() {
       },
     });
     jobs.set(id, next);
+    event(id, 'output.completed', next.result);
     record(document, 'job', id);
+  }
+  function previewSummary(id: string, text: string) {
+    const job = jobs.get(id);
+    if (!job || job.kind !== 'summary')
+      throw new Error('Missing synthetic summary.');
+    const attempt = Math.max(1, job.attempt);
+    jobs.set(id, { ...job, state: 'running', attempt });
+    event(id, 'job.progress', {
+      stage: 'summary_preview',
+      version: 1,
+      attempt,
+      text,
+    });
   }
   function failSummary(id: string) {
     const job = jobs.get(id),
@@ -397,6 +432,7 @@ export async function desktopFixture() {
       throw new Error('Missing active synthetic summary.');
     stages.requests++;
     stages.uncertain++;
+    event(id, 'job.failed', { code: 'summary_dispatch_unconfirmed' });
     jobs.set(id, {
       ...job,
       state: 'failed',
@@ -490,6 +526,51 @@ export async function desktopFixture() {
       const existing = documents.get(id);
       if (request.method === 'GET' && parts[2] === 'jobs') {
         const job = jobs.get(id);
+        if (parts[4] === 'event-state') {
+          if (!job || !documents.has(job.document_id))
+            return error(response, 'job_not_found', 404);
+          return send(response, {
+            job,
+            last_event_id: events.get(id)?.length ?? 0,
+            completed_stages: summaryStages.get(id)?.completed ?? 0,
+          });
+        }
+        if (parts[4] === 'events') {
+          if (!job || !documents.has(job.document_id))
+            return error(response, 'job_not_found', 404);
+          let cursor = Number(request.headers['last-event-id'] ?? 0);
+          state.summary_event_cursors.push(cursor);
+          response.writeHead(200, {
+            'content-type': 'text/event-stream',
+            'cache-control': 'no-store',
+          });
+          let closed = false,
+            heartbeat = Date.now();
+          response.once('close', () => {
+            closed = true;
+          });
+          while (!closed && state.active && documents.has(job.document_id)) {
+            for (const value of (events.get(id) ?? []).filter(
+              (value) => value.seq > cursor,
+            )) {
+              response.write(
+                `id: ${value.seq}\nevent: ${value.event_type}\ndata: ${JSON.stringify(value)}\n\n`,
+              );
+              cursor = value.seq;
+            }
+            if (
+              !['queued', 'running', 'retry_wait'].includes(jobs.get(id)!.state)
+            )
+              break;
+            if (Date.now() - heartbeat > 1000) {
+              response.write(': heartbeat\n\n');
+              heartbeat = Date.now();
+            }
+            await new Promise((resolve) => setTimeout(resolve, 25));
+          }
+          response.end();
+          return;
+        }
         if (parts[4] === 'summary-progress') {
           const stages = summaryStages.get(id);
           if (!job || !documents.has(job.document_id))
@@ -671,6 +752,7 @@ export async function desktopFixture() {
           completed: 0,
           resumes: new Set(),
         });
+        event(job.id, 'job.accepted', { state: 'queued' });
         replays.set(key, { hash, value: job });
         record(existing, 'job', job.id);
         if (state.lose_summary_response) {
@@ -879,6 +961,7 @@ export async function desktopFixture() {
     transcript,
     publishCandidate,
     publishSummary,
+    previewSummary,
     failSummary,
     registerRecording(
       document_id: string,

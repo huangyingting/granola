@@ -1,6 +1,38 @@
 import { z } from 'zod';
-import { citationSchema, resourceId, type Summary } from './server.js';
+import {
+  citationSchema,
+  resourceId,
+  jobSchema,
+  type Summary,
+} from './server.js';
 import { summaryTemplateIdSchema } from './templates.js';
+
+export const summaryPreviewSchema = z.strictObject({
+  stage: z.literal('summary_preview'),
+  version: z.literal(1),
+  attempt: z.number().int().positive(),
+  text: z
+    .string()
+    .max(4000)
+    .refine((value) => !value.includes('\0')),
+});
+export const jobEventStateSchema = z.strictObject({
+  job: jobSchema,
+  last_event_id: z.number().int().min(0).max(2_147_483_647),
+  completed_stages: z.number().int().min(0).max(40_000),
+});
+export const summaryWatchSchema = z.strictObject({
+  document_id: resourceId,
+  job_id: resourceId,
+  last_event_id: z.number().int().min(0).max(2_147_483_647),
+  attempt: z.number().int().nonnegative(),
+  preview: z.string().max(4000),
+  completed_stages: z.number().int().min(0).max(40_000),
+  phase: z.enum(['extract', 'merge', 'generate']).nullable(),
+  status: z.enum(['connecting', 'streaming', 'reconnecting', 'paused']),
+  error: z.string().max(1000).nullable(),
+});
+export type SummaryWatch = z.infer<typeof summaryWatchSchema>;
 
 export const summarySubmissionSchema = z.strictObject({
   language: z.enum(['en', 'zh']),

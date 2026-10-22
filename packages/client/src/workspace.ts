@@ -175,6 +175,8 @@ export class WorkspaceController {
   }
   private emit(kind: DesktopChange['kind']) {
     if (this.critical || kind === 'scope' || kind === 'revoked')
+      this.summaries?.events.stop();
+    if (this.critical || kind === 'scope' || kind === 'revoked')
       for (const read of this.transcriptReads) read.abort();
     if (kind === 'scope' || kind === 'revoked') {
       this.query = '';
@@ -333,6 +335,10 @@ export class WorkspaceController {
               : { template_id: summaryIntent.body.template_id }),
           }
         : null,
+      summary_generation: this.summaries.events.snapshot(
+        profile,
+        selected?.id ?? null,
+      ),
       transcript_revision: details?.transcript_revision ?? 0,
       transcript:
         selected && details?.transcript_revision
@@ -366,6 +372,7 @@ export class WorkspaceController {
     this.stopEngine();
   }
   private stopEngine() {
+    this.summaries?.events.stop();
     for (const read of this.transcriptReads) read.abort();
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
@@ -1428,6 +1435,7 @@ export class WorkspaceController {
         });
         this.selection.delete(profile);
       } else if (command.operation === 'select') {
+        this.summaries.events.stop();
         this.local.get(profile, command.id);
         this.local.putValue(profile, 'selected-document', command.id);
         this.selection.delete(profile);
@@ -1439,6 +1447,7 @@ export class WorkspaceController {
           command.value,
         );
       } else if (command.operation === 'delete') {
+        this.summaries.events.stop();
         this.local.get(profile, command.id);
         this.local.remove(profile, command.id);
       } else if (command.operation === 'resolve') {

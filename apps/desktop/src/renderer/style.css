@@ -1024,6 +1024,17 @@ h1 {
   display: block;
   margin-top: 16px;
 }
+.summary-preview {
+  max-height: 240px;
+  overflow: auto;
+  padding: 14px;
+  border-radius: 10px;
+  background: #f4f6fb;
+}
+.summary-preview p {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 .summary-check {
   display: flex;
   align-items: start;

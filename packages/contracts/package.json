@@ -9,6 +9,7 @@
     "./content": "./dist/content.js",
     "./desktop": "./dist/desktop.js",
     "./generation": "./dist/generation.js",
+    "./sse": "./dist/sse.js",
     "./evidence": "./dist/evidence.js",
     "./templates": "./dist/templates.js",
     "./recording": "./dist/recording.js",

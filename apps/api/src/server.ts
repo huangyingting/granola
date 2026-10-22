@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
+import { jobEventStateSchema } from '@windows-ai-notes/contracts/generation';
 import { Readable } from 'node:stream';
 import { setTimeout as delay } from 'node:timers/promises';
 import Fastify from 'fastify';
@@ -470,6 +471,12 @@ export async function createServer(
       );
     return db.retryRecordingTranscription(user, id);
   });
+  app.get('/v1/jobs/:id/event-state', async (request) => {
+    const { id } = parse(idParams, request.params);
+    return jobEventStateSchema.parse(
+      await db.eventState(principal(request).userId, id),
+    );
+  });
   app.get('/v1/jobs/:id/events', async (request, reply) => {
     const { id } = parse(idParams, request.params);
     const identity = principal(request);
@@ -494,7 +501,13 @@ export async function createServer(
       );
     streams.set(identity.userId, (streams.get(identity.userId) ?? 0) + 1);
     const closed = new AbortController();
-    const signal = AbortSignal.any([closed.signal, shutdown.signal]);
+    const signal = AbortSignal.any([
+      closed.signal,
+      shutdown.signal,
+      AbortSignal.timeout(
+        Math.max(1, Math.min(60_000, identity.expiresAt - Date.now())),
+      ),
+    ]);
     reply.raw.once('close', () => closed.abort());
     reply.hijack();
     reply.raw.writeHead(200, {
@@ -504,6 +517,7 @@ export async function createServer(
       'x-accel-buffering': 'no',
     });
     try {
+      let heartbeat = Date.now();
       while (!signal.aborted && Date.now() < identity.expiresAt) {
         const batch = await db.events(identity.userId, id, cursor);
         for (const event of batch.events) {
@@ -517,7 +531,13 @@ export async function createServer(
           }
           cursor = event.seq;
         }
-        if (batch.terminal) break;
+        if (batch.terminal && batch.events.length < 50) break;
+        if (Date.now() - heartbeat >= 5000) {
+          if (!reply.raw.write(': heartbeat\n\n'))
+            await once(reply.raw, 'drain', { signal });
+          heartbeat = Date.now();
+        }
+        if (batch.events.length === 50) continue;
         await delay(500, undefined, { signal });
       }
     } catch (error) {

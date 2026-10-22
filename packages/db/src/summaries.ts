@@ -33,6 +33,7 @@ import {
   type ClaimedJob,
 } from './index.js';
 import { usageTotals } from './usage.js';
+import { summaryPreviewSchema } from '@windows-ai-notes/contracts/generation';
 
 const identitySchema = z.strictObject({
   provider: z.enum(['azure', 'fixture']),
@@ -371,7 +372,44 @@ export class SummaryStages {
         'UPDATE summary_runs SET updated_at=now() WHERE job_id=$1',
         [job.id],
       );
+      if (key.phase === 'generate')
+        await this.database.event(
+          tx,
+          job.id,
+          'job.progress',
+          {
+            stage: 'summary_preview',
+            version: 1,
+            attempt: job.leaseToken,
+            text: '',
+          },
+          false,
+        );
       return call;
+    });
+  }
+  async preview(job: ClaimedJob, text: string) {
+    const payload = summaryPreviewSchema.parse({
+      stage: 'summary_preview',
+      version: 1,
+      attempt: job.leaseToken,
+      text,
+    });
+    return this.database.transaction(async (tx) => {
+      await this.guard(tx, job);
+      await this.run(tx, job.id);
+      const step = await this.step(tx, job, {
+        phase: 'generate',
+        round: 0,
+        index: 0,
+      });
+      if (step?.state !== 'sending' || !step.owned)
+        throw new ServiceError(
+          'job_lease_lost',
+          'This worker does not own the unfinished generation.',
+          409,
+        );
+      await this.database.event(tx, job.id, 'job.progress', payload, false);
     });
   }
   async save(

@@ -15,6 +15,7 @@ import {
 import { createServer } from '@windows-ai-notes/api/server';
 import { Database } from '@windows-ai-notes/db';
 import { LocalStore } from '@windows-ai-notes/local';
+import { z } from 'zod';
 import {
   richTextFromPlainText,
   richTextToPlainText,
@@ -212,6 +213,154 @@ describe.skipIf(!databaseUrl)(
       await admin.pool.query(`DROP SCHEMA "${schema}" CASCADE`);
       await admin.close();
     });
+    it('immediately clears a cancelled Main subscription and its encrypted unfinished artifact', async () => {
+      const document = await connect();
+      const job = await start(document.id);
+      await controller.summaries.events.start(
+        controller.scope,
+        document.id,
+        job.id,
+      );
+      await controller.summaries.control({
+        operation: 'controlSummary',
+        scope: controller.scope,
+        id: document.id,
+        job_id: job.id,
+        action: 'cancel',
+        confirmed: true,
+      });
+      expect(controller.snapshot().summary_generation).toBeNull();
+      expect(
+        local.getArtifact(
+          controller.profile,
+          document.id,
+          'summary-events',
+          z.unknown(),
+        ),
+      ).toBeNull();
+      expect(controller.snapshot().jobs[0]?.state).toBe('cancelled');
+    });
+    it('recovers an expired event cursor from the authorized snapshot without creating or retrying any model work', async () => {
+      const document = await connect();
+      const job = await start(document.id);
+      await db.pool.query('DELETE FROM job_events WHERE job_id=$1', [job.id]);
+      await db.pool.query('UPDATE jobs SET event_seq=10 WHERE id=$1', [job.id]);
+      await controller.summaries.events.start(
+        controller.scope,
+        document.id,
+        job.id,
+      );
+      await vi.waitFor(
+        () =>
+          expect(controller.snapshot().summary_generation).toMatchObject({
+            last_event_id: 10,
+            preview: '',
+            completed_stages: 0,
+          }),
+        { timeout: 10_000 },
+      );
+      controller.summaries.events.stop(job.id);
+      expect(controller.snapshot().summary_generation).toBeNull();
+      expect(await db.jobs(actor.user_id, document.id)).toHaveLength(1);
+      expect((await db.usage.snapshot(actor.user_id)).uncertain_requests).toBe(
+        '0',
+      );
+    });
+    it('replays encrypted Main-owned previews across restart and never treats an unfinished stream as a summary result', async () => {
+      const document = await connect();
+      const job = await start(document.id);
+      await controller.summaries.events.start(
+        controller.scope,
+        document.id,
+        job.id,
+      );
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const work = runOnce(db, {
+        provider: 'fixture',
+        configurationVersion: 'streamed-summary-fixture-v1',
+        transcribe: async () => {
+          throw new Error('Unexpected transcription.');
+        },
+        summarize: async (snapshot, _signal, _report, preview) => {
+          await preview!('Unfinished original evidence.');
+          await gate;
+          return {
+            summary: {
+              overview: {
+                text: 'Validated final summary.',
+                citations: [
+                  {
+                    source: 'note',
+                    id: snapshot.document_id,
+                    revision: snapshot.note_revision,
+                  },
+                ],
+              },
+              topics: [],
+              decisions: [],
+              action_items: [],
+              open_questions: [],
+            },
+            usage: { input_tokens: 17, output_tokens: 11, audio_ms: 0 },
+          };
+        },
+      });
+      try {
+        await vi.waitFor(
+          () =>
+            expect(controller.snapshot().summary_generation?.preview).toBe(
+              'Unfinished original evidence.',
+            ),
+          { timeout: 10_000 },
+        );
+        expect(controller.snapshot().jobs[0]?.result).toBeNull();
+        await expect(
+          controller.summaries.open(reviewCommand(document.id, job.id)),
+        ).rejects.toMatchObject({ code: 'summary_unavailable' });
+        const cursor = controller.snapshot().summary_generation!.last_event_id;
+        controller.dispose();
+        local.close();
+        local = new LocalStore(join(directory, 'notes.sqlite'), key);
+        controller = open();
+        await controller.summaries.events.start(
+          controller.scope,
+          document.id,
+          job.id,
+        );
+        expect(controller.snapshot().summary_generation).toMatchObject({
+          last_event_id: cursor,
+          preview: 'Unfinished original evidence.',
+        });
+        release();
+        await work;
+        await vi.waitFor(
+          () =>
+            expect(controller.snapshot().jobs[0]).toMatchObject({
+              state: 'succeeded',
+              result: {
+                kind: 'summary',
+                summary: { overview: { text: 'Validated final summary.' } },
+              },
+            }),
+          { timeout: 10_000 },
+        );
+        expect(controller.snapshot().summary_generation).toBeNull();
+        expect(
+          local.getArtifact(
+            controller.profile,
+            document.id,
+            'summary-events',
+            z.unknown(),
+          ),
+        ).toBeNull();
+      } finally {
+        release();
+        await work;
+      }
+    }, 30_000);
     it('pins explicit full-meeting consent across a lost reply and restart without renegotiating or changing the original body', async () => {
       const document = await connect('证据'.repeat(10_000));
       await expect(

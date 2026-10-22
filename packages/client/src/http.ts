@@ -2,6 +2,7 @@ import { z } from 'zod';
 import {
   documentSchema,
   jobSchema,
+  jobEventSchema,
   transcriptSchema,
   transcriptPageSchema,
   transcriptPageQuerySchema,
@@ -14,6 +15,7 @@ import {
 import type { Mutation } from '@windows-ai-notes/local';
 import { ClientError } from './errors.js';
 import { openLiveConnection, type LiveConnectionOptions } from './live.js';
+import { SseDecoder, SseDecodeError } from '@windows-ai-notes/contracts/sse';
 export { ClientError } from './errors.js';
 export function serverUrl(value: string, allowLoopback = false): string {
   let url: URL;
@@ -103,6 +105,32 @@ export async function responseJson<T>(
     reader.releaseLock();
   }
 }
+async function checkResponse(response: Response) {
+  if (response.status >= 300 && response.status < 400) {
+    await response.body?.cancel();
+    throw new ClientError(
+      'service_redirect_rejected',
+      'The service redirected the request. Credentials were not forwarded.',
+      response.status,
+    );
+  }
+  if (!response.ok) {
+    const body = await responseJson(response, errorSchema, 16_384);
+    const seconds = Number(response.headers.get('retry-after') ?? 0);
+    throw new ClientError(
+      body.code,
+      body.message,
+      response.status,
+      body.retryable,
+      Number.isFinite(seconds) && seconds > 0
+        ? Math.min(300, seconds)
+        : response.status === 429
+          ? 30
+          : 0,
+      body.purge_workspace_id,
+    );
+  }
+}
 export class ApiClient {
   readonly base: string;
   constructor(
@@ -159,31 +187,7 @@ export class ApiClient {
         redirect: 'manual',
         cache: 'no-store',
       });
-      if (response.status >= 300 && response.status < 400) {
-        await response.body?.cancel();
-        throw new ClientError(
-          'service_redirect_rejected',
-          'The service redirected the request. Credentials were not forwarded.',
-          response.status,
-        );
-      }
-      if (!response.ok) {
-        const body = await responseJson(response, errorSchema, 16_384);
-        const header = response.headers.get('retry-after');
-        const seconds = header ? Number(header) : 0;
-        throw new ClientError(
-          body.code,
-          body.message,
-          response.status,
-          body.retryable,
-          Number.isFinite(seconds) && seconds > 0
-            ? Math.min(300, seconds)
-            : response.status === 429
-              ? 30
-              : 0,
-          body.purge_workspace_id,
-        );
-      }
+      await checkResponse(response);
       if (options.empty) {
         if (response.status !== 204) {
           await response.body?.cancel();
@@ -211,6 +215,131 @@ export class ApiClient {
         0,
         true,
       );
+    }
+  }
+  async events(
+    id: string,
+    after: number,
+    received: (event: z.infer<typeof jobEventSchema>) => Promise<void>,
+    signal: AbortSignal,
+  ) {
+    resourceId.parse(id);
+    z.number().int().min(0).max(2_147_483_647).parse(after);
+    const bounded = AbortSignal.any([signal, AbortSignal.timeout(60_000)]);
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    try {
+      const headers = await this.headers();
+      bounded.throwIfAborted();
+      const response = await fetch(`${this.base}/v1/jobs/${id}/events`, {
+        headers: {
+          ...headers,
+          Accept: 'text/event-stream',
+          'Last-Event-ID': String(after),
+        },
+        redirect: 'manual',
+        cache: 'no-store',
+        signal: bounded,
+      });
+      await checkResponse(response);
+      if (
+        !response.headers
+          .get('content-type')
+          ?.toLowerCase()
+          .startsWith('text/event-stream') ||
+        !response.body
+      ) {
+        await response.body?.cancel();
+        throw new ClientError(
+          'invalid_event_stream',
+          'The service did not return a generation event stream.',
+        );
+      }
+      reader = response.body.getReader();
+      const decoder = new SseDecoder(2 * 1024 * 1024);
+      let bytes = 0,
+        count = 0;
+      while (true) {
+        bounded.throwIfAborted();
+        const part = await reader.read();
+        let frames;
+        try {
+          frames = part.done ? decoder.finish() : decoder.push(part.value);
+        } catch (error) {
+          if (
+            part.done &&
+            ((error instanceof SseDecodeError && error.code === 'incomplete') ||
+              error instanceof TypeError)
+          )
+            throw new ClientError(
+              'event_stream_interrupted',
+              'Generation updates ended mid-event. Replaying from the last saved cursor.',
+              0,
+              true,
+            );
+          throw new ClientError(
+            'invalid_event_stream',
+            'The service returned invalid or oversized event framing.',
+          );
+        }
+        if (!part.done) bytes += part.value.length;
+        if (bytes > 4 * 1024 * 1024) return after;
+        for (const frame of frames) {
+          let value: unknown;
+          try {
+            value = JSON.parse(frame.data) as unknown;
+          } catch {
+            throw new ClientError(
+              'invalid_event_stream',
+              'The service returned an invalid event.',
+            );
+          }
+          const parsed = jobEventSchema.safeParse(value);
+          if (
+            !parsed.success ||
+            parsed.data.job_id !== id ||
+            parsed.data.seq !== after + 1 ||
+            frame.id !== String(parsed.data.seq) ||
+            frame.event !== parsed.data.event_type
+          )
+            throw new ClientError(
+              'invalid_event_stream',
+              'The event does not match its authorized job, sequence or schema.',
+            );
+          signal.throwIfAborted();
+          await received(parsed.data);
+          after = parsed.data.seq;
+          if (++count === 512) return after;
+        }
+        if (part.done) return after;
+      }
+    } catch (error) {
+      if (error instanceof ClientError) throw error;
+      if (signal.aborted)
+        throw new ClientError(
+          'request_cancelled',
+          'Generation updates were stopped.',
+        );
+      if (bounded.aborted)
+        throw new ClientError(
+          'event_connection_expired',
+          'Renewing generation updates.',
+          0,
+          true,
+        );
+      throw new ClientError(
+        'service_unavailable',
+        'Generation updates were interrupted. Saved progress was preserved.',
+        0,
+        true,
+      );
+    } finally {
+      if (reader) {
+        try {
+          await reader.cancel();
+        } finally {
+          reader.releaseLock();
+        }
+      }
     }
   }
   identity(signal?: AbortSignal) {

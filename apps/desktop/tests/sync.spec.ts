@@ -161,6 +161,26 @@ test('recovers one summary and resume receipt, inspects frozen evidence, persist
     ).toHaveCount(0);
     expect(fixture.state.jobs.size).toBe(1);
     const job = [...fixture.state.jobs.values()][0]!;
+    fixture.previewSummary(
+      job.id,
+      'Synthetic unfinished overview, not a validated result.',
+    );
+    await expect(page.getByLabel('Unfinished summary preview')).toContainText(
+      'Synthetic unfinished overview, not a validated result.',
+    );
+    await expect(
+      page.getByRole('button', { name: 'Review and edit draft', exact: true }),
+    ).toHaveCount(0);
+    await close(application);
+    application = null;
+    application = await launch(directory);
+    page = await application.firstWindow();
+    await expect(page.getByLabel('Unfinished summary preview')).toContainText(
+      'Synthetic unfinished overview, not a validated result.',
+    );
+    expect(
+      fixture.state.summary_event_cursors.some((cursor) => cursor > 0),
+    ).toBe(true);
     fixture.failSummary(job.id);
     await page
       .getByRole('button', { name: 'Refresh summary', exact: true })
@@ -205,6 +225,7 @@ test('recovers one summary and resume receipt, inspects frozen evidence, persist
       prompt_version: 'decisions-actions-v1',
     });
     await synchronize(application);
+    await expect(page.getByLabel('Unfinished summary preview')).toHaveCount(0);
     await expect(
       page.getByText('Synthetic generated summary for review.', {
         exact: true,
