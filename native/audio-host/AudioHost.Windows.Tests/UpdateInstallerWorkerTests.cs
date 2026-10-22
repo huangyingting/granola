@@ -52,7 +52,7 @@ public sealed class UpdateInstallerWorkerTests : IDisposable
             return scenario == "signature-error" && version == "0.1.1"
                 ? UpdateTrustResult.Rejected("update_signature_invalid")
                 : new(1, true, "update_verified", prepared.Artifact);
-        }, start =>
+        }, (start, handles) =>
         {
             Assert.True(fixture.Parent.HasExited);
             Assert.False(prepared.IsDisposed);
@@ -60,9 +60,11 @@ public sealed class UpdateInstallerWorkerTests : IDisposable
             Assert.Equal(candidate, start.FileName);
             Assert.Equal($"/currentuser /S /D={root}", start.Arguments);
             Assert.Throws<IOException>(() => { using var overwrite = File.OpenWrite(candidate); });
+            Assert.True(handles.Count() >= 2);
+            Assert.Throws<WindowsAiNotes.Updates.UpdateHandoffException>(() => UpdateOperationLock.OpenAdmission());
             launched = true;
             observations.Add("launch");
-            return Surrogate(scenario == "exit-error" ? 2 : 0);
+            return new(Surrogate(scenario == "exit-error" ? 2 : 0));
         }, TimeSpan.FromSeconds(10));
         var pending = UpdateInstallerWorker.ExecutePreparedAsync(request, fixture.Parent, prepared, journal,
             fixture.Worker, fixture.Worker, services, fixture.Deadline.Token);
@@ -106,12 +108,12 @@ public sealed class UpdateInstallerWorkerTests : IDisposable
         var services = new UpdateWorkerServices(
             version => new(1, true, "update_installation_verified", new(root, request.Application, version, "Synthetic", "x64")),
             _ => new(1, true, "update_verified", prepared.Artifact),
-            _ =>
+            (_, _) =>
             {
                 var process = Surrogate(0, waitForInput: true);
                 release = process.StandardInput;
                 cancellation.Cancel();
-                return process;
+                return new(process);
             }, TimeSpan.FromMilliseconds(25));
         var pending = UpdateInstallerWorker.ExecutePreparedAsync(request, fixture.Parent, prepared, journal,
             fixture.Worker, fixture.Worker, services, cancellation.Token);
@@ -143,7 +145,7 @@ public sealed class UpdateInstallerWorkerTests : IDisposable
         var services = new UpdateWorkerServices(
             version => new(1, true, "update_installation_verified", new(root, request.Application, version, "Synthetic", "x64")),
             _ => new(1, true, "update_verified", prepared.Artifact),
-            _ => { File.SetAttributes(pathname, FileAttributes.ReadOnly); return Surrogate(0, 500); }, TimeSpan.FromSeconds(10));
+            (_, _) => { File.SetAttributes(pathname, FileAttributes.ReadOnly); return new(Surrogate(0, 500)); }, TimeSpan.FromSeconds(10));
         var pending = UpdateInstallerWorker.ExecutePreparedAsync(request, fixture.Parent, prepared, journal,
             fixture.Worker, fixture.Worker, services, fixture.Deadline.Token);
         fixture.Track(pending);
@@ -173,7 +175,7 @@ public sealed class UpdateInstallerWorkerTests : IDisposable
         var services = new UpdateWorkerServices(
             _ => throw new InvalidOperationException("No application inspection should run before committed parent exit."),
             _ => throw new InvalidOperationException("No trust inspection should run before committed parent exit."),
-            _ => throw new InvalidOperationException("No installer may start without a durable acknowledged commit."),
+            (_, _) => throw new InvalidOperationException("No installer may start without a durable acknowledged commit."),
             TimeSpan.FromSeconds(10));
         var pending = UpdateInstallerWorker.ExecutePreparedAsync(request, fixture.Parent, prepared, journal,
             fixture.Worker, fixture.Worker, services, fixture.Deadline.Token);

@@ -51,6 +51,7 @@ import {
 } from './update-downloads.js';
 import { DesktopUpdateController } from './update-controller.js';
 import { DesktopShutdown } from './shutdown.js';
+import { acquireStartupAdmission } from './update-startup.js';
 
 let store: LocalStore | null = null;
 let controller: WorkspaceController | null = null;
@@ -216,6 +217,18 @@ async function start() {
   dataDirectory = app.getPath('userData');
   mkdirSync(dataDirectory, { recursive: true, mode: 0o700 });
   try {
+    if (app.isPackaged) {
+      if (process.platform !== 'win32')
+        throw new LocalError(
+          'platform_unsupported',
+          'Packaged startup protection requires Windows.',
+        );
+      await acquireStartupAdmission(
+        audioHostExecutable(),
+        process.execPath,
+        app.getVersion(),
+      );
+    }
     const key = localKey(dataDirectory);
     try {
       store = new LocalStore(join(dataDirectory, 'notes.sqlite'), key);
@@ -333,6 +346,7 @@ async function start() {
   updates = new DesktopUpdateController(
     app.getVersion(),
     async () => {
+      if (failure) throw new LocalError(failure.code, failure.message);
       const policy = await loadPackagedUpdatePolicy(
         process.resourcesPath,
         app.isPackaged,

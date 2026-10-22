@@ -28,11 +28,21 @@ internal static class UpdatePathLock
             foreach (var current in paths) handles.Add(OpenDirectory(current));
             return handles;
         }
+
         catch
         {
             for (var index = handles.Count - 1; index >= 0; index--) handles[index].Dispose();
             throw;
         }
+    }
+
+    internal static void RequireSingleRegularFile(SafeFileHandle handle)
+    {
+        if (!GetFileInformationByHandle(handle, out var information))
+            throw new Win32Exception(Marshal.GetLastPInvokeError());
+        if ((information.Attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0 ||
+            information.Links != 1)
+            throw new UpdatePathInvalidException();
     }
 
     private static SafeFileHandle Open(string path, bool directory)

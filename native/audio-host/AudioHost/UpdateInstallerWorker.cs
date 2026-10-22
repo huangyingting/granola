@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Security;
 using System.Text.Json;
+using Microsoft.Win32.SafeHandles;
 using WindowsAiNotes.Audio;
 using WindowsAiNotes.Updates;
 
@@ -34,7 +35,8 @@ public sealed record UpdateWorkerRequest(int ParentPid, string Application, stri
 public sealed record UpdateWorkerResult(int Version, bool Installed, string Code, UpdateWorkerOutcome? Outcome);
 
 internal sealed record UpdateWorkerServices(Func<string, UpdateInstallationResult> Installation,
-    Func<string, UpdateTrustResult> Application, Func<ProcessStartInfo, Process> Start, TimeSpan InstallerTimeout);
+    Func<string, UpdateTrustResult> Application,
+    Func<ProcessStartInfo, IEnumerable<SafeFileHandle>, UpdateInstallerProcess> Start, TimeSpan InstallerTimeout);
 
 public static class UpdateInstallerWorker
 {
@@ -64,7 +66,7 @@ public static class UpdateInstallerWorker
                         throw new UpdateHandoffException("update_policy_changed");
                     return UpdateTrustVerifier.Verify(request.Application, policy.Trust(version));
                 },
-                start => Process.Start(start) ?? throw new UpdateHandoffException("update_installer_unavailable"),
+                UpdateInstallerProcess.Start,
                 TimeSpan.FromMinutes(10));
             VerifyApplication(services, request.CurrentVersion);
             RequireOutsideInstallation(request.Installer, directory);
@@ -106,10 +108,12 @@ public static class UpdateInstallerWorker
                     return Task.CompletedTask;
                 });
             token.ThrowIfCancellationRequested();
+            using var admission = UpdateOperationLock.OpenAdmission();
             VerifyApplication(services, request.CurrentVersion);
             if (installer.IsDisposed) throw new UpdateHandoffException("update_installer_unavailable");
             journal.Write("installing", "update_installer_starting");
-            using var process = services.Start(InstallerStart(installer.Path, Path.GetDirectoryName(request.Application)!));
+            using var process = services.Start(InstallerStart(installer.Path, Path.GetDirectoryName(request.Application)!),
+                admission.Handles.Concat(installer.Handles));
             started = true;
             var outcomeUnavailable = false;
             try

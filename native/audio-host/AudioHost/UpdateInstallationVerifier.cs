@@ -125,7 +125,7 @@ public static class UpdateInstallationVerifier
         key.GetValueKind(name) == RegistryValueKind.String && value.Length <= 2048 && !value.Any(char.IsControl)
             ? value : null;
 
-    private static bool ValidProduct(string product) =>
+    internal static bool ValidProduct(string product) =>
         product.Length is > 0 and <= 200 && product == product.Trim() &&
         !product.Any(char.IsControl) && !product.Any(c => c is '\\' or '/' or ':' or '"' or '<' or '>' or '|' or '?' or '*');
 

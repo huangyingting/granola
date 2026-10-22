@@ -29,6 +29,7 @@ internal sealed class UpdateRemoteRuntimeLease : IDisposable
                     throw new Win32Exception(Marshal.GetLastPInvokeError());
                 lease.remote.Add(retained);
             }
+
             if (parent.HasExited) throw new UpdateHandoffException("update_parent_missing");
             return lease;
         }
@@ -37,6 +38,13 @@ internal sealed class UpdateRemoteRuntimeLease : IDisposable
             lease.Dispose();
             throw;
         }
+    }
+
+    // Startup admission belongs to Main until physical exit, not to the short-lived claiming helper.
+    internal void TransferToParent()
+    {
+        if (parent.HasExited) throw new UpdateHandoffException("update_parent_missing");
+        remote.Clear();
     }
 
     public void Dispose()

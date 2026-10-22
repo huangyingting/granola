@@ -11,6 +11,14 @@ public sealed class PreparedInstaller : IDisposable
     public string Path { get; }
     public VerifiedUpdateArtifact Artifact { get; }
     public bool IsDisposed { get; private set; }
+    internal IEnumerable<SafeFileHandle> Handles
+    {
+        get
+        {
+            ObjectDisposedException.ThrowIf(IsDisposed, this);
+            return directories.Append(file.SafeFileHandle);
+        }
+    }
 
     private PreparedInstaller(string path, VerifiedUpdateArtifact artifact, FileStream file, List<SafeFileHandle> directories)
     {

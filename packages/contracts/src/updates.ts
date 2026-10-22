@@ -126,6 +126,16 @@ export const heldUpdateRuntimeSchema = z.strictObject({
   identity: updateParentIdentitySchema,
   runtime: stagedUpdateRuntimeSchema,
 });
+export const updateStartupAdmittedSchema = z.strictObject({
+  version: z.literal(1),
+  event: z.literal('update_startup_admitted'),
+  identity: updateParentIdentitySchema,
+});
+export const updateStartupFailureSchema = z.strictObject({
+  version: z.literal(1),
+  event: z.literal('update_startup_failed'),
+  code: z.string().regex(/^[a-z][a-z0-9_]{0,99}$/u),
+});
 export const updateRuntimeFailureSchema = z.strictObject({
   version: z.literal(1),
   event: z.literal('update_runtime_failed'),

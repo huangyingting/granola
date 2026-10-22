@@ -452,6 +452,31 @@ Main also retains a physical-close promise for every audio helper it creates.
 A child error, expired EOF deadline or unsuccessful kill is not process-exit
 evidence; a later retry still cannot release SQLite before those helpers close.
 
+Packaged startup now claims a separate current-user admission lease before
+unlocking the content key or opening SQLite. A short-lived bundled native helper
+authenticates its actual Main creator, takes the operation lock, then duplicates
+the exclusive admission file and ancestor locks noninheritable into Main.
+Main waits for the exact ready identity **and confirmed successful helper exit**.
+The lease lasts until physical Main exit; closing SQLite is not enough to release
+it. Busy or uncertain startup stays unavailable, preserves existing data and
+requires reopening rather than retrying database access in the same process.
+Unsigned, unregistered preview packages remain usable; packages containing an
+update policy additionally require registered installation and original pinned
+application trust. This does not authorize updates for unsigned previews.
+
+After committed parent exit, the native worker acquires that same admission
+lease before launching the installer. `CreateProcessW` uses an explicit inherited
+handle list containing only admission and verified candidate file/ancestor
+leases, not private protocol pipes or other inheritable handles. The installer
+therefore retains exclusion and candidate immutability even if the worker dies.
+Native Windows tests exercise child-owned retention after all launching-process
+copies close, exact process waits (including exit code 259), transfer into Main,
+ancestor replacement, ACL/hard-link rejection and unrelated-handle exclusion.
+The hosted packaged-app probe holds admission externally and requires no new
+content key or SQLite files, even after the external lease is released; only a
+fresh process may reopen. This is active-install exclusion, **not** durable
+interrupted-install recovery or successful startup-health evidence.
+
 **Desktop activation remains disconnected.** The activation coordinator must
 use the worker client and this shutdown barrier in its authenticated handoff,
 then integrate restart health and interrupted-install/schema-compatible recovery.
