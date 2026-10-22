@@ -20,14 +20,16 @@ test('opens the actual packaged sandboxed editor without workspace runtime depen
     await expect(
       page.getByRole('button', { name: '+ New meeting', exact: true }),
     ).toBeEnabled();
-    const resources = await application.evaluate(() => process.resourcesPath);
-    const currentVersion = await application.evaluate(({ app }) =>
-      app.getVersion(),
-    );
+    const { resources, currentVersion, runningExecutable } =
+      await application.evaluate(({ app }) => ({
+        resources: process.resourcesPath,
+        currentVersion: app.getVersion(),
+        runningExecutable: process.execPath,
+      }));
     await expect(
       verifyUpdateInstallation(
         join(resources, 'audio-host', 'AudioHost.exe'),
-        executable,
+        runningExecutable,
         currentVersion,
         'Windows AI Notes Preview',
       ),
