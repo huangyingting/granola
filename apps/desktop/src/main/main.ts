@@ -216,6 +216,7 @@ async function start() {
     app.setPath('userData', process.env.WINDOWS_NOTES_DATA_DIR);
   dataDirectory = app.getPath('userData');
   mkdirSync(dataDirectory, { recursive: true, mode: 0o700 });
+  let startupAdmitted = !app.isPackaged;
   try {
     if (app.isPackaged) {
       if (process.platform !== 'win32')
@@ -228,6 +229,7 @@ async function start() {
         process.execPath,
         app.getVersion(),
       );
+      startupAdmitted = true;
     }
     const key = localKey(dataDirectory);
     try {
@@ -346,7 +348,8 @@ async function start() {
   updates = new DesktopUpdateController(
     app.getVersion(),
     async () => {
-      if (failure) throw new LocalError(failure.code, failure.message);
+      if (!startupAdmitted && failure)
+        throw new LocalError(failure.code, failure.message);
       const policy = await loadPackagedUpdatePolicy(
         process.resourcesPath,
         app.isPackaged,
