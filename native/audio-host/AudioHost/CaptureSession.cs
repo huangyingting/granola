@@ -11,27 +11,31 @@ internal sealed class CaptureSession
     private readonly List<CaptureTrack> captures = [];
     private readonly Stopwatch clock = Stopwatch.StartNew();
     private readonly TaskCompletionSource<AudioException> failure = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly StorageBudget storage;
     private Guid captureEpoch;
     private PcmLiveBuffer? live;
     public RecordingStore Store { get; }
     public Task<AudioException> Failure => failure.Task;
     public double ElapsedSeconds => clock.Elapsed.TotalSeconds;
 
-    public CaptureSession(string root, Guid recordingId, TrackSpec[] specs, IKeyProtector protector)
+    public CaptureSession(string root, Guid recordingId, TrackSpec[] specs, IKeyProtector protector, StorageBudget storage)
     {
         this.specs = specs;
+        this.storage = storage;
+        storage.EnsureCaptureCapacity();
         foreach (var spec in specs)
         {
             using var endpoint = DeviceCatalog.Resolve(spec);
             endpoints.Add(spec.TrackId, endpoint.ID);
         }
-        Store = new RecordingStore(root, recordingId, specs, protector, endpoints);
+        Store = new RecordingStore(root, recordingId, specs, protector, endpoints, storage);
         foreach (var spec in specs)
             writers.Add(spec.TrackId, new PcmChunkWriter(Store, spec.TrackId));
     }
 
     public void StartEpoch()
     {
+        storage.EnsureCaptureCapacity();
         var epoch = Guid.NewGuid();
         captureEpoch = epoch;
         Store.Transition("recording", "capture.started", clock.Elapsed.TotalMilliseconds, epoch);
@@ -97,8 +101,11 @@ internal sealed class CaptureSession
         }
         catch (Exception error)
         {
-            Store.Transition("failed", "capture.failed", clock.Elapsed.TotalMilliseconds, code: "capture_failed");
-            throw new AudioException("capture_failed", "Capture could not seal cleanly. Inspect the preserved recording.", inner: error);
+            var failure = error as AudioException ??
+                new AudioException("capture_failed", "Capture could not seal cleanly. Inspect the preserved recording.", inner: error);
+            Store.Transition("failed", "capture.failed", clock.Elapsed.TotalMilliseconds, code: code ?? failure.Code);
+            if (propagateFailure || error is not AudioException || failure.Code != code) throw failure;
+            return;
         }
         if (failure.Task.IsCompleted)
         {

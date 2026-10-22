@@ -19,12 +19,14 @@ var root = Path.GetFullPath(args[1]);
 FileStream? hostLock = null;
 var protector = new DpapiKeyProtector();
 var archive = new RecordingArchive(root, protector);
+var storage = new StorageBudget(root);
 CaptureSession? session = null;
 await using var input = Console.OpenStandardInput();
 await using var output = Console.OpenStandardOutput();
 var exitCode = 0;
 double lastStatusSeconds = 0;
 double lastLevelsSeconds = 0;
+double lastStorageSeconds = -5;
 try
 {
     Directory.CreateDirectory(root);
@@ -49,6 +51,22 @@ try
                 await session.StopAsync();
                 await Emit("recording.stopped", session.Store.Status(), recordingId: session.Store.RecordingId);
                 continue;
+            }
+            if (session.ElapsedSeconds - lastStorageSeconds >= 5)
+            {
+                try
+                {
+                    await Emit("storage.status", storage.Read());
+                    storage.EnsureCaptureCapacity();
+                    lastStorageSeconds = session.ElapsedSeconds;
+                }
+                catch (AudioException error)
+                {
+                    await session.StopAsync(failed: true, error.Code);
+                    await Emit("error", new ErrorPayload(error.Code, error.Message, error.Retryable),
+                        recordingId: session.Store.RecordingId);
+                    continue;
+                }
             }
             if (session.ElapsedSeconds - lastStatusSeconds >= 1)
             {
@@ -78,6 +96,9 @@ try
                 case "list_devices":
                     await Emit("devices", new { Devices = DeviceCatalog.List() }, request.RequestId);
                     break;
+                case "check_storage":
+                    await Emit("storage.status", storage.Read(request.StorageQuotaBytes), request.RequestId);
+                    break;
                 case "get_recording":
                     await Emit("recording.manifest", archive.Describe(request.RecordingId!.Value, request.Offset!.Value,
                         Snapshot(request.RecordingId.Value)), request.RequestId, request.RecordingId);
@@ -100,12 +121,13 @@ try
                     if (session is not null)
                         throw new AudioException("invalid_state", "Use a fresh AudioHost process to recover an inactive recording.");
                     await Emit("recording.recovered", RecordingStore.Recover(root, request.RecordingId!.Value, protector,
-                        request.AcceptIncomplete == true), request.RequestId, request.RecordingId);
+                        request.AcceptIncomplete == true, storage), request.RequestId, request.RecordingId);
                     break;
                 case "start_recording":
                     if (session is not null)
                         throw new AudioException("invalid_state", "Use a new AudioHost process for each recording.");
-                    session = new CaptureSession(root, request.RecordingId!.Value, request.Tracks!, protector);
+                    await Emit("storage.status", storage.Read(request.StorageQuotaBytes ?? StorageBudget.DefaultQuotaBytes));
+                    session = new CaptureSession(root, request.RecordingId!.Value, request.Tracks!, protector, storage);
                     try
                     {
                         session.StartEpoch();

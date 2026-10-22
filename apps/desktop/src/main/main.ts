@@ -506,6 +506,8 @@ async function start() {
           command.operation === 'startLivePreview' ||
           command.operation === 'stopLivePreview' ||
           command.operation === 'retryRecordingCleanup' ||
+          command.operation === 'checkAudioStorage' ||
+          command.operation === 'setAudioStorageQuota' ||
           command.operation === 'setAudioRetentionDays'
         ) {
           const active = workspace();
@@ -580,6 +582,16 @@ async function start() {
             await capture.cleanup();
           else if (command.operation === 'setAudioRetentionDays')
             await capture.setRetentionDays(profile, command.days, authorize);
+          else if (
+            command.operation === 'checkAudioStorage' ||
+            command.operation === 'setAudioStorageQuota'
+          )
+            await capture.checkStorage(
+              authorize,
+              command.operation === 'setAudioStorageQuota'
+                ? command.quota_gib
+                : undefined,
+            );
           authorize();
           const document =
             command.operation === 'getRecordingState'

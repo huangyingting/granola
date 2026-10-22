@@ -9,7 +9,11 @@ import {
   MAX_TRANSCRIPT_SEGMENTS,
   accountUsageSchema,
 } from './server.js';
-import { deviceSchema, trackSchema } from './index.js';
+import {
+  deviceSchema,
+  localAudioQuotaGiBSchema,
+  trackSchema,
+} from './index.js';
 import { audioStateSchema } from './recording.js';
 import { summaryProgressSchema } from './evidence.js';
 import {
@@ -264,6 +268,13 @@ export const desktopCommandSchema = z.discriminatedUnion('operation', [
     confirmed: z.literal(true),
   }),
   z.strictObject({ operation: z.literal('retryRecordingCleanup'), ...scoped }),
+  z.strictObject({ operation: z.literal('checkAudioStorage'), ...scoped }),
+  z.strictObject({
+    operation: z.literal('setAudioStorageQuota'),
+    ...scoped,
+    quota_gib: localAudioQuotaGiBSchema,
+    confirmed: z.literal(true),
+  }),
   z.strictObject({
     operation: z.literal('setAudioRetentionDays'),
     ...scoped,

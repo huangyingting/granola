@@ -29,7 +29,10 @@ import {
   type EditableDraft,
   type DraftSummary,
 } from '@windows-ai-notes/contracts/desktop';
-import type { Track } from '@windows-ai-notes/contracts';
+import {
+  localAudioQuotaGiBSchema,
+  type Track,
+} from '@windows-ai-notes/contracts';
 import {
   localRecordingSchema,
   recordingOwnerSchema,
@@ -806,6 +809,18 @@ export class LocalStore {
         )
         .run(profile, id);
     });
+  }
+  recordingQuotaGiB(): number {
+    return (
+      this.getValue('root', 'audio-quota-gib', localAudioQuotaGiBSchema) ?? 5
+    );
+  }
+  setRecordingQuotaGiB(value: number): void {
+    this.putValue(
+      'root',
+      'audio-quota-gib',
+      localAudioQuotaGiBSchema.parse(value),
+    );
   }
   recordingRetentionDays(profile: string): number {
     return (

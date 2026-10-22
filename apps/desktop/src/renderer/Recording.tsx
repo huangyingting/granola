@@ -795,6 +795,75 @@ export function RecordingPanel({
           {error || deviceError}
         </p>
       )}
+      {state?.storage_error && !error && !deviceError && (
+        <p className="account-alert" role="alert">
+          {state.storage_error.message}
+        </p>
+      )}
+      {state?.storage && state.storage.capacity.state !== 'ready' && (
+        <p className="account-alert" role="alert">
+          {state.storage.capacity.state === 'blocked'
+            ? 'Recording is blocked by the audio limit or low disk space. Saved audio is preserved.'
+            : 'Audio storage is running low. Review saved audio or increase the device limit before a long recording.'}
+        </p>
+      )}
+      {state && (
+        <details className="audio-configuration">
+          <summary>Local audio storage</summary>
+          <label>
+            Audio limit on this device
+            <select
+              aria-label="Local audio storage limit"
+              className="service-input"
+              value={state.storage_quota_gib}
+              disabled={acting || !!state.active}
+              onChange={(event) =>
+                void act({
+                  operation: 'setAudioStorageQuota',
+                  scope,
+                  quota_gib: Number(event.target.value),
+                  confirmed: true,
+                })
+              }
+            >
+              {[...new Set([1, 2, 5, 10, 20, 50, state.storage_quota_gib])]
+                .sort((a, b) => a - b)
+                .map((gib) => (
+                  <option key={gib} value={gib}>
+                    {gib} GiB
+                  </option>
+                ))}
+            </select>
+          </label>
+          {state.storage ? (
+            <p className="quiet-note" aria-label="Measured audio storage">
+              {(state.storage.capacity.used_bytes / 1024 ** 3).toFixed(2)} GiB
+              saved · {state.storage_quota_gib} GiB limit ·{' '}
+              {(state.storage.capacity.free_bytes / 1024 ** 3).toFixed(2)} GiB
+              disk free. Checked{' '}
+              {new Date(state.storage.received_at).toLocaleTimeString()}.
+            </p>
+          ) : (
+            <p className="quiet-note">
+              Capacity has not been verified in this session.
+            </p>
+          )}
+          <button
+            className="quiet-button"
+            disabled={acting}
+            onClick={() => void act({ operation: 'checkAudioStorage', scope })}
+          >
+            Check storage
+          </button>
+          <p className="quiet-note">
+            Applies across accounts on this device. All native audio files,
+            including interrupted writes and pending cleanup, count toward the
+            limit. Capture checks capacity before starting and while recording;
+            64 MiB of disk space and 8 MiB of audio capacity are kept in
+            reserve. Unuploaded audio is never deleted to make room.
+          </p>
+        </details>
+      )}
       {state && (
         <details className="audio-configuration">
           <summary>Local audio retention</summary>

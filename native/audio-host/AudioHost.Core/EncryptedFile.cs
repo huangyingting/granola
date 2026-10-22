@@ -14,7 +14,8 @@ public static class EncryptedFile
     private const int MaxHeaderBytes = 64 * 1024;
     private const int MaxPayloadBytes = 4 * 1024 * 1024;
 
-    public static void Write(string path, Guid recordingId, string kind, ChunkMetadata? chunk, ReadOnlySpan<byte> plaintext, IKeyProtector protector)
+    public static void Write(string path, Guid recordingId, string kind, ChunkMetadata? chunk, ReadOnlySpan<byte> plaintext,
+        IKeyProtector protector, StorageBudget? storage = null)
     {
         if (plaintext.Length > MaxPayloadBytes)
             throw new AudioException("storage_limit", "Encrypted payload exceeds the supported size.");
@@ -31,6 +32,7 @@ public static class EncryptedFile
             var tag = new byte[16];
             using (var aes = new AesGcm(key, 16))
                 aes.Encrypt(nonce, plaintext, ciphertext, tag, aad);
+            using var reservation = storage?.Reserve(12 + aad.Length + ciphertext.Length + tag.Length, kind == "audio_chunk");
             var temporary = path + "." + Guid.NewGuid().ToString("N") + ".partial";
             using (var file = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None, 4096, FileOptions.WriteThrough))
             {

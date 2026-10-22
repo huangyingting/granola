@@ -7,6 +7,47 @@ export const AUDIO_ARCHIVE_PAGE_SIZE = 50;
 export const LIVE_FRAME_SAMPLES = 800;
 export const MAX_LIVE_BUFFER_SAMPLES = 80_000;
 export const MAX_LIVE_FRAMES_PER_READ = 10;
+export const AUDIO_GIB = 1024 ** 3;
+export const AUDIO_METADATA_RESERVE = 8 * 1024 ** 2;
+export const AUDIO_DISK_RESERVE = 64 * 1024 ** 2;
+export const AUDIO_CAPTURE_HEADROOM = 8 * 1024 ** 2;
+export const localAudioQuotaGiBSchema = z.number().int().min(1).max(50);
+const storageQuotaBytesSchema = z
+  .number()
+  .int()
+  .min(AUDIO_GIB)
+  .max(50 * AUDIO_GIB)
+  .multipleOf(AUDIO_GIB);
+export const audioStorageSchema = z
+  .strictObject({
+    used_bytes: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+    quota_bytes: storageQuotaBytesSchema,
+    free_bytes: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+    metadata_reserve_bytes: z.literal(AUDIO_METADATA_RESERVE),
+    disk_reserve_bytes: z.literal(AUDIO_DISK_RESERVE),
+    capture_headroom_bytes: z.literal(AUDIO_CAPTURE_HEADROOM),
+    state: z.enum(['ready', 'warning', 'blocked']),
+    code: z.enum(['storage_limit', 'disk_full']).nullable(),
+  })
+  .refine((status) => {
+    const remaining =
+      status.quota_bytes - status.used_bytes - AUDIO_METADATA_RESERVE;
+    const free = status.free_bytes - AUDIO_DISK_RESERVE;
+    const code =
+      remaining < AUDIO_CAPTURE_HEADROOM
+        ? 'storage_limit'
+        : free < AUDIO_CAPTURE_HEADROOM
+          ? 'disk_full'
+          : null;
+    const warning =
+      status.used_bytes >= (status.quota_bytes * 4) / 5 ||
+      Math.min(remaining, free) < 256 * 1024 ** 2;
+    return (
+      status.code === code &&
+      status.state === (code ? 'blocked' : warning ? 'warning' : 'ready')
+    );
+  }, 'Storage status must agree with the measured capacity and safety reserves.');
+export type AudioStorage = z.infer<typeof audioStorageSchema>;
 
 const uuid = z
   .uuid()
@@ -37,6 +78,11 @@ export const trackSchema = z
 
 export const audioRequestSchema = z.discriminatedUnion('command', [
   z.object({ ...baseRequest, command: z.literal('list_devices') }).strict(),
+  z.strictObject({
+    ...baseRequest,
+    command: z.literal('check_storage'),
+    storage_quota_bytes: storageQuotaBytesSchema,
+  }),
   z.strictObject({
     ...baseRequest,
     command: z.literal('recover_recording'),
@@ -90,6 +136,7 @@ export const audioRequestSchema = z.discriminatedUnion('command', [
       command: z.literal('start_recording'),
       recording_id: uuid,
       tracks: z.array(trackSchema).min(1).max(2),
+      storage_quota_bytes: storageQuotaBytesSchema.optional(),
     })
     .strict()
     .refine(
@@ -332,6 +379,12 @@ export const liveAudioBatchSchema = z
 export type LiveAudioBatch = z.infer<typeof liveAudioBatchSchema>;
 
 export const audioEventSchema = z.discriminatedUnion('event_type', [
+  z.strictObject({
+    ...eventBase,
+    recording_id: z.null(),
+    event_type: z.literal('storage.status'),
+    payload: audioStorageSchema,
+  }),
   z.strictObject({
     ...eventBase,
     request_id: z.null(),

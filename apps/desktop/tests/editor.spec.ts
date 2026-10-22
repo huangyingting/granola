@@ -6,14 +6,18 @@ import {
 } from '@playwright/test';
 import {
   mkdtemp,
+  mkdir,
+  open,
   readFile,
   readdir,
   rm,
+  stat,
   unlink,
   writeFile,
 } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { randomUUID } from 'node:crypto';
 
 test.skip(
   process.platform !== 'win32',
@@ -38,6 +42,122 @@ async function close(application: ElectronApplication) {
   });
   await closed;
 }
+
+test('persists the device audio limit and blocks capture without reclaiming unique interrupted files', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'windows-notes-storage-ui-'));
+  let application: ElectronApplication | null = null;
+  try {
+    application = await launch(directory);
+    let page = await application.firstWindow();
+    await page
+      .getByRole('button', { name: '+ New meeting', exact: true })
+      .click();
+    await page.getByText('Local audio storage', { exact: true }).click();
+    await page
+      .getByRole('combobox', { name: 'Local audio storage limit' })
+      .selectOption('1');
+    await expect(page.getByLabel('Measured audio storage')).toContainText(
+      '1 GiB limit',
+    );
+    const source = join(directory, 'recordings', randomUUID());
+    await mkdir(source);
+    const partial = join(source, 'unique-unuploaded.partial');
+    const file = await open(partial, 'wx');
+    try {
+      await file.truncate(1024 ** 3);
+    } finally {
+      await file.close();
+    }
+    const marker = join(source, 'uncommitted.chunk');
+    await writeFile(marker, Buffer.from([1, 2, 3]));
+    await page
+      .getByRole('button', { name: 'Check storage', exact: true })
+      .click();
+    await expect(page.getByRole('alert')).toContainText('Recording is blocked');
+    const rejected = await page.evaluate(async () => {
+      const current = await window.notes.invoke({ operation: 'bootstrap' });
+      if (!current.ok || !('state' in current) || !current.state.selected_id)
+        throw new Error('No current meeting.');
+      return window.notes.invoke({
+        operation: 'startRecording',
+        scope: current.state.scope,
+        id: current.state.selected_id,
+        tracks: [
+          {
+            track_id: crypto.randomUUID(),
+            kind: 'microphone',
+            capture_scope: 'endpoint',
+            device_selection_policy: 'explicit',
+            device_id: 'synthetic-unavailable-device',
+          },
+        ],
+      });
+    });
+    expect(rejected).toMatchObject({
+      ok: false,
+      error: { code: 'storage_limit' },
+    });
+    expect((await stat(partial)).size).toBe(1024 ** 3);
+    expect(await readFile(marker)).toEqual(Buffer.from([1, 2, 3]));
+    expect(
+      (await readdir(join(directory, 'recordings'))).filter(
+        (name) => name !== 'audio-host.lock',
+      ),
+    ).toEqual([source.split(/[\\/]/).at(-1)]);
+    await close(application);
+    application = null;
+    application = await launch(directory);
+    page = await application.firstWindow();
+    await page.getByText('Local audio storage', { exact: true }).click();
+    await expect(
+      page.getByRole('combobox', { name: 'Local audio storage limit' }),
+    ).toHaveValue('1');
+    await page
+      .getByRole('button', { name: 'Check storage', exact: true })
+      .click();
+    await expect(
+      page.getByRole('alert').filter({ hasText: 'Recording is blocked' }),
+    ).toBeVisible();
+    const stale = await page.evaluate(async () => {
+      const current = await window.notes.invoke({ operation: 'bootstrap' });
+      if (!current.ok || !('state' in current))
+        throw new Error('No current workspace.');
+      return window.notes.invoke({
+        operation: 'setAudioStorageQuota',
+        scope: current.state.scope + 1,
+        quota_gib: 2,
+        confirmed: true,
+      });
+    });
+    expect(stale).toMatchObject({
+      ok: false,
+      error: { code: 'workspace_changed' },
+    });
+    await page
+      .getByRole('combobox', { name: 'Local audio storage limit' })
+      .selectOption('2');
+    await expect(page.getByLabel('Measured audio storage')).toContainText(
+      '2 GiB limit',
+    );
+    expect((await stat(partial)).size).toBe(1024 ** 3);
+    await unlink(partial);
+    await page
+      .getByRole('button', { name: 'Check storage', exact: true })
+      .click();
+    await expect(page.getByLabel('Measured audio storage')).toContainText(
+      '0.00 GiB saved',
+    );
+    await expect(
+      page.getByRole('alert').filter({ hasText: 'Recording is blocked' }),
+    ).toHaveCount(0);
+    expect(await readFile(marker)).toEqual(Buffer.from([1, 2, 3]));
+    await close(application);
+    application = null;
+  } finally {
+    if (application) await application.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 test('discovers audio endpoints through the bundled helper without starting capture', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'windows-notes-device-ui-'));

@@ -6,6 +6,32 @@ import {
 } from '@windows-ai-notes/contracts';
 
 const mode = process.argv[2];
+const gib = 1024 ** 3;
+function storage(quota = 5 * gib, used = 4096, free = 10 * gib) {
+  const remaining = quota - used - 8 * 1024 ** 2;
+  const available = free - 64 * 1024 ** 2;
+  const code =
+    remaining < 8 * 1024 ** 2
+      ? 'storage_limit'
+      : available < 8 * 1024 ** 2
+        ? 'disk_full'
+        : null;
+  return {
+    used_bytes: used,
+    quota_bytes: quota,
+    free_bytes: free,
+    metadata_reserve_bytes: 8 * 1024 ** 2,
+    disk_reserve_bytes: 64 * 1024 ** 2,
+    capture_headroom_bytes: 8 * 1024 ** 2,
+    state: code
+      ? 'blocked'
+      : used >= (quota * 4) / 5 ||
+          Math.min(remaining, available) < 256 * 1024 ** 2
+        ? 'warning'
+        : 'ready',
+    code,
+  };
+}
 const decoder = new FrameDecoder();
 const wav = Buffer.alloc(65_580, 0x2a);
 Buffer.from(
@@ -146,7 +172,30 @@ function send(request, event_type, payload) {
 process.stdin.on('data', (bytes) => {
   for (const input of decoder.push(bytes)) {
     const request = audioRequestSchema.parse(input);
-    if (mode.startsWith('archive') && request.command === 'inspect_recording') {
+    if (request.command === 'check_storage') {
+      if (mode === 'storage-error') {
+        send(request, 'error', {
+          code: 'storage_unavailable',
+          message: 'Synthetic storage capacity could not be verified.',
+          retryable: true,
+        });
+      } else {
+        const reply = () =>
+          send(
+            request,
+            'storage.status',
+            storage(
+              request.storage_quota_bytes +
+                (mode === 'storage-wrong-quota' ? gib : 0),
+            ),
+          );
+        if (mode === 'storage-slow') setTimeout(reply, 100);
+        else reply();
+      }
+    } else if (
+      mode.startsWith('archive') &&
+      request.command === 'inspect_recording'
+    ) {
       send(request, 'recording.inspected', {
         state:
           mode === 'archive-incomplete'
@@ -212,6 +261,12 @@ process.stdin.on('data', (bytes) => {
       mode.startsWith('capture')
     ) {
       capture = request;
+      if (mode.startsWith('capture-storage'))
+        send(
+          { request_id: null },
+          'storage.status',
+          storage(request.storage_quota_bytes),
+        );
       send(request, 'recording.started', {
         state: 'recording',
         tracks: request.tracks.map((spec) => ({
@@ -228,6 +283,21 @@ process.stdin.on('data', (bytes) => {
       });
       if (mode.startsWith('capture-level'))
         setTimeout(() => sendLevels(request), 20);
+      if (mode === 'capture-storage-fail')
+        setTimeout(() => {
+          const quota = request.storage_quota_bytes;
+          send({ request_id: null }, 'storage.status', storage(quota, quota));
+          send(
+            { request_id: null, recording_id: request.recording_id },
+            'error',
+            {
+              code: 'storage_limit',
+              message:
+                'Synthetic audio capacity reached; preserved chunks need inspection.',
+              retryable: false,
+            },
+          );
+        }, 100);
       if (mode === 'capture-fail')
         setTimeout(
           () =>

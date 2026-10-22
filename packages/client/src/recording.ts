@@ -1,5 +1,10 @@
 import { canonicalJson } from '@windows-ai-notes/contracts/content';
-import type { AudioEvent, Track } from '@windows-ai-notes/contracts';
+import {
+  AUDIO_GIB,
+  localAudioQuotaGiBSchema,
+  type AudioEvent,
+  type Track,
+} from '@windows-ai-notes/contracts';
 import type {
   AudioState,
   LocalRecording,
@@ -56,6 +61,8 @@ function missing(error: unknown) {
 }
 
 export class RecordingController {
+  private storage: AudioState['storage'] = null;
+  private storageError: Problem | null = null;
   private levels: AudioState['levels'] = null;
   private live: { profile: string; preview: RecordingLivePreview } | null =
     null;
@@ -182,6 +189,10 @@ export class RecordingController {
     return operation;
   }
   private observe(event: AudioEvent) {
+    if (event.event_type === 'storage.status') {
+      this.acceptStorage(event);
+      return;
+    }
     const owner = this.owner;
     if (!owner || this.revoked || event.recording_id !== owner.recording_id)
       return;
@@ -352,6 +363,7 @@ export class RecordingController {
           command: 'start_recording',
           recording_id: recording.id,
           tracks,
+          storage_quota_bytes: this.local.recordingQuotaGiB() * AUDIO_GIB,
         });
         authorize();
       } catch (error) {
@@ -544,8 +556,9 @@ export class RecordingController {
   listDevices() {
     if (this.deviceRequest) return this.deviceRequest;
     const request = this.exclusive(async () => {
-      const temporary = !this.client;
-      const client = this.client ?? this.create(() => {});
+      const shared = this.client ?? this.reviewing?.client;
+      const temporary = !shared;
+      const client = shared ?? this.create(() => {});
       try {
         const event = await client.request({ command: 'list_devices' });
         if (event.event_type !== 'devices')
@@ -563,6 +576,67 @@ export class RecordingController {
     });
     this.deviceRequest = request;
     return request;
+  }
+  private acceptStorage(
+    event: Extract<AudioEvent, { event_type: 'storage.status' }>,
+  ) {
+    if (
+      event.payload.quota_bytes !==
+      this.local.recordingQuotaGiB() * AUDIO_GIB
+    )
+      throw new AudioHostError(
+        'audio_protocol_error',
+        'The helper checked a different local audio limit.',
+        false,
+      );
+    this.storage = { received_at: Date.now(), capacity: event.payload };
+    this.storageError = null;
+    this.changed();
+  }
+  async checkStorage(authorize: () => void, quotaGiB?: number) {
+    return this.exclusive(async () => {
+      authorize();
+      if (quotaGiB !== undefined && this.client)
+        throw new LocalError(
+          'recording_in_progress',
+          'Stop capture before changing the device audio limit.',
+        );
+      const quota = localAudioQuotaGiBSchema.parse(
+        quotaGiB ?? this.local.recordingQuotaGiB(),
+      );
+      const shared = this.client ?? this.reviewing?.client;
+      let client: AudioClient | undefined;
+      try {
+        client = shared ?? this.create(() => {});
+        const event = await client.request({
+          command: 'check_storage',
+          storage_quota_bytes: quota * AUDIO_GIB,
+        });
+        if (!shared) {
+          const temporary = client;
+          client = undefined;
+          await temporary.close();
+        }
+        authorize();
+        if (
+          event.event_type !== 'storage.status' ||
+          event.payload.quota_bytes !== quota * AUDIO_GIB
+        )
+          throw new AudioHostError(
+            'audio_protocol_error',
+            'The helper did not confirm the requested device audio limit.',
+            false,
+          );
+        if (quotaGiB !== undefined) this.local.setRecordingQuotaGiB(quota);
+        this.acceptStorage(event);
+      } catch (error) {
+        this.storage = null;
+        this.storageError = problem(error);
+        throw error;
+      } finally {
+        if (!shared && client) await client.close();
+      }
+    });
   }
   inspect(
     profile: string,
@@ -1251,6 +1325,9 @@ export class RecordingController {
       pending_deletions: this.local.pendingRecordingDeletions().length,
       error: this.error,
       cleanup_error: this.cleanupError,
+      storage_quota_gib: this.local.recordingQuotaGiB(),
+      storage: this.storage,
+      storage_error: this.storageError,
       retention_days: this.local.recordingRetentionDays(profile),
       retention: page.recordings.flatMap((recording) => {
         const status = this.local.recordingRetention(

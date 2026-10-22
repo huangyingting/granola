@@ -4,6 +4,69 @@
     "request": {
       "protocol_version": 1,
       "request_id": "9c73575e-426d-4f72-98ed-7b4479f890ab",
+      "command": "check_storage",
+      "storage_quota_bytes": 5368709120
+    }
+  },
+  {
+    "valid": false,
+    "request": {
+      "protocol_version": 1,
+      "request_id": "9c73575e-426d-4f72-98ed-7b4479f890ab",
+      "command": "check_storage"
+    }
+  },
+  {
+    "valid": false,
+    "request": {
+      "protocol_version": 1,
+      "request_id": "9c73575e-426d-4f72-98ed-7b4479f890ab",
+      "command": "check_storage",
+      "storage_quota_bytes": 0
+    }
+  },
+  {
+    "valid": false,
+    "request": {
+      "protocol_version": 1,
+      "request_id": "9c73575e-426d-4f72-98ed-7b4479f890ab",
+      "command": "check_storage",
+      "storage_quota_bytes": 1073741825
+    }
+  },
+  {
+    "valid": false,
+    "request": {
+      "protocol_version": 1,
+      "request_id": "9c73575e-426d-4f72-98ed-7b4479f890ab",
+      "command": "check_storage",
+      "storage_quota_bytes": 54760833024
+    }
+  },
+  {
+    "valid": false,
+    "request": {
+      "protocol_version": 1,
+      "request_id": "9c73575e-426d-4f72-98ed-7b4479f890ab",
+      "command": "check_storage",
+      "storage_quota_bytes": 1073741824,
+      "recording_id": "75048e79-2b45-440f-8609-b80a37635b4a"
+    }
+  },
+  {
+    "valid": false,
+    "request": {
+      "protocol_version": 1,
+      "request_id": "9c73575e-426d-4f72-98ed-7b4479f890ab",
+      "command": "list_devices",
+      "storage_quota_bytes": 5368709120
+    }
+  },
+  {
+    "valid": true,
+    "request": {
+      "protocol_version": 1,
+      "request_id": "9c73575e-426d-4f72-98ed-7b4479f890ab",
       "command": "start_live_preview",
       "recording_id": "75048e79-2b45-440f-8609-b80a37635b4a"
     }

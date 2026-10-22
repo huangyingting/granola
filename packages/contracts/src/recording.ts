@@ -1,5 +1,11 @@
 import { z } from 'zod';
-import { captureLevelsSchema, recoverySchema, trackSchema } from './index.js';
+import {
+  audioStorageSchema,
+  captureLevelsSchema,
+  localAudioQuotaGiBSchema,
+  recoverySchema,
+  trackSchema,
+} from './index.js';
 import { resourceId } from './server.js';
 import { liveRecognitionEventSchema, liveSourceSchema } from './realtime.js';
 import {
@@ -227,6 +233,15 @@ export const audioStateSchema = z.strictObject({
   pending_deletions: z.number().int().min(0).max(10_000),
   error: recordingProblemSchema.nullable(),
   cleanup_error: recordingProblemSchema.nullable(),
+  storage_quota_gib: localAudioQuotaGiBSchema.default(5),
+  storage: z
+    .strictObject({
+      received_at: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+      capacity: audioStorageSchema,
+    })
+    .nullable()
+    .default(null),
+  storage_error: recordingProblemSchema.nullable().default(null),
   retention_days: localAudioRetentionDaysSchema.default(7),
   retention: z.array(localAudioRetentionSchema).max(50).default([]),
   retention_error: recordingProblemSchema.nullable().default(null),

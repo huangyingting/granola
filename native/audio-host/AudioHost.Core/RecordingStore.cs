@@ -9,19 +9,22 @@ public sealed class RecordingStore
     private readonly IKeyProtector protector;
     private readonly string directory;
     private readonly RecordingManifest manifest;
+    private readonly StorageBudget storage;
 
     public Guid RecordingId => manifest.RecordingId;
     public string DirectoryPath => directory;
 
     public RecordingStore(string root, Guid recordingId, IReadOnlyList<TrackSpec> tracks, IKeyProtector protector,
-        IReadOnlyDictionary<Guid, string>? actualDevices = null)
+        IReadOnlyDictionary<Guid, string>? actualDevices = null, StorageBudget? storage = null)
     {
         new AudioRequest(1, Guid.NewGuid(), "start_recording", recordingId, tracks.ToArray()).Validate();
         this.protector = protector;
         directory = Path.Combine(Path.GetFullPath(root), recordingId.ToString("D"));
         Directory.CreateDirectory(root);
+        this.storage = storage ?? new StorageBudget(root);
         if (Directory.Exists(directory))
             throw new AudioException("recording_exists", "This recording already exists; inspect it instead of overwriting it.");
+        this.storage.EnsureCaptureCapacity();
         Directory.CreateDirectory(directory);
         manifest = new RecordingManifest
         {
@@ -89,11 +92,8 @@ public sealed class RecordingStore
                 throw new InvalidDataException("Chunk sequence or sample range is inconsistent.");
             if (manifest.Tracks.Sum(t => t.SavedSamples) * 2L + pcm.Length > 5L * 1024 * 1024 * 1024)
                 throw new AudioException("storage_limit", "The 5 GiB probe recording limit has been reached.");
-            var drive = new DriveInfo(Path.GetPathRoot(directory)!);
-            if (drive.AvailableFreeSpace < 64L * 1024 * 1024)
-                throw new AudioException("disk_full", "Less than 64 MiB is available; recording must stop.");
             EncryptedFile.Write(Path.Combine(directory, metadata.ChunkId.ToString("D") + ".chunk"),
-                RecordingId, "audio_chunk", metadata, pcm, protector);
+                RecordingId, "audio_chunk", metadata, pcm, protector, storage);
             track.ChunkIds.Add(metadata.ChunkId);
             track.SavedSamples += metadata.SampleCount;
             SaveManifest();
@@ -101,12 +101,13 @@ public sealed class RecordingStore
     }
 
     private void SaveManifest() => EncryptedFile.Write(Path.Combine(directory, "manifest.enc"), RecordingId,
-        "manifest", null, JsonSerializer.SerializeToUtf8Bytes(manifest, AudioJson.Options), protector);
+        "manifest", null, JsonSerializer.SerializeToUtf8Bytes(manifest, AudioJson.Options), protector, storage);
 
     public static RecoveryReport Inspect(string root, Guid recordingId, IKeyProtector protector) =>
         Scan(root, recordingId, protector).Report;
 
-    public static RecoveryReport Recover(string root, Guid recordingId, IKeyProtector protector, bool acceptIncomplete)
+    public static RecoveryReport Recover(string root, Guid recordingId, IKeyProtector protector, bool acceptIncomplete,
+        StorageBudget? storage = null)
     {
         if (!acceptIncomplete)
             throw new AudioException("confirmation_required", "Recovery requires accepting that the uncommitted audio tail may be missing.");
@@ -139,7 +140,7 @@ public sealed class RecordingStore
         try
         {
             EncryptedFile.Write(Path.Combine(Path.GetFullPath(root), recordingId.ToString("D"), "manifest.enc"),
-                recordingId, "manifest", null, plaintext, protector);
+                recordingId, "manifest", null, plaintext, protector, storage ?? new StorageBudget(root));
         }
         finally
         {

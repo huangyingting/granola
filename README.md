@@ -687,9 +687,29 @@ Local format 8 upgrades older encrypted recordings and version-7 deadlines
 without resetting their grace or receipts. Older applications reject the newer
 format instead of treating retired sources as locally readable audio.
 
-Disk-budget enforcement, independent backup deletion-ledger replay and
-production storage drills remain release work. Neither server expiry nor local
-retention deletes the sole unuploaded local copy.
+**Meeting audio → Local audio storage** sets a device-wide 1–50 GiB limit
+(default 5 GiB), encrypted in Main's local settings and shared across accounts.
+Capacity checks count all native recording files, including partial writes,
+orphan files and failed cleanup; they do not infer usage from upload receipts.
+Idle checks are explicit and timestamped. The native helper checks admission
+and resume, monitors capacity every five seconds during recording or pause,
+and reserves the exact encrypted envelope size before each write, including
+the temporary replacement of a manifest. Main reuses the active or review
+helper for explicit checks rather than competing for the exclusive host lock.
+Warnings start at 80% usage or less than 256 MiB usable headroom. Media writes
+keep 64 MiB disk space and 8 MiB audio-quota headroom for bounded metadata;
+capture admission/monitoring require another 8 MiB for buffered tails and
+safe stopping. Failure/recovery metadata may use the emergency reserve even
+above the media quota. Capacity failures stop capture explicitly without
+claiming a complete seal. Saved and unique unuploaded audio is never reclaimed
+to satisfy a quota. A failed or bounded-out scan is not treated as empty
+storage; linked files/directories are not followed. Raising the limit cannot
+create physical free space, and external disk consumers can still exhaust a
+drive between checks; inspect preserved chunks after any storage failure.
+
+Independent backup deletion-ledger replay and production storage drills remain
+release work. Neither server expiry nor local retention deletes the sole
+unuploaded local copy.
 The main-process transfer core reads authenticated native ranges, checks the
 approved object origin/staging path and immutable checksum, excludes API
 credentials, rejects redirects, and reconciles already-verified chunks after a

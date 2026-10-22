@@ -19,6 +19,7 @@ const expectedEvents: Record<
   AudioEvent['event_type']
 > = {
   list_devices: 'devices',
+  check_storage: 'storage.status',
   start_recording: 'recording.started',
   pause_recording: 'recording.paused',
   resume_recording: 'recording.resumed',

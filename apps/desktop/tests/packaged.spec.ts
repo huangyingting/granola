@@ -53,6 +53,30 @@ test('opens the actual packaged sandboxed editor without workspace runtime depen
       ok: true,
       audio_devices: { devices: expect.any(Array) },
     });
+    const capacity = await page.evaluate(async () => {
+      const current = await window.notes.invoke({ operation: 'bootstrap' });
+      if (!current.ok || !('state' in current))
+        throw new Error('No packaged state.');
+      return window.notes.invoke({
+        operation: 'checkAudioStorage',
+        scope: current.state.scope,
+      });
+    });
+    expect(capacity).toMatchObject({
+      ok: true,
+      audio_state: {
+        state: {
+          storage_quota_gib: 5,
+          storage: {
+            capacity: {
+              quota_bytes: 5 * 1024 ** 3,
+              state: 'ready',
+              code: null,
+            },
+          },
+        },
+      },
+    });
     await page
       .getByRole('button', { name: 'Audio devices', exact: true })
       .click();

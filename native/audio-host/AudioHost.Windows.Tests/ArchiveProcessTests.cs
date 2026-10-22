@@ -46,6 +46,12 @@ public sealed class ArchiveProcessTests
             var stderr = process.StandardError.ReadToEndAsync(deadline.Token);
             try
             {
+                var capacity = await Send(new AudioRequest(1, Guid.NewGuid(), "check_storage",
+                    StorageQuotaBytes: StorageBudget.GiB));
+                Assert.Equal("storage.status", capacity.GetProperty("event_type").GetString());
+                Assert.Equal(Directory.GetFiles(root, "*", SearchOption.AllDirectories).Sum(path => new FileInfo(path).Length),
+                    capacity.GetProperty("payload").GetProperty("used_bytes").GetInt64());
+                Assert.Equal("ready", capacity.GetProperty("payload").GetProperty("state").GetString());
                 var manifest = await Send(new AudioRequest(1, Guid.NewGuid(), "get_recording", id, Offset: 0));
                 Assert.Equal("recording.manifest", manifest.GetProperty("event_type").GetString());
                 Assert.Equal(recover ? "recording" : "sealed", manifest.GetProperty("payload").GetProperty("state").GetString());
@@ -81,6 +87,20 @@ public sealed class ArchiveProcessTests
                 }
                 Assert.Equal(PcmChunkWriter.ToWav(pcm), wav.ToArray());
                 Assert.Equal(upload.GetProperty("sha256").GetString(), Convert.ToHexStringLower(SHA256.HashData(wav.ToArray())));
+                var unuploaded = Path.Combine(root, "unique-unuploaded.partial");
+                using (var file = new FileStream(unuploaded, FileMode.CreateNew, FileAccess.Write))
+                    file.SetLength(StorageBudget.GiB);
+                var blocked = await Send(new AudioRequest(1, Guid.NewGuid(), "check_storage",
+                    StorageQuotaBytes: StorageBudget.GiB));
+                Assert.Equal("blocked", blocked.GetProperty("payload").GetProperty("state").GetString());
+                var attempt = Guid.NewGuid();
+                var rejected = await Send(new AudioRequest(1, Guid.NewGuid(), "start_recording", attempt, [track],
+                    StorageQuotaBytes: StorageBudget.GiB));
+                Assert.Equal("storage_limit", rejected.GetProperty("payload").GetProperty("code").GetString());
+                Assert.False(Directory.Exists(Path.Combine(root, attempt.ToString("D"))));
+                Assert.Equal(StorageBudget.GiB, new FileInfo(unuploaded).Length);
+                var stillReadable = await Send(new AudioRequest(1, Guid.NewGuid(), "get_recording", id, Offset: 0));
+                Assert.Equal(recover ? "failed" : "sealed", stillReadable.GetProperty("payload").GetProperty("state").GetString());
                 process.StandardInput.Close();
                 await process.WaitForExitAsync(deadline.Token);
                 Assert.Equal(0, process.ExitCode);
@@ -104,12 +124,23 @@ public sealed class ArchiveProcessTests
                 await process.StandardInput.BaseStream.WriteAsync(header, deadline.Token);
                 await process.StandardInput.BaseStream.WriteAsync(bytes, deadline.Token);
                 await process.StandardInput.BaseStream.FlushAsync(deadline.Token);
-                var body = await FrameCodec.ReadAsync(process.StandardOutput.BaseStream, deadline.Token);
-                Assert.NotNull(body);
-                using var message = JsonDocument.Parse(body);
-                Assert.Equal(request.RequestId, message.RootElement.GetProperty("request_id").GetGuid());
-                Assert.Equal(id, message.RootElement.GetProperty("recording_id").GetGuid());
-                return message.RootElement.Clone();
+                while (true)
+                {
+                    var body = await FrameCodec.ReadAsync(process.StandardOutput.BaseStream, deadline.Token);
+                    Assert.NotNull(body);
+                    using var message = JsonDocument.Parse(body);
+                    if (message.RootElement.GetProperty("request_id").ValueKind == JsonValueKind.Null)
+                    {
+                        Assert.Equal("storage.status", message.RootElement.GetProperty("event_type").GetString());
+                        Assert.Equal(JsonValueKind.Null, message.RootElement.GetProperty("recording_id").ValueKind);
+                        continue;
+                    }
+                    Assert.Equal(request.RequestId, message.RootElement.GetProperty("request_id").GetGuid());
+                    if (request.RecordingId is { } expected)
+                        Assert.Equal(expected, message.RootElement.GetProperty("recording_id").GetGuid());
+                    else Assert.Equal(JsonValueKind.Null, message.RootElement.GetProperty("recording_id").ValueKind);
+                    return message.RootElement.Clone();
+                }
             }
         }
         finally

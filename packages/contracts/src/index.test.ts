@@ -10,6 +10,11 @@ import {
   liveAudioBatchSchema,
   type AudioRequest,
   uploadChunkSchema,
+  audioStorageSchema,
+  AUDIO_GIB,
+  AUDIO_METADATA_RESERVE,
+  AUDIO_DISK_RESERVE,
+  AUDIO_CAPTURE_HEADROOM,
 } from './index.js';
 
 const request: AudioRequest = {
@@ -56,6 +61,43 @@ describe('AudioHost framing', () => {
 });
 
 describe('capture boundaries', () => {
+  it('rejects healthy-looking storage evidence that contradicts exact quota, reserve or disk boundaries', () => {
+    const base = {
+      used_bytes: 4096,
+      quota_bytes: 5 * AUDIO_GIB,
+      free_bytes: 10 * AUDIO_GIB,
+      metadata_reserve_bytes: AUDIO_METADATA_RESERVE,
+      disk_reserve_bytes: AUDIO_DISK_RESERVE,
+      capture_headroom_bytes: AUDIO_CAPTURE_HEADROOM,
+      state: 'ready',
+      code: null,
+    };
+    expect(audioStorageSchema.safeParse(base).success).toBe(true);
+    const blocked = {
+      ...base,
+      used_bytes: 5 * AUDIO_GIB,
+      state: 'blocked',
+      code: 'storage_limit',
+    };
+    expect(audioStorageSchema.safeParse(blocked).success).toBe(true);
+    for (const invalid of [
+      { ...blocked, state: 'ready' },
+      { ...blocked, code: null },
+      { ...base, free_bytes: AUDIO_DISK_RESERVE },
+      {
+        ...base,
+        used_bytes:
+          5 * AUDIO_GIB - AUDIO_METADATA_RESERVE - AUDIO_CAPTURE_HEADROOM + 1,
+      },
+      { ...base, metadata_reserve_bytes: 0 },
+      { ...base, disk_reserve_bytes: 0 },
+      { ...base, quota_bytes: 0 },
+      { ...base, free_bytes: -1 },
+      { ...base, used_bytes: Number.MAX_SAFE_INTEGER + 1 },
+      { ...base, path: 'private-native-directory' },
+    ])
+      expect(audioStorageSchema.safeParse(invalid).success).toBe(false);
+  });
   it('bounds request-only live PCM batches and refuses mixed preview, source, format or sample identity', () => {
     const recording = randomUUID();
     const preview = randomUUID();
