@@ -1262,13 +1262,15 @@ The portable test key protector exists solely in the test assembly; the host
 has no plaintext-key or non-DPAPI fallback. A Windows CI pass is not evidence of
 physical audio capture.
 
-CI installs the exact `packageManager` version using commit-pinned upstream
-`pnpm/setup` v3.1.1, which verifies npm's signature and checksum for the native
-pnpm package. The BuildKit server image uses upstream pnpm 12.3.4 release
-archives with fixed SHA-256 checksums for Linux amd64 and arm64, avoiding
-Corepack's wrapper bootstrap. Update those Docker release pins together with
-`packageManager`; the build rejects a mismatch. Frozen-lockfile installation,
-registry integrity verification and all test gates remain enabled.
+CI installs the exact `packageManager` version from upstream pnpm 12.3.4 release
+archives with fixed SHA-256 checksums, then verifies the actual executable
+version. This avoids the npm metadata bootstrap dependency without changing
+the package source or weakening dependency verification. Downloads have bounded
+size, timeouts and retries, and failed checks never add an executable to `PATH`.
+The BuildKit server image uses the same checksummed upstream native releases
+for Linux amd64 and arm64. Update the pins in `tools/setup-pnpm.mjs` and Docker
+together with `packageManager`; both reject a mismatch. Frozen-lockfile
+installation, registry integrity verification and all test gates remain enabled.
 
 The server CI job also runs real PostgreSQL integration tests and builds the
 server image, without Azure credentials. Locally, set `TEST_DATABASE_URL` to run

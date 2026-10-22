@@ -31,9 +31,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
-      - uses: pnpm/setup@a0881977cd8ea73b1ed212236c99ca10dcc80cf4
-        with:
-          install: false
+      - name: Install checksum-verified upstream native pnpm
+        run: node tools/setup-pnpm.mjs
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
       - name: Build the pinned upstream synthetic S3 store
@@ -74,9 +73,8 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           global-json-file: global.json
-      - uses: pnpm/setup@a0881977cd8ea73b1ed212236c99ca10dcc80cf4
-        with:
-          install: false
+      - name: Install checksum-verified upstream native pnpm
+        run: node tools/setup-pnpm.mjs
       - run: pnpm install --frozen-lockfile
       - name: Restore locked native dependencies
         run: |
