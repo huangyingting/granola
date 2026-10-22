@@ -493,10 +493,12 @@ describe('encrypted local drafts and durable outbox', () => {
   });
   it('bounds each global sweep and never queues more than fifty eligible removals at once', () => {
     const store = open();
-    for (let i = 0; i < 51; i++) {
-      const c = retainedUpload(store);
-      store.rememberRecordingRetention(profile, c.service, c.status);
-    }
+    store.atomic(() => {
+      for (let i = 0; i < 51; i++) {
+        const c = retainedUpload(store);
+        store.rememberRecordingRetention(profile, c.service, c.status);
+      }
+    });
     const due = Date.now() + 8 * 86_400_000;
     expect(store.expireRecordingRetention(due)).toBe(50);
     expect(store.pendingRecordingDeletions()).toHaveLength(50);
