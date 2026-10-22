@@ -65,6 +65,7 @@ let delivery: DesktopDelivery | null = null;
 let updates: DesktopUpdateController | null = null;
 let shutdown: DesktopShutdown | null = null;
 const maintenance = new PendingWork();
+const audioProcesses = new PendingWork();
 
 function audioHostExecutable() {
   if (process.platform !== 'win32')
@@ -88,11 +89,13 @@ function audioHostExecutable() {
   return executable;
 }
 function createAudioHost(observe: (event: AudioEvent) => void) {
-  return new AudioHostClient(
+  const host = new AudioHostClient(
     audioHostExecutable(),
     ['--data-dir', join(dataDirectory, 'recordings')],
     observe,
   );
+  void audioProcesses.track(host.stopped);
+  return host;
 }
 function audio(): RecordingController {
   if (!recordings)
@@ -291,6 +294,7 @@ async function start() {
         controller?.close(),
       ]);
       await recordings?.close(() => {});
+      await audioProcesses.drain();
       delivery?.close();
     },
     release: () => {

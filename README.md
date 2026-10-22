@@ -448,6 +448,9 @@ SQLite. A failed close keeps admission sealed and offers an in-page retry
 without attempting another save into the disposed workspace. This is final
 resource shutdown, not a reversible update-preparation pause or installation
 authorization.
+Main also retains a physical-close promise for every audio helper it creates.
+A child error, expired EOF deadline or unsuccessful kill is not process-exit
+evidence; a later retry still cannot release SQLite before those helpers close.
 
 **Desktop activation remains disconnected.** The activation coordinator must
 use the worker client and this shutdown barrier in its authenticated handoff,

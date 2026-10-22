@@ -101,6 +101,7 @@ export class AudioHostClient {
   >();
   private readonly decoder = new FrameDecoder();
   private readonly exited: Promise<number | null>;
+  readonly stopped: Promise<void>;
   private closing = false;
   private fatalError: Error | undefined;
   private killTimer: NodeJS.Timeout | undefined;
@@ -151,6 +152,9 @@ export class AudioHostClient {
         if (this.killTimer) clearTimeout(this.killTimer);
         resolve(code);
       });
+    });
+    this.stopped = new Promise((resolve) => {
+      this.child.once('close', () => resolve());
     });
     this.child.stderr.on('data', (bytes: Buffer) =>
       process.stderr.write(bytes),
