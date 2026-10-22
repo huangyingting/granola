@@ -85,7 +85,7 @@ public static class UpdateInstallationVerifier
     internal static bool Matches(UpdateRegistration value, string directory, string version, string product) =>
         CanonicalPath(directory) && value.Location is not null && CanonicalPath(value.Location) &&
         string.Equals(value.Location, directory, StringComparison.OrdinalIgnoreCase) &&
-        value.DisplayName == product && value.DisplayVersion == version &&
+        value.DisplayName == $"{product} {version}" && value.DisplayVersion == version &&
         MatchesCommand(value.Uninstall, Path.Combine(directory, $"Uninstall {product}.exe"), "/currentuser") &&
         MatchesCommand(value.QuietUninstall, Path.Combine(directory, $"Uninstall {product}.exe"), "/currentuser /S");
 

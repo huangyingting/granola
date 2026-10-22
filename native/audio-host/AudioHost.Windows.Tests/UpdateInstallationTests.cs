@@ -10,7 +10,7 @@ public sealed class UpdateInstallationTests
 {
     private const string Directory = @"C:\Synthetic installed app";
     private const string Product = "Windows AI Notes Preview";
-    private static readonly UpdateRegistration Registration = new(Directory, Product, "0.1.0",
+    private static readonly UpdateRegistration Registration = new(Directory, $"{Product} 0.1.0", "0.1.0",
         $"\"{Directory}\\Uninstall {Product}.exe\" /currentuser",
         $"\"{Directory}\\Uninstall {Product}.exe\" /currentuser /S");
 
@@ -26,6 +26,8 @@ public sealed class UpdateInstallationTests
             Registration with { Location = @"C:\Different" },
             Registration with { Location = Directory + @"\.." },
             Registration with { DisplayName = "Different product" },
+            Registration with { DisplayName = Product },
+            Registration with { DisplayName = $"{Product} 0.1.1" },
             Registration with { DisplayVersion = "0.1.1" },
             Registration with { Uninstall = null },
             Registration with { Uninstall = $"\"{Directory}\\Uninstall {Product}.exe\" /allusers" },
