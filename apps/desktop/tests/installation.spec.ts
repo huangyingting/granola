@@ -450,8 +450,12 @@ test('preserves encrypted data and new edits through actual installation, compat
           product: string;
         },
       ) => {
-        const client: typeof import('../src/main/update-runtime.js') =
-          await import(input.module);
+        const require = process
+          .getBuiltinModule('node:module')
+          .createRequire(input.module);
+        const client: typeof import('../src/main/update-runtime.js') = require(
+          process.getBuiltinModule('node:url').fileURLToPath(input.module),
+        );
         const lease = await client.holdUpdateRuntime(
           input.helper,
           input.application,
