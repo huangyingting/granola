@@ -758,6 +758,60 @@ the input reservation is conservative rather than a proven tokenizer bound.
 Observed overages are retained and block further over-limit requests, not
 discarded. Retries can incur duplicate provider charges.
 
+### Deployment diagnostics
+
+The deployment operator can inspect body-free, deployment-wide health with
+database credentials; this is not an HTTP admin endpoint:
+
+```sh
+pnpm build
+pnpm operations
+```
+
+The versioned JSON snapshot uses one **read-only, repeatable-read PostgreSQL
+transaction** and exact decimal strings, including counters above JavaScript's
+safe-integer range. Database/schema failures or malformed accounting fail the
+command explicitly, with no successful-looking empty snapshot or connection
+details. Output contains no account/resource IDs, meeting titles, notes,
+transcripts, questions, model configuration strings, object keys or signed URLs.
+
+Job/chat state counts describe retained database rows, not lifetime success rates.
+`claimable` applies current document/account/membership authority, retry deadlines,
+lease expiry and chat's job-priority scheduling; it is not a promise of available
+worker capacity. `oldest_claimable_age_ms` measures age since original creation
+(including retry time), not a measured dispatch or provider latency; `null` means
+no eligible row. Live counts are **database leases, not active WebSocket
+connections**; closure outcomes cover the preceding hour.
+
+Audio diagnostics distinguish expired recordings still awaiting access revocation,
+physical deletion backlog, currently claimable deletion attempts, cleanup errors
+and already-deleted object tombstone rechecks. Referenced verified media and
+protected/in-flight uploads are not incorrectly marked claimable. Audio metrics
+keep pending access revocations separate; their retained verified objects enter
+deletion metrics only after access is revoked. Usage accounting
+aggregates the current UTC month, counts accounts whose settled plus uncertain
+usage exceeds current allowances, and separately counts unsettled calls across
+all months. Unsettled includes both in-flight and unknown receipts, not proven
+provider failures; media/token usage is not an Azure invoice.
+
+API completion records log only a server-generated request UUID, registered route
+template (or `null` for unmatched routes), normalized method, response status,
+UTC completion time and elapsed milliseconds. Raw paths, query strings, headers, bodies and exception
+messages/names are excluded; caller-supplied request IDs cannot replace generated
+IDs. Structured records use bounded stream output, not synchronous console
+formatting on the request path. Backpressure drops completion records rather
+than growing an unbounded queue; `http_request_telemetry_dropped` reports exact
+intentional drop counts when output drains (or on stderr at shutdown).
+`http_request_telemetry_unavailable` explicitly reports output failure without
+logging the underlying exception or changing an already-completed response.
+Completion duration covers the full response, not first-token latency or
+live-frame backlog; disconnected/incomplete responses may have no completion
+record. Restrict log access and configure the deployment's
+log sink for at most **30 days**; this command does not manage external log storage.
+Durable necessary-action auditing, end-to-end provider correlation, actual
+connection/frame/first-token instrumentation and independent deletion-ledger
+restore remain unfinished production-release requirements.
+
 ### Server API
 
 Contracts are in `packages/contracts/src/server.ts`. Errors include `code`,

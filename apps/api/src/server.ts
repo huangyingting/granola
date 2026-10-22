@@ -36,6 +36,7 @@ import type { RealtimeProvider } from '@windows-ai-notes/ai/realtime';
 import { prepareRealtimeRoutes } from './realtime.js';
 import { registerChatRoutes } from './chat.js';
 import { streamEvents } from './events.js';
+import { registerRequestObservability } from './observability.js';
 
 const idParams = z.strictObject({ id: resourceId });
 const revisionQuery = z.strictObject({
@@ -57,8 +58,10 @@ export async function createServer(
     logger: false,
     bodyLimit: MAX_AUDIO_BYTES,
     genReqId: () => randomUUID(),
+    requestIdHeader: false,
     requestTimeout: 30_000,
   });
+  registerRequestObservability(app);
   const authenticate = createAuthenticator(config, db);
   const streams = new Map<string, number>();
   const shutdown = new AbortController();
@@ -113,7 +116,7 @@ export async function createServer(
       JSON.stringify({
         code: 'internal_error',
         request_id: request.id,
-        kind: error instanceof Error ? error.name : 'unknown',
+        kind: error instanceof Error ? 'error' : 'unknown',
       }),
     );
     return reply.code(500).send({

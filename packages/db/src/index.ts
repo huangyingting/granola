@@ -32,6 +32,7 @@ import { LiveSourceStore } from './live.js';
 import { SummaryStages } from './summaries.js';
 import { MeetingQuestions } from './questions.js';
 import { ChatStore } from './chat.js';
+import { operationsSnapshot } from './operations.js';
 import {
   summaryCitations,
   summarySourceSchema,
@@ -184,6 +185,9 @@ export class Database {
   }
   async close() {
     await this.pool.end();
+  }
+  async operations() {
+    return operationsSnapshot(this);
   }
   async assertReady(): Promise<void> {
     const applied = await this.pool.query<{ version: number }>(

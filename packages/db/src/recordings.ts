@@ -875,9 +875,7 @@ export class RecordingStore {
         await tx.query<RecordingObject & { token: number }>(
           `WITH eligible AS (
           SELECT o.id FROM recording_objects o JOIN recordings r ON r.id=o.recording_id
-          WHERE o.protected_until<=now() AND o.cleanup_after<=now() AND (o.cleanup_until IS NULL OR o.cleanup_until<now())
-          AND (o.kind='staging' OR r.deleted_at IS NOT NULL OR NOT EXISTS
-            (SELECT 1 FROM recording_chunks c WHERE c.verified_object=o.id))
+          WHERE ${recordingCleanupEligibility}
           ORDER BY o.cleanup_after,o.id LIMIT 20 FOR UPDATE OF o SKIP LOCKED
         ) UPDATE recording_objects o SET cleanup_token=cleanup_token+1,cleanup_until=now()+interval '2 minutes'
           FROM eligible e WHERE o.id=e.id RETURNING o.id,o.kind,o.cleanup_token token`,
@@ -885,6 +883,7 @@ export class RecordingStore {
       ).rows;
     });
   }
+
   async finishCleanup(
     object: RecordingObject & { token: number },
     success: boolean,
@@ -899,3 +898,11 @@ export class RecordingStore {
     );
   }
 }
+
+export const recordingObjectDisposable = `
+  o.kind='staging' OR r.deleted_at IS NOT NULL OR NOT EXISTS
+    (SELECT 1 FROM recording_chunks c WHERE c.verified_object=o.id)`;
+export const recordingCleanupEligibility = `
+  o.protected_until<=now() AND o.cleanup_after<=now()
+  AND (o.cleanup_until IS NULL OR o.cleanup_until<now())
+  AND (${recordingObjectDisposable})`;

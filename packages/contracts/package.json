@@ -6,6 +6,7 @@
   "exports": {
     ".": "./dist/index.js",
     "./server": "./dist/server.js",
+    "./operations": "./dist/operations.js",
     "./content": "./dist/content.js",
     "./desktop": "./dist/desktop.js",
     "./generation": "./dist/generation.js",

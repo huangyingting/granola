@@ -9,8 +9,9 @@ import { Database, requireDatabaseUrl } from './index.js';
 import { audioRetentionPolicySchema } from '@windows-ai-notes/contracts/uploads';
 
 async function main() {
-  const { values, positionals } = parseArgs({
+  const { values, positionals, tokens } = parseArgs({
     allowPositionals: true,
+    tokens: true,
     options: {
       issuer: { type: 'string' },
       subject: { type: 'string' },
@@ -29,11 +30,19 @@ async function main() {
   try {
     if (positionals.length !== 1)
       throw new Error(
-        'Choose migrate, provision, usage-limits or audio-retention.',
+        'Choose migrate, provision, usage-limits, audio-retention or operations.',
       );
     if (positionals[0] === 'migrate') {
       await database.migrate();
       console.log('Database migrations applied.');
+    } else if (positionals[0] === 'operations') {
+      if (tokens.some((token) => token.kind === 'option'))
+        throw new ServiceError(
+          'invalid_operations',
+          'Operations is deployment-wide and does not accept filters or other options.',
+          400,
+        );
+      console.log(JSON.stringify(await database.operations()));
     } else if (positionals[0] === 'provision') {
       if (values.dev && process.env.NODE_ENV === 'production')
         throw new Error(
@@ -95,7 +104,7 @@ async function main() {
       );
     } else
       throw new Error(
-        'Choose migrate, provision, usage-limits or audio-retention.',
+        'Choose migrate, provision, usage-limits, audio-retention or operations.',
       );
   } finally {
     await database.close();
