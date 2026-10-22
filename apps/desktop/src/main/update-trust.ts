@@ -4,54 +4,19 @@ import { promisify } from 'node:util';
 import { z } from 'zod';
 import { audioHostEnvironment } from '@windows-ai-notes/client/audio';
 import { LocalError } from '@windows-ai-notes/local';
+import {
+  compareUpdateVersions,
+  updateExpectationSchema,
+  verifiedUpdateArtifactSchema,
+  type UpdateExpectation,
+} from '@windows-ai-notes/contracts/updates';
 
-const text = z
-  .string()
-  .min(1)
-  .max(200)
-  .refine(
-    (value) => value === value.trim() && !/[\u0000-\u001f\u007f]/u.test(value),
-  );
-const certificateHash = z
-  .string()
-  .length(64)
-  .regex(/^[0-9a-f]+$/u);
-const sha512 = z
-  .string()
-  .regex(/^[A-Za-z0-9+/]{86}==$/u)
-  .refine((value) => Buffer.from(value, 'base64').toString('base64') === value);
-const bytes = z
-  .number()
-  .int()
-  .positive()
-  .max(2 * 1024 ** 3);
-const version = z
-  .string()
-  .max(32)
-  .regex(/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/u)
-  .refine((value) => value === value.trim())
-  .refine((value) => value.split('.').every((part) => Number(part) <= 65_535));
-const expectationSchema = z.strictObject({
-  current_version: version,
-  version,
-  certificate_sha256: certificateHash,
-  publisher: text,
-  product_name: text,
-  bytes,
-  sha512,
-});
+export type { UpdateExpectation } from '@windows-ai-notes/contracts/updates';
 const verifiedSchema = z.strictObject({
   version: z.literal(1),
   verified: z.literal(true),
   code: z.literal('update_verified'),
-  artifact: z.strictObject({
-    bytes,
-    sha512,
-    certificate_sha256: certificateHash,
-    publisher: text,
-    product_name: text,
-    product_version: text,
-  }),
+  artifact: verifiedUpdateArtifactSchema,
 });
 const rejectedSchema = z.strictObject({
   version: z.literal(1),
@@ -68,21 +33,16 @@ const rejectedSchema = z.strictObject({
   ]),
   artifact: z.null(),
 });
-export type UpdateExpectation = z.infer<typeof expectationSchema>;
-
 function expectation(value: unknown): UpdateExpectation {
-  const parsed = expectationSchema.safeParse(value);
+  const parsed = updateExpectationSchema.safeParse(value);
   if (!parsed.success)
     throw new LocalError(
       'update_policy_invalid',
       'The update version, signing policy or file metadata is invalid.',
     );
-  const current = parsed.data.current_version.split('.').map(Number);
-  const difference = parsed.data.version
-    .split('.')
-    .map((part, index) => Number(part) - Number(current[index]))
-    .find((part) => part !== 0);
-  if (difference === undefined || difference <= 0)
+  if (
+    compareUpdateVersions(parsed.data.version, parsed.data.current_version) <= 0
+  )
     throw new LocalError(
       'update_not_newer',
       'An update must be newer than the running application. Downgrades were not permitted.',
@@ -120,6 +80,7 @@ export async function verifyUpdateArtifact(
   executable: string,
   file: string,
   expected: unknown,
+  signal?: AbortSignal,
 ) {
   const policy = expectation(expected);
   for (const path of [executable, file])
@@ -153,6 +114,7 @@ export async function verifyUpdateArtifact(
         timeout: 60_000,
         maxBuffer: 16_384,
         windowsHide: true,
+        ...(signal ? { signal } : {}),
       },
     ));
   } catch (error: unknown) {

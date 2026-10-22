@@ -295,8 +295,20 @@ publisher, product and version matching. A read-only handle remains open through
 verification and SHA-512 hashing. The desktop adapter additionally requires
 the expected digest/size and a strictly newer stable version, with bounded
 subprocess execution and no AI/signing secrets in the child environment.
-This does not require PowerShell at runtime. **Update-feed delivery, download
-and safe restart are not enabled by this verification primitive.**
+This does not require PowerShell at runtime.
+
+The direct-HTTPS feed and staged-download service is implemented separately.
+It uses a packaged-only public trust policy, bounded JSON, newer stable x64
+versions, same-directory installer names and streaming writes to an owned
+private stage. Redirects, HTTP, credentials/query tokens, partial responses,
+compression, inconsistent sizes and failed signatures/digests are rejected.
+The existing native disk-space probe must report room for two installer-sized
+allocations plus 512 MiB before a binary request. Cancellation and failures
+remove only that operation's stage; successful verification precedes atomic
+promotion. Cache metadata is not independent proof and must not replace
+signature/digest revalidation before installation.
+**The service is not wired to the application UI or an enabled update channel;
+safe installation/restart and failed-upgrade recovery remain unfinished.**
 
 ### Verified signed Windows candidates
 
@@ -347,6 +359,19 @@ observed signer metadata, and explicitly sets `production_accepted=false`.
 It is a build/inspection receipt, **not a signed update feed, independent
 provenance attestation or production acceptance decision**. Only distribute the
 signed installer, not the unpacked smoke-test directory.
+
+Optionally set the public build variable `WINDOWS_UPDATE_FEED_URL` to a
+canonical direct HTTPS `.json` endpoint without credentials, query parameters
+or a fragment. An update-enabled candidate must have a stable three-part version.
+The producer embeds `resources/update-policy.json` with that endpoint and the
+independent signer/product pins, and emits `windows-update.json` only after the
+entire signed candidate passes verification. The feed references the verified
+installer's exact size and SHA-512; serve both from the same directory without
+redirects. GitHub browser-download redirect URLs are not supported by this
+generic transport. Omitting the variable preserves the existing unconfigured
+candidate behavior. Feed generation/upload is **not publication, a separately
+signed manifest, production approval or update activation**; the candidate
+receipt still sets `production_accepted=false`.
 
 For hosted PFX candidate builds, configure the **`signed-release` environment**
 with required reviewers and branch restrictions **before** storing credentials.

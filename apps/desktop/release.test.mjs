@@ -22,6 +22,7 @@ import {
   signedConfiguration,
   verifiedFile,
   promoteCandidate,
+  updatePolicy,
 } from './release.mjs';
 
 const policy = {
@@ -74,6 +75,69 @@ async function fixture() {
   return { output, destination, version, commit, productName, policy };
 }
 describe('fail-closed signed candidate policy', () => {
+  it('keeps updates unconfigured unless a direct HTTPS JSON feed is explicitly selected', async () => {
+    expect(await updatePolicy({}, productName, policy)).toBeNull();
+    expect(
+      await updatePolicy({ WINDOWS_UPDATE_FEED_URL: '' }, productName, policy),
+    ).toBeNull();
+    const configured = await updatePolicy(
+      {
+        WINDOWS_UPDATE_FEED_URL: 'https://updates.example/windows/stable.json',
+        ...environment,
+      },
+      productName,
+      policy,
+    );
+    expect(configured).toEqual({
+      version: 1,
+      feed_url: 'https://updates.example/windows/stable.json',
+      certificate_sha256: policy.certificate_sha256,
+      publisher: policy.publisher,
+      product_name: productName,
+    });
+    expect(JSON.stringify(configured)).not.toContain(
+      environment.WIN_CSC_KEY_PASSWORD,
+    );
+    expect(JSON.stringify(configured)).not.toContain(policy.certificate);
+    for (const url of [
+      ' ',
+      'http://updates.example/feed.json',
+      'https://user:secret@updates.example/feed.json',
+      'https://updates.example/feed.json?key=synthetic',
+      'https://updates.example/feed.json#',
+    ]) {
+      await expect(
+        updatePolicy({ WINDOWS_UPDATE_FEED_URL: url }, productName, policy),
+      ).rejects.toMatchObject({
+        code: 'release_update_policy',
+      });
+    }
+  });
+  it('bundles only a freshly staged public update policy and rejects a preexisting resource override', async () => {
+    const base = JSON.parse(await readFile(packageFile, 'utf8'));
+    const path = 'C:\\fresh-stage\\update-policy.json';
+    const config = signedConfiguration(base, 'output', 'native', policy, path);
+    expect(
+      config.extraResources.filter(
+        (entry) => entry.to === 'update-policy.json',
+      ),
+    ).toEqual([{ from: path, to: 'update-policy.json' }]);
+    expect(() =>
+      signedConfiguration(
+        {
+          ...base,
+          extraResources: [
+            ...base.extraResources,
+            { from: 'stale.json', to: 'update-policy.json' },
+          ],
+        },
+        'output',
+        'native',
+        policy,
+        path,
+      ),
+    ).toThrow('fresh signed-build');
+  });
   it('requires explicit local Windows signing material and independent identity pins', () => {
     expect(signingPolicy(environment, 'win32')).toEqual(policy);
     expect(
@@ -382,6 +446,42 @@ describe('fail-closed signed candidate policy', () => {
       paths.output,
     ])
       expect(JSON.stringify(receipt)).not.toContain(marker);
+  });
+  it('derives an optional feed only from the completely verified installer without claiming production acceptance', async () => {
+    const paths = await fixture();
+    const receipt = await promoteCandidate(
+      { ...paths, updates: true },
+      async () => signature,
+    );
+    const feed = JSON.parse(
+      await readFile(join(paths.destination, 'windows-update.json'), 'utf8'),
+    );
+    const installer = receipt.artifacts[receipt.installer];
+    expect(feed).toEqual({
+      version: 1,
+      kind: 'windows_update',
+      application_version: version,
+      architecture: 'x64',
+      installer: receipt.installer,
+      bytes: Number(installer.bytes),
+      sha512: installer.sha512,
+    });
+    expect(receipt.production_accepted).toBe(false);
+    const plain = await fixture();
+    await promoteCandidate(plain, async () => signature);
+    await expect(
+      readFile(join(plain.destination, 'windows-update.json')),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+    const failed = await fixture();
+    await expect(
+      promoteCandidate({ ...failed, updates: true }, async () => ({
+        ...signature,
+        status: 'NotSigned',
+      })),
+    ).rejects.toThrow('trusted, timestamped');
+    await expect(
+      readFile(join(failed.output, 'windows-update.json')),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
   });
   it.each(expectedFiles)(
     'never publishes partial output when this required signature fails: %s',

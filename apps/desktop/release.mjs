@@ -311,7 +311,32 @@ export async function verifiedFile(
     timestamped: true,
   };
 }
-export function signedConfiguration(base, output, native, policy) {
+export async function updatePolicy(environment, productName, policy) {
+  const url = environment.WINDOWS_UPDATE_FEED_URL;
+  if (url === undefined || url === '') return null;
+  const { packagedUpdatePolicySchema } =
+    await import('@windows-ai-notes/contracts/updates');
+  const parsed = packagedUpdatePolicySchema.safeParse({
+    version: 1,
+    feed_url: url,
+    certificate_sha256: policy.certificate_sha256,
+    publisher: policy.publisher,
+    product_name: productName,
+  });
+  if (!parsed.success)
+    throw new ReleaseError(
+      'release_update_policy',
+      'WINDOWS_UPDATE_FEED_URL must be a canonical direct HTTPS JSON URL without credentials, query parameters or a fragment.',
+    );
+  return parsed.data;
+}
+export function signedConfiguration(
+  base,
+  output,
+  native,
+  policy,
+  updatePolicyFile,
+) {
   if (
     !Array.isArray(base.extraResources) ||
     base.extraResources.filter((entry) => entry?.to === 'audio-host').length !==
@@ -320,6 +345,11 @@ export function signedConfiguration(base, output, native, policy) {
     throw new ReleaseError(
       'release_resources',
       'The preview package must declare exactly one bundled audio helper.',
+    );
+  if (base.extraResources.some((entry) => entry?.to === 'update-policy.json'))
+    throw new ReleaseError(
+      'release_update_resources',
+      'The update policy must come only from the fresh signed-build staging directory.',
     );
   return {
     ...base,
@@ -331,9 +361,14 @@ export function signedConfiguration(base, output, native, policy) {
       'dist/renderer/**/*',
       'package.json',
     ],
-    extraResources: base.extraResources.map((entry) =>
-      entry?.to === 'audio-host' ? { ...entry, from: native } : entry,
-    ),
+    extraResources: [
+      ...base.extraResources.map((entry) =>
+        entry?.to === 'audio-host' ? { ...entry, from: native } : entry,
+      ),
+      ...(updatePolicyFile
+        ? [{ from: updatePolicyFile, to: 'update-policy.json' }]
+        : []),
+    ],
     forceCodeSigning: true,
     publish: null,
     nsis: { ...base.nsis, perMachine: false, deleteAppDataOnUninstall: false },
@@ -353,7 +388,15 @@ export function signedConfiguration(base, output, native, policy) {
   };
 }
 export async function promoteCandidate(
-  { output, destination, version, commit, productName, policy },
+  {
+    output,
+    destination,
+    version,
+    commit,
+    productName,
+    policy,
+    updates = false,
+  },
   inspect,
 ) {
   versionSchema.parse(version);
@@ -388,6 +431,25 @@ export async function promoteCandidate(
     `${JSON.stringify(receipt, null, 2)}\n`,
     { flag: 'wx' },
   );
+  if (updates) {
+    const { updateFeedSchema } =
+      await import('@windows-ai-notes/contracts/updates');
+    const artifact = artifacts[installer];
+    const feed = updateFeedSchema.parse({
+      version: 1,
+      kind: 'windows_update',
+      application_version: version,
+      architecture: 'x64',
+      installer,
+      bytes: Number(artifact.bytes),
+      sha512: artifact.sha512,
+    });
+    await writeFile(
+      join(output, 'windows-update.json'),
+      `${JSON.stringify(feed, null, 2)}\n`,
+      { flag: 'wx' },
+    );
+  }
   await rename(output, destination);
   return receipt;
 }
@@ -517,6 +579,25 @@ async function main() {
     const native = join(stage, 'native'),
       output = join(stage, 'output');
     await pnpm(['build', '--force']);
+    const updates = await updatePolicy(process.env, base.productName, policy);
+    let updatePolicyFile;
+    if (updates) {
+      const { updateVersionSchema } =
+        await import('@windows-ai-notes/contracts/updates');
+      if (!updateVersionSchema.safeParse(version).success)
+        throw new ReleaseError(
+          'release_update_version',
+          'Update-enabled candidates require a stable three-part Windows-compatible version.',
+        );
+      updatePolicyFile = join(stage, 'update-policy.json');
+      await writeFile(
+        updatePolicyFile,
+        `${JSON.stringify(updates, null, 2)}\n`,
+        {
+          flag: 'wx',
+        },
+      );
+    }
     const project = 'native/audio-host/AudioHost/AudioHost.csproj';
     await run(
       'dotnet',
@@ -566,7 +647,13 @@ async function main() {
       projectDir: desktop,
       targets: Platform.WINDOWS.createTarget('nsis', Arch.x64),
       publish: 'never',
-      config: signedConfiguration(base, output, native, policy),
+      config: signedConfiguration(
+        base,
+        output,
+        native,
+        policy,
+        updatePolicyFile,
+      ),
     });
     if ((await cleanSource(environment)) !== commit)
       throw new ReleaseError(
@@ -580,6 +667,7 @@ async function main() {
       commit,
       productName: base.productName,
       policy,
+      updates: updates !== null,
     });
     console.log(
       JSON.stringify({

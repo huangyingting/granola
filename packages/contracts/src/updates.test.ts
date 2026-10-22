@@ -1,0 +1,68 @@
+import { describe, expect, it } from 'vitest';
+import {
+  compareUpdateVersions,
+  packagedUpdatePolicySchema,
+  updateFeedSchema,
+} from './updates.js';
+
+const policy = {
+  version: 1,
+  feed_url: 'https://updates.example/windows/stable.json',
+  certificate_sha256: 'ab'.repeat(32),
+  publisher: 'Synthetic publisher',
+  product_name: 'Windows AI Notes Preview',
+};
+const feed = {
+  version: 1,
+  kind: 'windows_update',
+  application_version: '0.1.1',
+  architecture: 'x64',
+  installer: 'windows-ai-notes-0.1.1-x64-signed.exe',
+  bytes: 100,
+  sha512: Buffer.alloc(64).toString('base64'),
+};
+
+describe('packaged update and feed contracts', () => {
+  it('accepts a pinned policy and an exact stable x64 installer descriptor', () => {
+    expect(packagedUpdatePolicySchema.parse(policy)).toEqual(policy);
+    expect(updateFeedSchema.parse(feed)).toEqual(feed);
+    expect(compareUpdateVersions('0.10.0', '0.9.99')).toBe(1);
+    expect(compareUpdateVersions('0.1.0', '0.1.0')).toBe(0);
+    expect(compareUpdateVersions('1.0.0', '2.0.0')).toBe(-1);
+  });
+  it.each([
+    'http://updates.example/stable.json',
+    'https://user:password@updates.example/stable.json',
+    'https://updates.example/stable.json?token=synthetic',
+    'https://updates.example/stable.json#fragment',
+    'https://updates.example/stable.json?',
+    'https://updates.example/stable.json#',
+    'https://UPDATES.example/stable.json',
+    'https://updates.example/a/../stable.json',
+    'https://updates.example/stable.json\n',
+    'https://updates.example/',
+    'file:///C:/updates/stable.json',
+  ])('rejects an unsafe or noncanonical feed endpoint: %s', (feed_url) => {
+    expect(
+      packagedUpdatePolicySchema.safeParse({ ...policy, feed_url }).success,
+    ).toBe(false);
+  });
+  it.each([
+    { installer: '../outside.exe' },
+    { installer: 'https://other.example/installer.exe' },
+    { installer: 'windows-ai-notes-0.1.0-x64-signed.exe' },
+    { installer: 'windows-ai-notes-0.1.1-x64-unsigned.exe' },
+    { architecture: 'arm64' },
+    { application_version: '0.1.1-preview' },
+    { application_version: '0.1.1\n' },
+    { bytes: 2 * 1024 ** 3 + 1 },
+    { bytes: 0 },
+    { sha512: `${feed.sha512}\n` },
+    { certificate_sha256: policy.certificate_sha256 },
+    { production_accepted: true },
+  ])('rejects unsupported or ambiguous feed metadata: %j', (change) => {
+    expect(updateFeedSchema.safeParse({ ...feed, ...change }).success).toBe(
+      false,
+    );
+  });
+});

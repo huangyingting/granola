@@ -21,7 +21,8 @@
     "./templates": "./dist/templates.js",
     "./recording": "./dist/recording.js",
     "./uploads": "./dist/uploads.js",
-    "./realtime": "./dist/realtime.js"
+    "./realtime": "./dist/realtime.js",
+    "./updates": "./dist/updates.js"
   },
   "dependencies": {
     "zod": "^4.1.0"
