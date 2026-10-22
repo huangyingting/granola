@@ -6,10 +6,16 @@ import {
   summaryStageSpecSchema,
   summaryProgressSchema,
   validateEvidenceFacts,
+  validatePipelineFacts,
+  summaryFactsInputSchema,
+  SUMMARY_PIPELINE_FACT_BYTES,
+  SUMMARY_FACTS_INPUT_BYTES,
 } from './evidence.js';
 import {
   summarySnapshotCitations,
   validateSummary,
+  jobInputSchema,
+  summaryRequestSchema,
   type SummarySnapshot,
 } from './server.js';
 
@@ -30,6 +36,103 @@ const fact = {
   due_date: null,
 };
 describe('durable summary stage contracts', () => {
+  it('fits four near-limit pipeline fact outputs in a bounded merge without copying full notes', () => {
+    const output = validatePipelineFacts(
+      {
+        facts: Array.from({ length: 4 }, () => ({
+          ...fact,
+          text: 'x'.repeat(1800),
+        })),
+      },
+      citations,
+    );
+    expect(Buffer.byteLength(JSON.stringify(output))).toBeGreaterThan(7500);
+    expect(Buffer.byteLength(JSON.stringify(output))).toBeLessThanOrEqual(
+      SUMMARY_PIPELINE_FACT_BYTES,
+    );
+    const { notes: _notes, segments: _segments, ...context } = input;
+    const merged = summaryFactsInputSchema.parse({
+      ...context,
+      version: 'meeting-facts-input-v1',
+      facts: Array.from({ length: 4 }, () => output.facts).flat(),
+    });
+    expect(merged.facts).toHaveLength(16);
+    expect(Buffer.byteLength(JSON.stringify(merged))).toBeLessThanOrEqual(
+      SUMMARY_FACTS_INPUT_BYTES,
+    );
+    expect(merged).not.toHaveProperty('notes');
+  });
+  it('keeps long-meeting consent optional without rewriting legacy request hashes', () => {
+    const body = {
+      note_revision: 1,
+      transcript_revision: 0,
+      language: 'en' as const,
+    };
+    expect(summaryRequestSchema.parse(body)).toEqual(body);
+    expect(
+      summaryRequestSchema.safeParse({ ...body, allow_long_context: false })
+        .success,
+    ).toBe(false);
+    expect(
+      summaryRequestSchema.parse({ ...body, allow_long_context: true }),
+    ).toEqual({ ...body, allow_long_context: true });
+  });
+  it('requires indexed summaries to pin one canonical revision without a partial embedded transcript', () => {
+    const indexed = {
+      kind: 'summary',
+      snapshot: { ...input, transcript_revision: 2 },
+      source: {
+        version: 'staged-evidence-v1',
+        text_bytes: 5000,
+        transcript: {
+          document_id: input.document_id,
+          revision: 2,
+          source: 'manual',
+          total_segments: 1101,
+        },
+      },
+    };
+    expect(jobInputSchema.safeParse(indexed).success).toBe(true);
+    for (const change of [
+      {
+        ...indexed.source,
+        transcript: { ...indexed.source.transcript, revision: 1 },
+      },
+      {
+        ...indexed.source,
+        transcript: { ...indexed.source.transcript, document_id: randomUUID() },
+      },
+      {
+        ...indexed.source,
+        transcript: { ...indexed.source.transcript, is_candidate: true },
+      },
+      { ...indexed.source, text_bytes: 0 },
+      {
+        ...indexed.source,
+        text_bytes: 1,
+        transcript: { ...indexed.source.transcript, total_segments: 0 },
+      },
+    ])
+      expect(
+        jobInputSchema.safeParse({ ...indexed, source: change }).success,
+      ).toBe(false);
+    expect(
+      jobInputSchema.safeParse({
+        ...indexed,
+        snapshot: {
+          ...indexed.snapshot,
+          segments: [
+            {
+              id: randomUUID(),
+              start_ms: 0,
+              end_ms: 100,
+              text: 'A partial transcript must not masquerade as the full frozen source.',
+            },
+          ],
+        },
+      }).success,
+    ).toBe(false);
+  });
   it('requires resume consent tokens only for the resume IPC action', () => {
     const command = {
       operation: 'controlSummary',

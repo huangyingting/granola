@@ -323,11 +323,16 @@ export function makeTranscriptPage(
     has_more: offset + segments.length < header.total_segments,
   });
 }
+export const LONG_SUMMARY_VERSION = 'staged-evidence-v1';
+export const summaryCapabilitiesSchema = z.strictObject({
+  long_meetings: z.string().min(1).max(80),
+});
 export const summaryRequestSchema = z.strictObject({
   note_revision: revision.min(1),
   transcript_revision: revision,
   language: z.enum(['en', 'zh']).default('en'),
   template_id: summaryTemplateIdSchema.optional(),
+  allow_long_context: z.literal(true).optional(),
 });
 export const transcriptionQuerySchema = z.strictObject({
   base_revision: z.coerce.number().int().nonnegative(),
@@ -368,10 +373,34 @@ export const summarySnapshotSchema = z.strictObject({
   template_id: summaryTemplateIdSchema.optional(),
 });
 export const jobInputSchema = z.discriminatedUnion('kind', [
-  z.strictObject({
-    kind: z.literal('summary'),
-    snapshot: summarySnapshotSchema,
-  }),
+  z
+    .strictObject({
+      kind: z.literal('summary'),
+      snapshot: summarySnapshotSchema,
+      source: z
+        .strictObject({
+          version: z.literal(LONG_SUMMARY_VERSION),
+          transcript: transcriptHeaderSchema,
+          text_bytes: z.number().int().min(0).max(MAX_TRANSCRIPT_TEXT_BYTES),
+        })
+        .optional(),
+    })
+    .refine(
+      ({ snapshot, source }) =>
+        !source ||
+        (snapshot.segments.length === 0 &&
+          source.transcript.document_id === snapshot.document_id &&
+          source.transcript.revision === snapshot.transcript_revision &&
+          source.transcript.is_candidate !== true &&
+          (source.transcript.source === 'none') ===
+            (snapshot.transcript_revision === 0) &&
+          source.text_bytes >= source.transcript.total_segments &&
+          (source.transcript.total_segments !== 0 || source.text_bytes === 0) &&
+          (snapshot.transcript_revision !== 0 ||
+            (source.transcript.total_segments === 0 &&
+              source.text_bytes === 0))),
+      'Indexed summaries must pin one canonical transcript without embedding a partial segment list.',
+    ),
   z.strictObject({
     kind: z.literal('transcription'),
     base_transcript_revision: revision,

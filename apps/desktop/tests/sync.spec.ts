@@ -106,6 +106,11 @@ test('recovers one summary and resume receipt, inspects frozen evidence, persist
       .selectOption('decisions-actions-v1');
     await page
       .getByRole('checkbox', {
+        name: 'Allow full-meeting processing when the input exceeds the short-summary limit.',
+      })
+      .check();
+    await page
+      .getByRole('checkbox', {
         name: 'I agree to Azure processing for this summary.',
       })
       .check();
@@ -132,6 +137,16 @@ test('recovers one summary and resume receipt, inspects frozen evidence, persist
     ).toHaveValue('decisions-actions-v1');
     await expect(
       page.getByRole('combobox', { name: 'Summary template' }),
+    ).toBeDisabled();
+    await expect(
+      page.getByRole('checkbox', {
+        name: 'Allow full-meeting processing when the input exceeds the short-summary limit.',
+      }),
+    ).toBeChecked();
+    await expect(
+      page.getByRole('checkbox', {
+        name: 'Allow full-meeting processing when the input exceeds the short-summary limit.',
+      }),
     ).toBeDisabled();
     await page
       .getByRole('checkbox', {

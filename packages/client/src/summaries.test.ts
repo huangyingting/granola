@@ -212,6 +212,105 @@ describe.skipIf(!databaseUrl)(
       await admin.pool.query(`DROP SCHEMA "${schema}" CASCADE`);
       await admin.close();
     });
+    it('pins explicit full-meeting consent across a lost reply and restart without renegotiating or changing the original body', async () => {
+      const document = await connect('证据'.repeat(10_000));
+      await expect(
+        controller.summaries.start(command(document.id)),
+      ).rejects.toMatchObject({ code: 'context_too_large' });
+      const request = {
+        ...command(document.id),
+        allow_long_context: true as const,
+      };
+      const original = globalThis.fetch;
+      let lose = true,
+        capabilities = true;
+      const submissions: { key: string | null; body: unknown }[] = [];
+      vi.stubGlobal('fetch', async (...args: Parameters<typeof fetch>) => {
+        const url = String(args[0]);
+        if (
+          !capabilities &&
+          (url.endsWith('/v1/templates') ||
+            url.endsWith('/v1/summary-capabilities'))
+        )
+          throw new Error('Recovery must not renegotiate the saved consent.');
+        const submission = url.endsWith('/summary-runs');
+        if (submission)
+          submissions.push({
+            key: new Headers(args[1]?.headers).get('idempotency-key'),
+            body: JSON.parse(String(args[1]?.body)),
+          });
+        const response = await original(...args);
+        if (submission && lose) {
+          lose = false;
+          await response.arrayBuffer();
+          throw new TypeError('Synthetic lost long-meeting receipt.');
+        }
+        return response;
+      });
+      await expect(controller.summaries.start(request)).rejects.toMatchObject({
+        code: 'service_unavailable',
+      });
+      expect(controller.snapshot().summary_submission).toMatchObject({
+        allow_long_context: true,
+        job_id: null,
+      });
+      expect(await db.jobs(actor.user_id, document.id)).toHaveLength(1);
+      controller.dispose();
+      local.close();
+      local = new LocalStore(join(directory, 'notes.sqlite'), key);
+      controller = open();
+      capabilities = false;
+      await expect(
+        controller.summaries.start({
+          ...command(document.id),
+          scope: controller.scope,
+          new_attempt: false,
+        }),
+      ).rejects.toMatchObject({ code: 'summary_intent_frozen' });
+      await controller.summaries.start({
+        ...request,
+        scope: controller.scope,
+        new_attempt: false,
+      });
+      expect(submissions).toHaveLength(2);
+      expect(submissions[1]).toEqual(submissions[0]);
+      expect(submissions[0]!.body).toEqual({
+        note_revision: 1,
+        transcript_revision: 0,
+        language: 'en',
+        allow_long_context: true,
+      });
+      expect(await db.jobs(actor.user_id, document.id)).toHaveLength(1);
+    });
+    it('rejects an unsupported long-meeting capability before creating a new encrypted intent or billable job', async () => {
+      const document = await connect();
+      const original = globalThis.fetch;
+      vi.stubGlobal('fetch', async (...args: Parameters<typeof fetch>) =>
+        String(args[0]).endsWith('/v1/summary-capabilities')
+          ? new Response(
+              JSON.stringify({ long_meetings: 'staged-evidence-v99' }),
+              {
+                headers: { 'content-type': 'application/json' },
+              },
+            )
+          : original(...args),
+      );
+      await expect(
+        controller.summaries.start({
+          ...command(document.id),
+          allow_long_context: true,
+        }),
+      ).rejects.toMatchObject({ code: 'unsupported_summary_context' });
+      expect(
+        local.getArtifact(
+          controller.profile,
+          document.id,
+          'summary-submission',
+          summaryIntentSchema,
+        ),
+      ).toBeNull();
+      expect(await db.jobs(actor.user_id, document.id)).toHaveLength(0);
+    });
     it('reconciles lost resume replies with their original consent token instead of authorizing another failed attempt', async () => {
       const document = await connect();
       const job = await start(document.id);

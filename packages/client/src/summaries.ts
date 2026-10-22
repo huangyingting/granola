@@ -9,6 +9,8 @@ import {
   jobSchema,
   summaryRequestSchema,
   idempotencyKey,
+  LONG_SUMMARY_VERSION,
+  summaryCapabilitiesSchema,
 } from '@windows-ai-notes/contracts/server';
 import {
   summaryCitations,
@@ -212,12 +214,27 @@ export class DesktopSummaries {
         }
         if (!intent) {
           const template = command.template_id ?? DEFAULT_SUMMARY_TEMPLATE;
-          const catalog = await context.api.request(
-            '/v1/templates',
-            summaryTemplateCatalogSchema,
-            { signal },
-          );
+          const [catalog, capability] = await Promise.all([
+            context.api.request('/v1/templates', summaryTemplateCatalogSchema, {
+              signal,
+            }),
+            command.allow_long_context
+              ? context.api.request(
+                  '/v1/summary-capabilities',
+                  summaryCapabilitiesSchema,
+                  { signal },
+                )
+              : Promise.resolve(null),
+          ]);
           context.authorize();
+          if (
+            command.allow_long_context &&
+            capability?.long_meetings !== LONG_SUMMARY_VERSION
+          )
+            throw problem(
+              'unsupported_summary_context',
+              'The connected service does not support this long-meeting processing version.',
+            );
           if (!catalog.templates.some((item) => item.id === template))
             throw problem(
               'unsupported_summary_template',
@@ -252,6 +269,9 @@ export class DesktopSummaries {
               ...(template === DEFAULT_SUMMARY_TEMPLATE
                 ? {}
                 : { template_id: template }),
+              ...(command.allow_long_context
+                ? { allow_long_context: true }
+                : {}),
             },
             key: `summary:${randomUUID()}`,
             consent_id: command.consent_id,
@@ -272,11 +292,12 @@ export class DesktopSummaries {
         else if (
           intent.body.language !== command.language ||
           (intent.body.template_id ?? DEFAULT_SUMMARY_TEMPLATE) !==
-            (command.template_id ?? DEFAULT_SUMMARY_TEMPLATE)
+            (command.template_id ?? DEFAULT_SUMMARY_TEMPLATE) ||
+          intent.body.allow_long_context !== command.allow_long_context
         )
           throw problem(
             'summary_intent_frozen',
-            'Recover the saved request with its original language and template before changing summary settings.',
+            'Recover the saved request with its original language, template and long-meeting consent before changing summary settings.',
           );
         let job: z.infer<typeof jobSchema>;
         try {

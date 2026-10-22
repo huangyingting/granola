@@ -88,6 +88,43 @@ export const evidenceFactsSchema = z.strictObject({
     )
     .max(64),
 });
+export type EvidenceFacts = z.infer<typeof evidenceFactsSchema>;
+export const SUMMARY_PIPELINE_FACT_BYTES = 8192;
+export const SUMMARY_FACTS_INPUT_BYTES = 36_864;
+export const SUMMARY_EXTRACT_PROMPT = 'meeting-evidence-extract-v1';
+export const SUMMARY_MERGE_PROMPT = 'meeting-evidence-merge-v1';
+export const SUMMARY_FACTS_PROMPT = 'meeting-facts-summary-v1';
+export const summaryFactsInputSchema = frozenMeetingSchema
+  .omit({ notes: true })
+  .extend({
+    version: z.literal('meeting-facts-input-v1'),
+    facts: z.array(evidenceFactsSchema.shape.facts.element).max(256),
+  })
+  .refine(
+    (value) =>
+      utf8.encode(JSON.stringify(value)).length <= SUMMARY_FACTS_INPUT_BYTES,
+  );
+export type SummaryFactsInput = z.infer<typeof summaryFactsInputSchema>;
+export function factCitations(facts: EvidenceFacts['facts']) {
+  const unique = new Map<string, Citation>();
+  for (const fact of facts)
+    for (const citation of fact.citations)
+      unique.set(citationKey(citation), citation);
+  return [...unique.values()];
+}
+export function validatePipelineFacts(
+  value: unknown,
+  citations: readonly Citation[],
+) {
+  const result = validateEvidenceFacts(value, citations);
+  if (utf8.encode(JSON.stringify(result)).length > SUMMARY_PIPELINE_FACT_BYTES)
+    throw new ServiceError(
+      'invalid_model_output',
+      'The extracted evidence exceeds the resumable pipeline fact budget.',
+      502,
+    );
+  return result;
+}
 export function validateEvidenceFacts(
   value: unknown,
   citations: readonly Citation[],
@@ -174,3 +211,11 @@ export const summaryProgressSchema = z
       progress.resume_available === (progress.resume_token !== null),
   );
 export type SummaryProgress = z.infer<typeof summaryProgressSchema>;
+const newRequestErrors = new Set([
+  'insufficient_evidence',
+  'context_too_large',
+  'empty_context',
+  'summary_progress_expired',
+]);
+export const summaryNeedsNewRequest = (code: string | null | undefined) =>
+  newRequestErrors.has(code ?? '');

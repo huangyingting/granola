@@ -59,6 +59,7 @@ export const desktopCommandSchema = z.discriminatedUnion('operation', [
     id: resourceId,
     language: z.enum(['en', 'zh']),
     template_id: summaryTemplateIdSchema.optional(),
+    allow_long_context: z.literal(true).optional(),
     confirmed: z.literal(true),
     new_attempt: z.boolean(),
     consent_id: resourceId,

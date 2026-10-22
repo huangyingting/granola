@@ -8,6 +8,7 @@ export const summarySubmissionSchema = z.strictObject({
   job_id: resourceId.nullable(),
   rejected: z.boolean().default(false),
   template_id: summaryTemplateIdSchema.optional(),
+  allow_long_context: z.literal(true).optional(),
 });
 export const summaryReviewSchema = z.strictObject({
   document_id: resourceId,

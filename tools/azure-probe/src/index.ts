@@ -11,10 +11,112 @@ import {
   transcriptSchema,
   jobSchema,
   ServiceError,
+  validateSummaryCitations,
 } from '@windows-ai-notes/contracts/server';
+import {
+  summaryEvidenceChunkSchema,
+  summaryFactsInputSchema,
+  validatePipelineFacts,
+  factCitations,
+  type EvidenceFacts,
+} from '@windows-ai-notes/contracts/evidence';
+
+async function probeEvidence(
+  providers: ReturnType<typeof createAzureProviders>,
+) {
+  if (!providers.extract || !providers.merge || !providers.summarizeFacts)
+    throw new Error('The configured provider lacks the evidence pipeline.');
+  const context = {
+    document_id: randomUUID(),
+    note_revision: 1,
+    transcript_revision: 1,
+    language: 'en' as const,
+    template_id: 'decisions-actions-v1' as const,
+  };
+  const facts: EvidenceFacts['facts'] = [];
+  let inputTokens = 0,
+    outputTokens = 0;
+  const signal = AbortSignal.timeout(360_000);
+  const account = (usage: { input_tokens: number; output_tokens: number }) => {
+    inputTokens += usage.input_tokens;
+    outputTokens += usage.output_tokens;
+  };
+  const samples = [
+    'The team approved the synthetic Orion launch.',
+    'Mira agreed to send the synthetic Orion launch checklist on Friday.',
+  ];
+  for (const [index, text] of samples.entries()) {
+    const citation = {
+      source: 'transcript' as const,
+      id: randomUUID(),
+      revision: 1,
+    };
+    const chunk = summaryEvidenceChunkSchema.parse({
+      ...context,
+      version: 'meeting-evidence-v1',
+      index,
+      units: [
+        {
+          citation,
+          text,
+          text_start: 0,
+          text_end: text.length,
+          start_ms: index * 2000,
+          end_ms: index * 2000 + 1800,
+          overlap: false,
+        },
+      ],
+    });
+    const extracted = await providers.extract(chunk, signal);
+    account(extracted.usage);
+    const accepted = validatePipelineFacts({ facts: extracted.facts }, [
+      citation,
+    ]);
+    if (!accepted.facts.length)
+      throw new Error('Synthetic extraction lost all evidence.');
+    facts.push(...accepted.facts);
+  }
+  const input = (value: EvidenceFacts['facts']) =>
+    summaryFactsInputSchema.parse({
+      ...context,
+      version: 'meeting-facts-input-v1',
+      facts: value,
+    });
+  const merged = await providers.merge(input(facts), signal);
+  account(merged.usage);
+  const accepted = validatePipelineFacts(
+    { facts: merged.facts },
+    factCitations(facts),
+  );
+  if (!accepted.facts.length)
+    throw new Error('Synthetic merge lost all evidence.');
+  const generated = await providers.summarizeFacts(
+    input(accepted.facts),
+    signal,
+  );
+  account(generated.usage);
+  validateSummaryCitations(generated.summary, factCitations(accepted.facts));
+  console.log(
+    JSON.stringify({
+      evidence_pipeline: 'passed',
+      extraction_requests: 2,
+      merge_requests: 1,
+      final_requests: 1,
+      citations_validated: true,
+      input_tokens: inputTokens,
+      output_tokens: outputTokens,
+      credentials_logged: false,
+    }),
+  );
+}
 
 async function main() {
-  const { values } = parseArgs({ options: { 'env-file': { type: 'string' } } });
+  const { values } = parseArgs({
+    options: {
+      'env-file': { type: 'string' },
+      'evidence-only': { type: 'boolean', default: false },
+    },
+  });
   if (process.env.NODE_ENV === 'production')
     throw new Error('Synthetic probe is disabled in production mode.');
   const config = loadAzureConfig({
@@ -22,6 +124,7 @@ async function main() {
     ...(values['env-file'] ? { AZURE_ENV_FILE: values['env-file'] } : {}),
   });
   const providers = createAzureProviders(config);
+  if (values['evidence-only']) return probeEvidence(providers);
   const url = requireDatabaseUrl();
   const admin = new Database(url);
   const schema = `azure_probe_${randomUUID().replaceAll('-', '')}`;

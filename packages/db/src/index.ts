@@ -591,12 +591,43 @@ export class Database {
           input.transcript_revision,
           tx,
         );
-        if (header.total_segments > 1000 || header.text_bytes > 48_000)
+        const frozen = {
+          document_id: id,
+          notes: doc.notes,
+          segments: [],
+          note_revision: input.note_revision,
+          transcript_revision: input.transcript_revision,
+          language: input.language,
+          ...(input.template_id === undefined
+            ? {}
+            : { template_id: input.template_id }),
+        };
+        const indexed = () => {
+          if (!input.allow_long_context)
+            throw new ServiceError(
+              'context_too_large',
+              'This meeting requires explicitly consented long-meeting processing.',
+              413,
+            );
+          const { text_bytes, ...transcript } = header;
+          return {
+            kind: 'summary' as const,
+            snapshot: frozen,
+            source: {
+              version: 'staged-evidence-v1' as const,
+              transcript,
+              text_bytes,
+            },
+          };
+        };
+        if (!doc.notes.trim() && header.total_segments === 0)
           throw new ServiceError(
-            'context_too_large',
-            'This transcript requires the long-meeting summary workflow.',
-            413,
+            'empty_context',
+            'Add notes or a transcript before summarizing.',
+            400,
           );
+        if (header.total_segments > 1000 || header.text_bytes > 48_000)
+          return indexed();
         const transcript = await this.transcripts.legacy(
           userId,
           id,
@@ -604,15 +635,8 @@ export class Database {
           tx,
         );
         const snapshot = {
-          document_id: id,
-          notes: doc.notes,
+          ...frozen,
           segments: transcript.segments,
-          note_revision: input.note_revision,
-          transcript_revision: input.transcript_revision,
-          language: input.language,
-          ...(input.template_id === undefined
-            ? {}
-            : { template_id: input.template_id }),
         };
         if (!snapshot.notes.trim() && snapshot.segments.length === 0)
           throw new ServiceError(
@@ -621,11 +645,7 @@ export class Database {
             400,
           );
         if (Buffer.byteLength(JSON.stringify(snapshot)) > 48_000)
-          throw new ServiceError(
-            'context_too_large',
-            'Summary context exceeds the first milestone limit of 48,000 bytes.',
-            413,
-          );
+          return indexed();
         return { kind: 'summary', snapshot };
       },
     );
@@ -926,7 +946,16 @@ export class Database {
     const segment =
       selected.source === 'transcript' &&
       selected.revision === snapshot.transcript_revision
-        ? snapshot.segments.find((item) => item.id === selected.id)
+        ? input.source
+          ? (
+              await this.transcripts.citations(
+                userId,
+                row.document_id,
+                selected.revision,
+                [selected.id],
+              )
+            )[0]
+          : snapshot.segments.find((item) => item.id === selected.id)
         : undefined;
     if (
       selected.source === 'note'
@@ -939,6 +968,7 @@ export class Database {
         'The frozen source is unavailable.',
         404,
       );
+    await this.document(userId, row.document_id);
     return summarySourceSchema.parse({
       document_id: row.document_id,
       job_id: row.id,

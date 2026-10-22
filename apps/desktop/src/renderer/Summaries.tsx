@@ -5,7 +5,11 @@ import type {
   Draft,
 } from '@windows-ai-notes/contracts/desktop';
 import type { Summary } from '@windows-ai-notes/contracts/server';
-import type { SummaryProgress } from '@windows-ai-notes/contracts/evidence';
+import {
+  SUMMARY_FACTS_PROMPT,
+  summaryNeedsNewRequest,
+  type SummaryProgress,
+} from '@windows-ai-notes/contracts/evidence';
 import {
   DEFAULT_SUMMARY_TEMPLATE,
   SUMMARY_TEMPLATES,
@@ -58,6 +62,7 @@ export function SummaryPanel(props: Props) {
     SummaryTemplateCatalog['templates'] | null
   >(null);
   const [consent, setConsent] = useState(false);
+  const [longContext, setLongContext] = useState(false);
   const [resume, setResume] = useState<SummaryProgress | null>(null);
   const [resumeConsent, setResumeConsent] = useState(false);
   const consentId = useRef(crypto.randomUUID());
@@ -182,6 +187,11 @@ export function SummaryPanel(props: Props) {
     setConsent(false);
     consentId.current = crypto.randomUUID();
     setLanguage(kind === 'recover' ? submission!.language : language);
+    setLongContext(
+      kind === 'recover'
+        ? Boolean(submission!.allow_long_context)
+        : longContext,
+    );
     setTemplates(null);
     if (kind === 'recover') {
       setTemplate(submission!.template_id ?? DEFAULT_SUMMARY_TEMPLATE);
@@ -255,6 +265,7 @@ export function SummaryPanel(props: Props) {
       ...(template === DEFAULT_SUMMARY_TEMPLATE
         ? {}
         : { template_id: template }),
+      ...(longContext ? { allow_long_context: true } : {}),
       confirmed: true,
       new_attempt: confirmation === 'new',
       consent_id:
@@ -427,6 +438,23 @@ export function SummaryPanel(props: Props) {
           <label className="summary-check">
             <input
               type="checkbox"
+              checked={longContext}
+              disabled={busy || confirmation === 'recover'}
+              onChange={(event) => setLongContext(event.target.checked)}
+            />
+            Allow full-meeting processing when the input exceeds the
+            short-summary limit.
+          </label>
+          {longContext && (
+            <p className="quiet-note">
+              Longer meetings use multiple Azure extraction and merge requests.
+              Saved stages survive a restart; processing may pause at your
+              account allowance. Short input still uses the fastest direct path.
+            </p>
+          )}
+          <label className="summary-check">
+            <input
+              type="checkbox"
               checked={consent}
               disabled={busy}
               onChange={(event) => setConsent(event.target.checked)}
@@ -487,8 +515,11 @@ export function SummaryPanel(props: Props) {
           {templateVersion && (
             <p className="quiet-note">
               Template:{' '}
-              {SUMMARY_TEMPLATES.find((item) => item.id === templateVersion)
-                ?.name ?? 'Summary'}{' '}
+              {SUMMARY_TEMPLATES.find(
+                (item) =>
+                  item.id === templateVersion ||
+                  `${SUMMARY_FACTS_PROMPT}:${item.id}` === templateVersion,
+              )?.name ?? 'Summary'}{' '}
               ({templateVersion})
             </p>
           )}
@@ -559,14 +590,16 @@ export function SummaryPanel(props: Props) {
             </p>
           )}
           {job.error && <p className="account-alert">{job.error.message}</p>}
-          {job.state === 'failed' && !resume && (
-            <button
-              disabled={busy || !connected}
-              onClick={() => void action(prepareResume)}
-            >
-              Resume summary
-            </button>
-          )}
+          {job.state === 'failed' &&
+            !resume &&
+            !summaryNeedsNewRequest(job.error?.code) && (
+              <button
+                disabled={busy || !connected}
+                onClick={() => void action(prepareResume)}
+              >
+                Resume summary
+              </button>
+            )}
           {resume?.job_id === job.id && (
             <div className="summary-consent">
               <strong>Resume frozen summary</strong>

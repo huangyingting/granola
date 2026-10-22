@@ -10,6 +10,7 @@ import {
   MAX_AUDIO_BYTES,
   MAX_TRANSCRIPT_SEGMENTS,
   MAX_TRANSCRIPT_TEXT_BYTES,
+  LONG_SUMMARY_VERSION,
   ServiceError,
   createDocumentSchema,
   updateDocumentSchema,
@@ -183,6 +184,9 @@ export async function createServer(
   }));
   app.get('/v1/templates', async () => ({
     templates: SUMMARY_TEMPLATES,
+  }));
+  app.get('/v1/summary-capabilities', async () => ({
+    long_meetings: LONG_SUMMARY_VERSION,
   }));
   app.get('/v1/sync/snapshot', async (request) => {
     const query = parse(syncSnapshotQuerySchema, request.query);

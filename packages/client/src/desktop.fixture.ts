@@ -18,6 +18,7 @@ import {
   applyTranscriptSchema,
   accountUsageSchema,
   DEFAULT_AI_LIMITS,
+  LONG_SUMMARY_VERSION,
   summaryRequestSchema,
   citationSchema,
   type SummarySnapshot,
@@ -453,6 +454,8 @@ export async function desktopFixture() {
       if (path === '/v1/usage') return send(response, state.usage);
       if (path === '/v1/templates')
         return send(response, { templates: SUMMARY_TEMPLATES });
+      if (path === '/v1/summary-capabilities')
+        return send(response, { long_meetings: LONG_SUMMARY_VERSION });
       if (path === '/v1/workspaces')
         return send(response, { workspaces: state.workspaces });
       if (path === '/v1/sync/snapshot') {

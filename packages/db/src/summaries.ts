@@ -8,6 +8,9 @@ import {
   validateSummaryCitations,
   citationKey,
   usageTotalsSchema,
+  usageSchema,
+  transcriptHeaderSchema,
+  type Citation,
   type Usage,
 } from '@windows-ai-notes/contracts/server';
 import {
@@ -17,6 +20,7 @@ import {
   summaryStageOutputSchema,
   summaryProgressSchema,
   validateEvidenceFacts,
+  summaryNeedsNewRequest,
   type SummaryStageKey,
   type SummaryStageSpec,
   type SummaryStageOutput,
@@ -55,6 +59,7 @@ type Progress = Omit<
   'document_id' | 'job_id' | 'resume_available'
 > & {
   fresh: boolean;
+  failure_code: string | null;
 };
 const expired = () =>
   new ServiceError(
@@ -149,7 +154,72 @@ export class SummaryStages {
       digest(row.input, true) !== digest(job.input, true)
     )
       throw changed();
+    if (job.input.kind === 'summary' && job.input.source) {
+      const { text_bytes, ...header } = await this.database.transcripts.header(
+        job.ownerId,
+        job.documentId,
+        input.transcript_revision,
+        tx,
+      );
+      if (
+        text_bytes !== job.input.source.text_bytes ||
+        digest(transcriptHeaderSchema.parse(header), true) !==
+          digest(job.input.source.transcript, true)
+      )
+        throw new ServiceError(
+          'summary_source_changed',
+          'The frozen transcript revision is unavailable or inconsistent. Confirm a new request after repairing the source.',
+          410,
+        );
+    }
     return row;
+  }
+  private async allow(
+    tx: Transaction,
+    job: ClaimedJob,
+    citations: readonly Citation[],
+  ) {
+    const input = snapshot(job);
+    const allowed = new Set(summarySnapshotCitations(input).map(citationKey));
+    if (job.input.kind === 'summary' && job.input.source) {
+      const transcript = citations.filter(
+        (citation) => citation.source === 'transcript',
+      );
+      if (
+        citations.some(
+          (citation) =>
+            citation.source === 'note' && !allowed.has(citationKey(citation)),
+        ) ||
+        transcript.some(
+          (citation) => citation.revision !== input.transcript_revision,
+        )
+      )
+        throw new ServiceError(
+          'invalid_citation',
+          'The stage references another frozen meeting revision.',
+          502,
+        );
+      const found = await this.database.transcripts.citations(
+        job.ownerId,
+        job.documentId,
+        input.transcript_revision,
+        transcript.map((citation) => citation.id),
+        tx,
+      );
+      if (found.length !== transcript.length)
+        throw new ServiceError(
+          'invalid_citation',
+          'The stage references evidence outside its frozen transcript.',
+          502,
+        );
+    } else if (
+      citations.some((citation) => !allowed.has(citationKey(citation)))
+    )
+      throw new ServiceError(
+        'invalid_citation',
+        'The stage references material outside its frozen summary input.',
+        502,
+      );
   }
   private async run(tx: Transaction, id: string): Promise<Run> {
     const row = (
@@ -226,17 +296,7 @@ export class SummaryStages {
       await this.guard(tx, job);
       const run = await this.run(tx, job.id);
       if (run.input_hash !== digest(job.input, true)) throw changed();
-      const allowed = new Set(
-        summarySnapshotCitations(snapshot(job)).map(citationKey),
-      );
-      if (
-        spec.citations.some((citation) => !allowed.has(citationKey(citation)))
-      )
-        throw new ServiceError(
-          'invalid_citation',
-          'The stage references material outside its frozen summary input.',
-          502,
-        );
+      await this.allow(tx, job, spec.citations);
       let step = await this.step(tx, job, spec);
       if (!step) {
         const count = (
@@ -402,8 +462,57 @@ export class SummaryStages {
         output.result.prompt_version !== step.prompt_version
       )
         throw changed();
+      await this.allow(tx, job, step.citations);
       validateSummaryCitations(output.result.summary, step.citations);
       return summaryResultSchema.parse(output.result);
+    });
+  }
+  async read(job: ClaimedJob, value: SummaryStageKey) {
+    const key = stageKey(value);
+    return this.database.transaction(async (tx) => {
+      await this.guard(tx, job);
+      const run = await this.run(tx, job.id);
+      if (run.input_hash !== digest(job.input, true)) throw changed();
+      const step = await this.step(tx, job, key);
+      if (!step || step.state !== 'completed')
+        throw new ServiceError(
+          'summary_stage_incomplete',
+          'The required evidence stage has no complete saved output.',
+          409,
+        );
+      await this.allow(tx, job, step.citations);
+      const output = summaryStageOutputSchema.parse(step.output);
+      if (output.kind === 'facts')
+        validateEvidenceFacts({ facts: output.facts }, step.citations);
+      else validateSummaryCitations(output.result.summary, step.citations);
+      return output;
+    });
+  }
+  async totalUsage(job: ClaimedJob) {
+    return this.database.transaction(async (tx) => {
+      await this.guard(tx, job);
+      const row = (
+        await tx.query<{
+          input_tokens: string;
+          output_tokens: string;
+          audio_ms: string;
+        }>(
+          `SELECT coalesce(sum((u->>'input_tokens')::numeric),0)::text input_tokens,
+         coalesce(sum((u->>'output_tokens')::numeric),0)::text output_tokens,
+         coalesce(sum((u->>'audio_ms')::numeric),0)::text audio_ms FROM (
+           SELECT coalesce(output->'usage',output->'result'->'usage') u
+           FROM summary_steps WHERE job_id=$1 AND state='completed'
+         ) s`,
+          [job.id],
+        )
+      ).rows[0]!;
+      const usage = usageSchema.parse({
+        input_tokens: Number(row.input_tokens),
+        output_tokens: Number(row.output_tokens),
+        audio_ms: Number(row.audio_ms),
+      });
+      usageTotals(usage);
+      return usage;
     });
   }
   async progress(user: string, id: string) {
@@ -416,7 +525,7 @@ export class SummaryStages {
       );
     const current = (
       await this.database.pool.query<Progress>(
-        `SELECT j.state,p.resume_token,j.updated_at>now()-interval '24 hours' fresh,
+        `SELECT j.state,p.resume_token,j.updated_at>now()-interval '24 hours' fresh,j.error->>'code' failure_code,
          s.total_stages,s.completed_stages,c.provider_requests,c.uncertain_requests
          FROM jobs j LEFT JOIN summary_runs p ON p.job_id=j.id
          CROSS JOIN LATERAL (
@@ -440,7 +549,8 @@ export class SummaryStages {
     const resume =
       current.state === 'failed' &&
       current.fresh &&
-      current.resume_token !== null;
+      current.resume_token !== null &&
+      !summaryNeedsNewRequest(current.failure_code);
     return summaryProgressSchema.parse({
       document_id: job.document_id,
       job_id: id,
@@ -469,8 +579,12 @@ export class SummaryStages {
       ]);
       await this.authorize(tx, user, visible.document_id);
       const row = (
-        await tx.query<{ state: string; input: unknown }>(
-          'SELECT state,input FROM jobs WHERE id=$1 FOR UPDATE',
+        await tx.query<{
+          state: string;
+          input: unknown;
+          failure_code: string | null;
+        }>(
+          "SELECT state,input,error->>'code' failure_code FROM jobs WHERE id=$1 FOR UPDATE",
           [id],
         )
       ).rows[0]!;
@@ -482,7 +596,7 @@ export class SummaryStages {
         )
       ).rowCount;
       if (replay) return;
-      if (row.state !== 'failed')
+      if (row.state !== 'failed' || summaryNeedsNewRequest(row.failure_code))
         throw new ServiceError(
           'job_not_retryable',
           'Only a failed summary can be explicitly resumed.',

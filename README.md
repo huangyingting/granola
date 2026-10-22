@@ -287,7 +287,7 @@ prompts or provider configuration. Main validates the selected capability before
 saving a new request, synchronizes saved notes, pins their note/transcript
 revisions and encrypts a private request key before submitting. **Recover saved
 summary request** reuses that exact key and input after a lost reply or restart.
-Its original language and template cannot be changed during recovery, and recovery
+Its original language, template and long-meeting consent cannot be changed during recovery, and recovery
 does not depend on fetching the current catalog. Legacy default requests retain
 their original body and durable hash without inserting a default template field.
 An unresolved receipt cannot be replaced with a fresh billable request. A known
@@ -295,7 +295,7 @@ pre-enqueue input rejection instead permits a newly confirmed request after the
 meeting is corrected. Refresh/cancel controls reconcile durable server jobs;
 closing the app does not stop an accepted job or erase uncertain provider usage.
 
-Direct summaries now save their validated final stage before publishing the job.
+Summaries save their validated final stage before publishing the job.
 A replacement worker publishes a saved result without another Azure request,
 even if the current deployment configuration changed. Dispatch markers and usage
 reservations commit together. An interrupted dispatch without saved output is
@@ -330,12 +330,38 @@ source locators. Review Markdown/plain-text export does not require changing the
 notes; its native save dialog and final write recheck authorization and the review
 revision. Exported files are **unencrypted**.
 
-Completed results record their exact immutable prompt version. Summary context
-is still bounded to 48,000 bytes. Long-meeting extraction, current-meeting chat
-and token-streamed generation are not implemented yet.
-The lazy, provenance-preserving long-meeting chunker and durable stage store are
-tested groundwork; long-meeting extraction/merge orchestration is not wired into
-generation.
+Completed results record their exact immutable prompt version. Inputs fitting the
+48,000-byte direct-summary limit still use one request, including when full-meeting
+processing is allowed. Larger inputs require the separate inline full-meeting
+checkbox and the authenticated `/v1/summary-capabilities` version
+`staged-evidence-v1`. Legacy requests stay bounded and do not gain consent or new
+default body fields.
+
+Long summaries pin an immutable indexed transcript revision rather than embedding
+the complete transcript in the job. The worker reads authorized pages lazily,
+extracts facts from at most 20,000 bounded 6,144-byte evidence chunks, and merges
+nonempty outputs in groups of four before final generation. Every primary source
+range is processed before final generation; small, explicitly marked overlap
+retains original segment IDs, revisions, UTF-16 text ranges and whole-segment times.
+Each extraction/merge output is limited to 8,192 serialized UTF-8 bytes; merge
+inputs are capped at 36,864 bytes and eight rounds. The same configured Azure
+deployment handles all stages, with no provider/model/region fallback.
+
+Each stage has a durable input hash, prompt identity, closed citation allowlist,
+usage reservation and saved output. Resume reuses completed extraction and merge
+stages without resending them. Empty extraction is valid, but an entirely empty
+meeting extraction fails explicitly; an empty merge, foreign citation or oversized
+output cannot publish a partial summary. Such insufficient-evidence or input-budget
+failures require a new request after source review rather than repeatedly resuming
+the same input. Published usage sums successful stages; account allowances also
+retain known failed calls and previous uncertain dispatches. Large meetings can
+therefore pause when their account allowance cannot reserve another stage.
+
+Original cited segments remain inspectable after a newer canonical transcript
+replaces the selected revision. These structural checks do not prove semantic
+support, complete decision/action recall or language quality; approved
+real-meeting evaluation remains a release gate. Current-meeting chat and
+token-streamed generation are not implemented yet.
 
 ## Server setup
 
@@ -853,6 +879,17 @@ memory, and prints only pass/fail counts and token usage, never credentials or
 provider response bodies. An English synthetic end-to-end run has passed; this
 does not establish Chinese recognition quality or real-meeting accuracy.
 
+The bounded evidence-only mode needs neither PostgreSQL nor Speech. It makes
+exactly two synthetic extraction requests, one merge and one final cited summary
+on the configured Azure OpenAI deployment, stopping on the first failure:
+
+```sh
+pnpm azure:probe --evidence-only --env-file ../ReadWise/.env
+```
+
+It validates supported structured output and original citation scope, not the
+semantic quality or resilience of a real long meeting.
+
 The separate live probe makes paid Speech TTS and streaming STT calls, but needs
 neither PostgreSQL nor OpenAI requests:
 
@@ -867,7 +904,7 @@ versions, requires the expected final subject and normal media receipt, and
 waits for worker cleanup. Audio stays in memory; credentials/provider bodies are
 not printed. An English synthetic live run passed with 3,200 ms of media; it is
 not acceptance evidence for uninterrupted meetings, Chinese, acoustic conditions
-or production reliability. Both probes import only the six approved Azure fields
+or production reliability. These probes import only the six approved Azure fields
 from the specified file and are disabled in production mode. They are deployment
 diagnostics, not account-authorized application requests or invoice accounting.
 

@@ -19,6 +19,7 @@ import { digest, type Database } from '@windows-ai-notes/db';
 import type { RecordingBlobs } from '@windows-ai-notes/storage';
 import { transcribeRecording } from './recording.js';
 import { withUsage } from './usage.js';
+import { summarizeLongMeeting } from './summary.js';
 
 export async function runOnce(
   db: Database,
@@ -62,7 +63,9 @@ export async function runOnce(
     } else {
       let result: JobResult;
       let transcript: Segment[] | undefined;
-      if (job.input.kind === 'summary') {
+      if (job.input.kind === 'summary' && job.input.source) {
+        result = await summarizeLongMeeting(db, job, providers, signal);
+      } else if (job.input.kind === 'summary') {
         const snapshot = job.input.snapshot;
         const cached = await db.summaries.completed(job);
         if (cached) result = cached;

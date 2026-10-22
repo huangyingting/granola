@@ -213,6 +213,28 @@ export class TranscriptStore {
       segments: parsed.data,
     };
   }
+  async citations(
+    user: string,
+    id: string,
+    version: number,
+    ids: string[],
+    tx?: Transaction,
+  ) {
+    if (ids.length > 4096 || new Set(ids).size !== ids.length)
+      throw new Error('Use a bounded unique frozen citation lookup.');
+    await this.database.document(user, id, tx);
+    const rows = await (tx ?? this.database.pool).query<{ segment: unknown }>(
+      `SELECT s.segment FROM transcript_segments s
+       JOIN documents d ON d.id=s.document_id
+       JOIN memberships m ON m.workspace_id=d.workspace_id AND m.user_id=d.owner_id AND m.active
+       JOIN users u ON u.id=d.owner_id AND u.active
+       WHERE s.document_id=$1 AND s.revision=$2 AND s.id=ANY($3::text[])
+       AND d.owner_id=$4 AND d.deleted_at IS NULL ORDER BY s.position`,
+      [id, version, ids, user],
+    );
+    await this.database.document(user, id, tx);
+    return rows.rows.map((row) => segmentSchema.parse(row.segment));
+  }
 
   private paginationRequired() {
     return new ServiceError(
