@@ -2,6 +2,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Writable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -15,6 +16,7 @@ import { ApiClient, ClientError } from './http.js';
 import { AudioHostClient } from './audio.js';
 import { RecordingController } from './recording.js';
 import type { LiveConnection, LiveConnectionOptions } from './live.js';
+import { DesktopDelivery } from './delivery.js';
 
 class Speech implements LiveConnection {
   readonly ready: LiveConnection['ready'];
@@ -142,6 +144,7 @@ describe('consented desktop live coordination with a real framed capture helper'
   const profile = 'synthetic-live-cloud';
   const hosts: AudioHostClient[] = [];
   const controllers: RecordingController[] = [];
+  const deliveries: DesktopDelivery[] = [];
   beforeEach(() => {
     directory = mkdtempSync(join(tmpdir(), 'notes-live-desktop-'));
     key = randomBytes(32);
@@ -152,11 +155,16 @@ describe('consented desktop live coordination with a real framed capture helper'
     for (const controller of controllers.splice(0))
       await controller.stop(() => {});
     for (const host of hosts.splice(0)) await host.close();
+    for (const delivery of deliveries.splice(0)) delivery.close();
     local.close();
     key.fill(0);
     rmSync(directory, { recursive: true, force: true });
   });
-  async function setup(mode = 'capture-live', count = 1) {
+  async function setup(
+    mode = 'capture-live',
+    count = 1,
+    delivery?: DesktopDelivery,
+  ) {
     const draft = local.create(profile);
     const sessions: Speech[] = [];
     const seen: string[] = [];
@@ -208,6 +216,7 @@ describe('consented desktop live coordination with a real framed capture helper'
       create,
       changed,
       async () => {},
+      delivery,
     );
     controllers.push(controller);
     const tracks: Track[] = Array.from({ length: count }, (_, index) => ({
@@ -251,6 +260,79 @@ describe('consented desktop live coordination with a real framed capture helper'
       seen,
     };
   }
+  it.each(['capture-live', 'capture-live-legacy'])(
+    'observes first caption bounds with %s without changing saved capture',
+    async (mode) => {
+      const records: Record<string, unknown>[] = [];
+      const metrics = new DesktopDelivery(
+        new Writable({
+          write(chunk, _encoding, done) {
+            records.push(JSON.parse(String(chunk)));
+            done();
+          },
+        }),
+      );
+      deliveries.push(metrics);
+      const f = await setup(mode, 1, metrics),
+        request = vi.spyOn(hosts.at(-1)!, 'request');
+      await f.start();
+      const speech = await f.spoken();
+      speech.result();
+      const segment = f.state().live!.segments[0]!,
+        marker = segment.presentation!;
+      expect(marker).toMatchObject({
+        kind: 'live_caption',
+        operation_id: speech.ready.provider_epoch,
+      });
+      expect(metrics.present(1, f.draft.id, marker.token)).toBe(true);
+      expect(
+        records.find((value) => value.outcome === 'acknowledged'),
+      ).toMatchObject({
+        capture_clock:
+          mode === 'capture-live'
+            ? 'native_interval'
+            : 'native_clock_unavailable',
+        presentation_ack_after_receive_ms: expect.any(Number),
+        ...(mode === 'capture-live'
+          ? { capture_to_ack_lower_ms: expect.any(Number) }
+          : { capture_to_ack_lower_ms: null }),
+      });
+      const calls = request.mock.calls.map(([value]) => value.command);
+      expect(
+        calls.filter((value) => value === 'read_live_audio_timed'),
+      ).toHaveLength(
+        mode === 'capture-live'
+          ? calls.filter((value) => value.startsWith('read_live_audio')).length
+          : 1,
+      );
+      if (mode === 'capture-live-legacy')
+        expect(calls).toContain('read_live_audio');
+      const text = JSON.stringify(records);
+      expect(text).not.toContain('Ephemeral synthetic speech.');
+      expect(text).not.toContain(f.draft.id);
+      await f.controller.stopLive(profile, f.draft.id, f.id, () => {});
+      expect(f.state().active?.state).toBe('recording');
+      expect(f.state().error).toBeNull();
+    },
+  );
+  it('never retries a different timed-read failure as an ordinary dequeue', async () => {
+    const metrics = new DesktopDelivery(
+      new Writable({
+        write(_chunk, _encoding, done) {
+          done();
+        },
+      }),
+    );
+    deliveries.push(metrics);
+    const f = await setup('capture-live-timed-error', 1, metrics),
+      request = vi.spyOn(hosts.at(-1)!, 'request');
+    await f.start();
+    await vi.waitFor(() => expect(f.state().live?.phase).toBe('attention'));
+    expect(request.mock.calls.map(([value]) => value.command)).not.toContain(
+      'read_live_audio',
+    );
+    expect(f.state().active?.state).toBe('recording');
+  });
   it('validates separate consent, current scope and matching recording without changing healthy capture', async () => {
     const f = await setup();
     const invalid = { ...f.options, confirmed: false };
@@ -494,10 +576,19 @@ describe('consented desktop live coordination with a real framed capture helper'
     expect(f.state().active?.state).toBe('recording');
   });
   it('rotates only known finished attempts with fresh native identities and explicit unverified boundaries', async () => {
-    const f = await setup();
+    const metrics = new DesktopDelivery(
+      new Writable({
+        write(_chunk, _encoding, done) {
+          done();
+        },
+      }),
+    );
+    deliveries.push(metrics);
+    const f = await setup('capture-live', 1, metrics);
     f.start();
     const first = await f.spoken();
     first.result({ event_type: 'transcript.final' });
+    const token = f.state().live!.segments[0]!.presentation!.token;
     const now = performance.now.bind(performance);
     let offset = 60_001;
     vi.spyOn(performance, 'now').mockImplementation(() => now() + offset);
@@ -513,6 +604,12 @@ describe('consented desktop live coordination with a real framed capture helper'
     expect(f.state().live?.boundaries.at(-1)?.reason).toBe('normal_rotation');
     expect(f.state().live?.continuity).toBe('unverified');
     expect(f.state().live?.segments[0]?.attempt).toBe(1);
+    expect(metrics.markers(1, f.draft.id)).toContainEqual(
+      expect.objectContaining({ token }),
+    );
+    f.controller.stopLive(profile, f.draft.id, f.id, () => {});
+    expect(metrics.present(1, f.draft.id, token)).toBe(false);
+    expect(metrics.markers(1, f.draft.id)).toEqual([]);
   });
   it('stops the whole preview after partial multi-source startup failure without closing saved capture or retrying', async () => {
     const f = await setup('capture-live', 2);

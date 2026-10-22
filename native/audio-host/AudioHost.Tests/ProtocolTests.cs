@@ -8,6 +8,19 @@ namespace WindowsAiNotes.AudioTests;
 public sealed class ProtocolTests
 {
     [Fact]
+    public void LegacyLiveResponsesOmitTheClockUntilExplicitlyRequested()
+    {
+        var batch = new LiveAudioBatch(Guid.NewGuid(), Guid.NewGuid(), "active", null,
+            [new LiveTrackCursor(Guid.NewGuid(), null, 0)], []);
+        using var legacy = JsonDocument.Parse(JsonSerializer.Serialize(batch, AudioJson.Options));
+        Assert.False(legacy.RootElement.TryGetProperty("observed_clock_ms", out _));
+        using var timed = JsonDocument.Parse(JsonSerializer.Serialize(batch with { ObservedClockMs = 123.5 }, AudioJson.Options));
+        Assert.Equal(123.5, timed.RootElement.GetProperty("observed_clock_ms").GetDouble());
+        Assert.Equal(batch, JsonSerializer.Deserialize<LiveAudioBatch>(
+            JsonSerializer.Serialize(batch, AudioJson.Options), AudioJson.Options)! with
+        { Tracks = batch.Tracks, Frames = batch.Frames });
+    }
+    [Fact]
     public void SharedRequestVectorsMatchTypeScriptValidation()
     {
         using var document = JsonDocument.Parse(File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "requests.json")));

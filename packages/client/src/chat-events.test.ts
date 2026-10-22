@@ -2,6 +2,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Writable } from 'node:stream';
 import { setTimeout as delay } from 'node:timers/promises';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LocalStore } from '@windows-ai-notes/local';
@@ -15,6 +16,7 @@ import {
 } from '@windows-ai-notes/contracts/questions';
 import { ApiClient, ClientError } from './http.js';
 import { ChatEvents } from './chat-events.js';
+import { DesktopDelivery } from './delivery.js';
 
 vi.mock('node:timers/promises', async (original) => ({
   ...(await original<typeof import('node:timers/promises')>()),
@@ -27,6 +29,7 @@ describe('bounded isolated Main chat subscriptions', () => {
   let id: string, thread: string, turn: string;
   let remote: ReturnType<typeof chatEventStateSchema.parse>;
   let reads: Set<AbortController>;
+  let delivery: DesktopDelivery, records: Record<string, unknown>[];
   const cache = vi.fn(
     (_profile: string, _id: string, value: ChatTurn) => value,
   );
@@ -121,7 +124,17 @@ describe('bounded isolated Main chat subscriptions', () => {
         }),
     );
     reads = new Set();
+    records = [];
+    delivery = new DesktopDelivery(
+      new Writable({
+        write(chunk, _encoding, done) {
+          records.push(JSON.parse(String(chunk)));
+          done();
+        },
+      }),
+    );
     events = new ChatEvents(local, {
+      delivery,
       owner: () => ({
         profile,
         api,
@@ -137,12 +150,37 @@ describe('bounded isolated Main chat subscriptions', () => {
   });
   afterEach(async () => {
     events.stop();
+    delivery.close();
     await Promise.resolve();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
     local.close();
     key.fill(0);
     rmSync(directory, { recursive: true, force: true });
+  });
+  it('offers only validated nonblank preview text and invalidates an unpresented older attempt', async () => {
+    await start();
+    await vi.waitFor(() => expect(api.chatEvents).toHaveBeenCalled());
+    const receive = vi.mocked(api.chatEvents).mock.calls[0]![2];
+    await receive(message(1, ' '));
+    expect(delivery.markers(1, id)).toEqual([]);
+    await receive(message(2, ' Mira owns the checklist.'));
+    const marker = delivery.markers(1, id)[0]!;
+    expect(marker).toMatchObject({ kind: 'chat_preview', operation_id: turn });
+    expect(
+      local.getArtifact(profile, id, artifact(), chatWatchSchema),
+    ).not.toHaveProperty('presentations');
+    await receive(message(3, 'New worker attempt.', 2));
+    expect(delivery.markers(1, id)).toEqual([]);
+    expect(delivery.present(1, id, marker.token)).toBe(false);
+    expect(
+      records.filter((value) => value.code === 'desktop_delivery_received'),
+    ).toHaveLength(1);
+    expect(records.at(-1)).toMatchObject({
+      outcome: 'superseded',
+      presentation_ack_after_receive_ms: null,
+    });
+    expect(JSON.stringify(records)).not.toMatch(/Mira|checklist|New worker/);
   });
   it('bounds repeated premature EOF, backs off, releases the shared read slot and leaves a visible paused state', async () => {
     vi.mocked(api.chatEvents).mockResolvedValue(0);
@@ -259,6 +297,9 @@ describe('bounded isolated Main chat subscriptions', () => {
     ).toBe(8);
     expect(vi.mocked(api.chatEvents).mock.calls[1]?.[1]).toBe(8);
     expect(failed).not.toHaveBeenCalled();
+    expect(
+      records.find((value) => value.code === 'desktop_delivery_received'),
+    ).toMatchObject({ origin: 'snapshot' });
   });
   it('rejects a same-attempt prefix change even when an earlier pause cleared the displayed preview', async () => {
     remote.turn = {

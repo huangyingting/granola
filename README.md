@@ -1016,6 +1016,55 @@ wire headers or URLs. Session metadata neither signals readiness nor advances
 recognition sequencing, audio finalization, acknowledgements or usage receipts.
 Duplicate observations and observations after transport close are ignored.
 
+### Measured desktop delivery
+
+Desktop Main owns a bounded, body-free `desktop_delivery` observer for the first
+validated live caption, summary/chat preview and freshly fetched transcript page.
+`desktop_delivery_received` records `received_after_start_ms`; the start is the
+live-source opening, generation subscription or page fetch, **not** provider
+dispatch or the start of a recording. Preview events and authorized replay/reset
+snapshots are distinguished, and cached local text alone does not produce a new
+receipt. Transcript synchronization is observed only after the validated batch
+has been accepted locally; ordinary cached page reads are not timed as network
+fetches. These measurements are not provider time-to-first-token.
+
+Presentation markers are random, short-lived and never written to encrypted
+content artifacts or server requests. Only the trusted top-level renderer can
+acknowledge a marker, with the current scope and selected document. The renderer
+checks the actual text element's layout, viewport intersection, CSS visibility
+and document visibility, then waits for two animation frames. Collapsed,
+offscreen, superseded and unmounted content must not produce an acknowledgment.
+An `acknowledged` finish records `presentation_ack_after_receive_ms` in Main's
+monotonic clock. This includes the acknowledgment's return IPC; it is a
+presentation **opportunity**, not proof of physical pixels or human perception.
+Missing acknowledgments remain null, including cancellation, expiry and shutdown.
+
+Opt-in `read_live_audio_timed` responses sample the native capture stopwatch after
+draining their frames. Main brackets that read with its own monotonic clock and
+uses the native snapshot/frame age, including interpolation within a frame, to
+bound the recognized sample cursor's capture time without subtracting unrelated
+clock origins. `capture_to_receive_lower_ms` / `upper_ms` and
+`capture_to_ack_lower_ms` / `upper_ms` retain that IPC uncertainty. The latter
+measure through **Main receiving the acknowledgment**, not the exact renderer
+frame time, and neither establishes acoustic/device latency. Only 128 frame
+metadata anchors per source are retained, never PCM. Missing support or unusable
+anchors are explicit classifications with null durations, not invented zeroes.
+Legacy helpers are probed with a new command using existing request fields;
+only its first explicit `invalid_request` negotiates ordinary reads. Other
+errors or timeouts are not retried as another audio dequeue.
+
+At most 32 observations are pending, with at most eight markers exposed for the
+selected document. Unreceived work expires after 15 minutes and offered markers
+after 30 seconds. Attempt changes, scope loss and content replacement invalidate
+old tokens. Records contain only generated observation/job/turn/provider-epoch
+IDs, revision/page offsets, static classifications and timings: no document,
+account, device or source IDs, text, audio, questions, URLs or credentials.
+`desktop_delivery_telemetry_dropped` and
+`desktop_delivery_telemetry_unavailable` report bounded-output loss without
+changing application results. Keep external collectors restricted and retain
+their logs for at most 30 days; best-effort samples are not complete lifetime
+success rates or a durable audit trail.
+
 ### Upload verification telemetry
 
 Each actual, leased server-side upload verification emits one bounded

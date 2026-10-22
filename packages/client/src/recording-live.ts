@@ -15,6 +15,11 @@ import { LocalError } from '@windows-ai-notes/local';
 import { AudioHostError, type AudioHostClient } from './audio.js';
 import { ClientError, type ApiClient } from './http.js';
 import type { LiveConnection } from './live.js';
+import {
+  CaptureDeliveryClock,
+  type DesktopDelivery,
+  type DeliveryHandle,
+} from './delivery.js';
 
 type Native = Pick<AudioHostClient, 'request'>;
 export interface LivePreviewContext {
@@ -27,6 +32,9 @@ interface Source {
   connection?: LiveConnection;
   state: LivePreviewState['sources'][number];
   revisions: Map<string, { version: number; final: boolean }>;
+  clock: CaptureDeliveryClock;
+  delivery: DeliveryHandle | undefined;
+  firstSegment?: string;
 }
 const fault = (code: string, message: string) => new ClientError(code, message);
 
@@ -35,6 +43,7 @@ export class RecordingLivePreview {
   private task: Promise<void> | undefined;
   private preview: LiveAudioBatch | undefined;
   private sources = new Map<string, Source>();
+  private timed: boolean | undefined;
   private state: LivePreviewState;
   constructor(
     private readonly native: Native,
@@ -43,6 +52,7 @@ export class RecordingLivePreview {
     private readonly changed: () => void,
     locale: LivePreviewState['locale'],
     previous?: LivePreviewState,
+    private readonly delivery?: { metrics: DesktopDelivery; scope: number },
   ) {
     if (previous && previous.attempt >= 100_000)
       throw fault(
@@ -87,7 +97,15 @@ export class RecordingLivePreview {
       });
     this.changed();
   }
+  private cancelDelivery() {
+    for (const source of this.sources.values())
+      this.delivery?.metrics.cancel(source.delivery);
+    for (const segment of this.state.segments)
+      if (segment.presentation)
+        this.delivery?.metrics.cancel({ id: segment.presentation.token });
+  }
   cancel(clear = false) {
+    this.cancelDelivery();
     const cleared =
       clear &&
       (this.state.segments.length > 0 ||
@@ -119,6 +137,7 @@ export class RecordingLivePreview {
   }
   private fail(error: unknown) {
     if (this.abort.signal.aborted) return;
+    this.cancelDelivery();
     if (
       error instanceof ClientError ||
       error instanceof AudioHostError ||
@@ -209,9 +228,10 @@ export class RecordingLivePreview {
     )
       return undefined;
     this.authorize();
-    if (message.event_type === 'live.ready')
+    if (message.event_type === 'live.ready') {
       source.state.provider_epoch = message.provider_epoch;
-    else if (message.event_type === 'live.accepted') {
+      this.delivery?.metrics.identify(source.delivery, message.provider_epoch);
+    } else if (message.event_type === 'live.accepted') {
       source.state.accepted_samples = message.accepted_samples;
       if (message.gap)
         this.gap(
@@ -251,16 +271,37 @@ export class RecordingLivePreview {
           entry.event.segment_id === message.segment_id,
       );
       if (existing >= 0) this.state.segments.splice(existing, 1);
-      if (message.event_type !== 'transcript.discarded')
+      if (
+        message.event_type === 'transcript.discarded' &&
+        source.firstSegment === message.segment_id
+      )
+        this.delivery?.metrics.cancel(source.delivery, 'superseded');
+      if (message.event_type !== 'transcript.discarded') {
+        source.firstSegment ??= message.segment_id;
+        const presentation =
+          source.firstSegment === message.segment_id
+            ? this.delivery?.metrics.offer(
+                source.delivery,
+                'native',
+                source.clock.at(message.sample_end),
+              )
+            : undefined;
         this.state.segments.push({
           attempt: this.state.attempt,
           event: message,
+          ...(presentation ? { presentation } : {}),
         });
+      }
       while (
         this.state.segments.length > 12 ||
         Buffer.byteLength(JSON.stringify(this.state.segments)) > 16_384
       ) {
-        this.state.segments.shift();
+        const removed = this.state.segments.shift();
+        if (removed?.presentation)
+          this.delivery?.metrics.cancel(
+            { id: removed.presentation.token },
+            'superseded',
+          );
         this.state.omitted = true;
       }
     }
@@ -314,6 +355,13 @@ export class RecordingLivePreview {
             skipped_samples: 0,
           },
           revisions: new Map(),
+          clock: new CaptureDeliveryClock(),
+          delivery: this.delivery?.metrics.begin({
+            kind: 'live_caption',
+            scope: this.delivery.scope,
+            document: this.recording.document_id,
+            operation_id: null,
+          }),
         };
         return [track.spec.track_id, source];
       }),
@@ -352,11 +400,35 @@ export class RecordingLivePreview {
   private async read() {
     this.authorize();
     const preview = this.preview!;
-    const event = await this.native.request({
-      command: 'read_live_audio',
-      recording_id: this.recording.id,
-      preview_id: preview.preview_id,
-    });
+    let sent = performance.now();
+    let event;
+    try {
+      event = await this.native.request({
+        command:
+          this.delivery && this.timed !== false
+            ? 'read_live_audio_timed'
+            : 'read_live_audio',
+        recording_id: this.recording.id,
+        preview_id: preview.preview_id,
+      });
+      if (this.delivery && this.timed === undefined) this.timed = true;
+    } catch (error) {
+      if (
+        !this.delivery ||
+        this.timed !== undefined ||
+        !(error instanceof AudioHostError) ||
+        error.code !== 'invalid_request'
+      )
+        throw error;
+      this.timed = false;
+      sent = performance.now();
+      event = await this.native.request({
+        command: 'read_live_audio',
+        recording_id: this.recording.id,
+        preview_id: preview.preview_id,
+      });
+    }
+    const received = performance.now();
     this.authorize();
     if (
       event.event_type !== 'recording.live_audio' ||
@@ -417,6 +489,7 @@ export class RecordingLivePreview {
         );
         this.changed();
       } else {
+        source.clock.add(frames, batch.observed_clock_ms, sent, received);
         writes.push(source.connection.write(frames));
       }
     }

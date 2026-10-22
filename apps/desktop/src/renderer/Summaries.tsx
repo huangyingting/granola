@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type MutableRefObject } from 'react';
+import { Presented } from './Presentation.js';
 import type {
   DesktopCommand,
   DesktopState,
@@ -564,7 +565,19 @@ export function SummaryPanel(props: Props) {
                   className="summary-preview"
                 >
                   <strong>Unverified draft</strong>
-                  <p>{generation.preview}</p>
+                  <p>
+                    <Presented
+                      scope={state.scope}
+                      id={draft.id}
+                      marker={state.presentations?.find(
+                        (value) =>
+                          value.kind === 'summary_preview' &&
+                          value.operation_id === generation.job_id,
+                      )}
+                    >
+                      {generation.preview}
+                    </Presented>
+                  </p>
                   <p className="quiet-note">
                     Sources have not been validated. This preview cannot be
                     reviewed, appended or exported.

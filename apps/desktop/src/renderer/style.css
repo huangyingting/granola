@@ -1025,7 +1025,7 @@ h1 {
   line-height: 1.8;
   white-space: pre-wrap;
 }
-.transcript-segment > span {
+.transcript-segment > span:first-child {
   flex-shrink: 0;
   max-width: 34%;
   white-space: normal;

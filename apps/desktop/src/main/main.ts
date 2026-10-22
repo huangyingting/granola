@@ -21,6 +21,7 @@ import { LocalError, LocalStore } from '@windows-ai-notes/local';
 import { ClientError } from '@windows-ai-notes/client/http';
 import { WorkspaceController } from '@windows-ai-notes/client/workspace';
 import { RecordingController } from '@windows-ai-notes/client/recording';
+import { DesktopDelivery } from '@windows-ai-notes/client/delivery';
 import {
   AudioHostClient,
   AudioHostError,
@@ -48,6 +49,7 @@ let allowClose = false;
 let closingAudio = false;
 let dataDirectory = '';
 let recordings: RecordingController | null = null;
+let delivery: DesktopDelivery | null = null;
 
 function createAudioHost(observe: (event: AudioEvent) => void) {
   if (process.platform !== 'win32')
@@ -194,6 +196,7 @@ async function start() {
     const key = localKey(dataDirectory);
     try {
       store = new LocalStore(join(dataDirectory, 'notes.sqlite'), key);
+      delivery = new DesktopDelivery();
       controller = new WorkspaceController(
         store,
         (url) => shell.openExternal(url),
@@ -203,6 +206,7 @@ async function start() {
             window.webContents.send('notes:changed', change);
         },
         {
+          delivery,
           allowLoopback:
             !app.isPackaged &&
             ['test', 'development'].includes(process.env.NODE_ENV ?? '') &&
@@ -222,6 +226,7 @@ async function start() {
             retryDelay: 100,
           });
         },
+        delivery,
       );
     } finally {
       key.fill(0);
@@ -229,6 +234,7 @@ async function start() {
   } catch (error) {
     failure = safeError(error);
     controller?.dispose();
+    delivery?.close();
     controller = null;
     store?.close();
     store = null;
@@ -285,6 +291,17 @@ async function start() {
             'The desktop request is invalid.',
           );
         const command = parsed.data;
+        if (command.operation === 'observePresentation') {
+          workspace().assertScope(command.scope);
+          const current = workspace().snapshot();
+          return {
+            ok: true,
+            observed:
+              current.selected_id === command.id &&
+              (delivery?.present(command.scope, command.id, command.token) ??
+                false),
+          };
+        }
         if (command.operation === 'closeReady') {
           if (!closeNonce || command.nonce !== closeNonce)
             throw new LocalError(
@@ -381,7 +398,18 @@ async function start() {
           );
           return desktopResponseSchema.parse({
             ok: true,
-            transcript_page: { scope: command.scope, page },
+            transcript_page: {
+              scope: command.scope,
+              page,
+              presentation: delivery
+                ?.markers(command.scope, command.id)
+                .find(
+                  (value) =>
+                    value.kind === 'transcript_page' &&
+                    value.revision === page.revision &&
+                    value.offset === page.offset,
+                ),
+            },
           });
         }
         if (command.operation === 'getTranscriptTimeline') {
@@ -731,6 +759,7 @@ async function start() {
   });
   current.on('closed', () => {
     controller?.dispose();
+    delivery?.close();
     controller = null;
     store?.close();
     store = null;

@@ -12,6 +12,7 @@ import {
   type ChatWatch,
 } from '@windows-ai-notes/contracts/questions';
 import { ApiClient, ClientError } from './http.js';
+import type { DesktopDelivery, DeliveryHandle } from './delivery.js';
 
 type Owner = { profile: string; api: ApiClient; authorize: () => void };
 type Subscription = Owner & {
@@ -23,8 +24,10 @@ type Subscription = Owner & {
   target: number;
   anchor: { seq: number; attempt: number; text: string } | null;
   validated: boolean;
+  delivery: DeliveryHandle | undefined;
 };
 type Hooks = {
+  delivery?: DesktopDelivery;
   owner: (scope: number, id: string, thread: string) => Owner;
   reads: Set<AbortController>;
   changed: () => void;
@@ -71,6 +74,7 @@ export class ChatEvents {
   stop(turn?: string) {
     if (turn && this.current?.state.turn_id !== turn) return;
     if (this.current) {
+      this.hooks.delivery?.cancel(this.current.delivery);
       this.current.abort.abort();
       this.hooks.reads.delete(this.current.abort);
     }
@@ -102,6 +106,7 @@ export class ChatEvents {
       current.terminal = true;
       current.target = Math.max(current.target, turn.last_event_id);
       current.state.preview = '';
+      this.hooks.delivery?.cancel(current.delivery, 'superseded');
     }
   }
   private authorize(current: Subscription) {
@@ -184,6 +189,12 @@ export class ChatEvents {
       target: 0,
       anchor: null,
       validated: false,
+      delivery: this.hooks.delivery?.begin({
+        scope,
+        document: id,
+        kind: 'chat_preview',
+        operation_id: turn,
+      }),
     };
     this.current = current;
     this.hooks.reads.add(current.abort);
@@ -228,6 +239,7 @@ export class ChatEvents {
   private received(current: Subscription, event: ChatEvent) {
     this.authorize(current);
     const state = current.state;
+    let previewReceived = false;
     if (event.event_type === 'turn.progress') {
       const progress = progressSchema.safeParse(event.payload);
       if (!progress.success) throw invalid();
@@ -235,6 +247,10 @@ export class ChatEvents {
       if (!current.terminal && attempt >= current.floor) {
         if (attempt < state.attempt) throw invalid();
         if (attempt > state.attempt) {
+          if (this.hooks.delivery?.marker(current.delivery)) {
+            this.hooks.delivery.cancel(current.delivery, 'superseded');
+            current.delivery = undefined;
+          }
           state.attempt = attempt;
           state.preview = '';
         }
@@ -249,6 +265,7 @@ export class ChatEvents {
             throw invalid();
           if (!progress.data.text.startsWith(state.preview)) throw invalid();
           state.preview = progress.data.text;
+          previewReceived = Boolean(state.preview.trim());
         }
       }
     }
@@ -261,6 +278,13 @@ export class ChatEvents {
     state.last_event_id = event.seq;
     state.status = 'streaming';
     state.error = null;
+    if (previewReceived) this.hooks.delivery?.offer(current.delivery, 'event');
+    else if (
+      ['answer.completed', 'turn.failed', 'turn.cancelled'].includes(
+        event.event_type,
+      )
+    )
+      this.hooks.delivery?.cancel(current.delivery, 'superseded');
     this.save(current);
   }
   private async reconcile(current: Subscription, reset = false) {
@@ -301,12 +325,19 @@ export class ChatEvents {
       current.terminal ||
       state.attempt !== snapshot.preview_attempt ||
       !snapshot.preview?.text.startsWith(state.preview)
-    )
+    ) {
+      if (this.hooks.delivery?.marker(current.delivery)) {
+        this.hooks.delivery.cancel(current.delivery, 'superseded');
+        current.delivery = undefined;
+      }
       state.preview = '';
+    }
     state.attempt = snapshot.preview_attempt;
     if (reset) {
       state.last_event_id = snapshot.turn.last_event_id;
       state.preview = current.terminal ? '' : (snapshot.preview?.text ?? '');
+      if (state.preview.trim())
+        this.hooks.delivery?.offer(current.delivery, 'snapshot');
       this.save(current);
     }
     if (current.terminal && state.last_event_id >= current.target) {
@@ -404,6 +435,8 @@ export class ChatEvents {
           this.authorize(current);
           if (!(failure instanceof ClientError))
             console.error(JSON.stringify({ code: 'chat_updates_paused' }));
+          this.hooks.delivery?.cancel(current.delivery);
+          current.delivery = undefined;
           current.state.preview = '';
           current.state.status = 'paused';
           current.state.error =

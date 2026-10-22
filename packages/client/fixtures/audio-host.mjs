@@ -337,7 +337,23 @@ process.stdin.on('data', (bytes) => {
       };
       send(request, 'recording.live_started', livePreview);
     } else if (
-      ['read_live_audio', 'stop_live_preview'].includes(request.command) &&
+      request.command === 'read_live_audio_timed' &&
+      ['capture-live-legacy', 'capture-live-timed-error'].includes(mode)
+    ) {
+      send(request, 'error', {
+        code:
+          mode === 'capture-live-legacy'
+            ? 'invalid_request'
+            : 'live_unavailable',
+        message: 'Synthetic timing negotiation failure.',
+        retryable: false,
+      });
+    } else if (
+      [
+        'read_live_audio',
+        'read_live_audio_timed',
+        'stop_live_preview',
+      ].includes(request.command) &&
       livePreview
     ) {
       if (request.preview_id !== livePreview.preview_id) {
@@ -398,10 +414,21 @@ process.stdin.on('data', (bytes) => {
       }
       send(
         request,
-        request.command === 'read_live_audio'
+        request.command !== 'stop_live_preview'
           ? 'recording.live_audio'
           : 'recording.live_stopped',
-        { ...livePreview, preview_id: preview, frames },
+        {
+          ...livePreview,
+          preview_id: preview,
+          frames,
+          ...(request.command === 'read_live_audio_timed'
+            ? {
+                observed_clock_ms:
+                  Math.max(0, ...frames.map((frame) => frame.clock_end_ms)) +
+                  25,
+              }
+            : {}),
+        },
       );
     } else if (
       capture &&

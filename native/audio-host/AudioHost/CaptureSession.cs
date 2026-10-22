@@ -75,13 +75,15 @@ internal sealed class CaptureSession
         return preview.Snapshot();
     }
 
-    public LiveAudioBatch ReadLive(Guid previewId, bool stop = false)
+    public LiveAudioBatch ReadLive(Guid previewId, bool stop = false, bool timed = false)
     {
         var preview = Volatile.Read(ref live);
         if (preview is null || preview.PreviewId != previewId)
             throw new AudioException("live_preview_not_found", "This process does not have the requested live preview.");
         if (stop) preview.Stop();
-        return preview.Read(clock.Elapsed.TotalMilliseconds);
+        var batch = preview.Read(clock.Elapsed.TotalMilliseconds);
+        var observed = clock.Elapsed.TotalMilliseconds;
+        return timed && observed <= 14_400_000 ? batch with { ObservedClockMs = observed } : batch;
     }
 
     public async Task PauseAsync()

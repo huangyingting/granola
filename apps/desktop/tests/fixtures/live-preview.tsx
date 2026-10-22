@@ -12,15 +12,27 @@ function Fixture() {
     window.addEventListener('hashchange', change);
     return () => window.removeEventListener('hashchange', change);
   }, []);
-  return (
-    <main>
-      <RecordingBar scope={7} />
+  const panel =
+    selected === 'unmount' ? null : (
       <RecordingPanel
         scope={7}
         document={selected}
         beforeStart={async () => true}
         jobs={[]}
       />
+    );
+  return (
+    <main>
+      <RecordingBar scope={7} />
+      {new URLSearchParams(window.location.search).get('presentations') ===
+      '1' ? (
+        <details>
+          <summary>Caption visibility fixture</summary>
+          {panel}
+        </details>
+      ) : (
+        panel
+      )}
     </main>
   );
 }

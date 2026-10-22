@@ -26,6 +26,7 @@ import { ApiClient, ClientError, serverUrl } from './http.js';
 import { SyncEngine, workspaceProfile } from './sync.js';
 import { DesktopSummaries, summaryIntentSchema } from './summaries.js';
 import { DesktopChat } from './chat.js';
+import type { DesktopDelivery } from './delivery.js';
 
 const workspaceSchema = z.strictObject({
   id: resourceId,
@@ -80,7 +81,10 @@ export class WorkspaceController {
     private readonly local: LocalStore,
     private readonly openBrowser: (url: string) => Promise<void>,
     private readonly changed: (change: DesktopChange) => void,
-    private readonly options: { allowLoopback?: boolean } = {},
+    private readonly options: {
+      allowLoopback?: boolean;
+      delivery?: DesktopDelivery;
+    } = {},
   ) {
     this.account = local.getValue('root', 'account', accountSchema);
     this.service = local.getValue('root', 'service', z.string());
@@ -100,6 +104,7 @@ export class WorkspaceController {
     }
     this.local.purgeCredentials(this.session?.profile ?? null);
     const artifactHooks = {
+      ...(options.delivery ? { delivery: options.delivery } : {}),
       owner: (scope) => {
         this.assertScope(scope);
         const profile = this.profile;
@@ -180,6 +185,8 @@ export class WorkspaceController {
       );
   }
   private emit(kind: DesktopChange['kind']) {
+    if (this.critical || kind === 'scope' || kind === 'revoked')
+      this.options.delivery?.cancelAll();
     if (this.critical || kind === 'scope' || kind === 'revoked')
       this.summaries?.events.stop();
     if (this.critical || kind === 'scope' || kind === 'revoked')
@@ -305,6 +312,14 @@ export class WorkspaceController {
       : null;
     return {
       version: this.revision,
+      ...(this.options.delivery
+        ? {
+            presentations: this.options.delivery.markers(
+              this.scopeRevision,
+              selected?.id ?? null,
+            ),
+          }
+        : {}),
       scope: this.scopeRevision,
       ...page,
       selected,
@@ -373,6 +388,7 @@ export class WorkspaceController {
     this.schedule(0);
   }
   dispose() {
+    this.options.delivery?.cancelAll();
     this.disposed = true;
     this.started = false;
     this.generation++;
@@ -490,6 +506,14 @@ export class WorkspaceController {
       );
     const controller = new AbortController();
     this.transcriptReads.add(controller);
+    const delivery = this.options.delivery?.begin({
+      scope,
+      document: id,
+      kind: 'transcript_page',
+      operation_id: null,
+      revision,
+      offset,
+    });
     try {
       const page = await api.transcriptPage(
         id,
@@ -517,8 +541,10 @@ export class WorkspaceController {
           : `transcript-page:${revision}:${offset}`,
         page,
       );
+      this.options.delivery?.offer(delivery, 'network');
       return page;
     } catch (error) {
+      this.options.delivery?.cancel(delivery);
       if (
         api === this.api &&
         profile === this.profile &&
@@ -537,11 +563,35 @@ export class WorkspaceController {
   private replaceEngine() {
     this.stopEngine();
     if (this.account?.active_workspace && this.api) {
+      const profile = this.profile,
+        scope = this.scopeRevision;
       this.engine = new SyncEngine(
         this.local,
         this.api,
         this.account.user_id,
         this.account.active_workspace,
+        this.options.delivery
+          ? (page, started) => {
+              if (
+                this.disposed ||
+                this.profile !== profile ||
+                this.scopeRevision !== scope
+              )
+                return;
+              const delivery = this.options.delivery?.begin(
+                {
+                  scope,
+                  document: page.document_id,
+                  kind: 'transcript_page',
+                  operation_id: null,
+                  revision: page.revision,
+                  offset: page.offset,
+                },
+                started,
+              );
+              this.options.delivery?.offer(delivery, 'synchronization');
+            }
+          : undefined,
       );
     }
   }

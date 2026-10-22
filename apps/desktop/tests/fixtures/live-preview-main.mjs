@@ -70,6 +70,13 @@ async function start() {
       });
     }
     if (
+      command.operation === 'observePresentation' &&
+      command.id === audio.active?.document_id
+    ) {
+      commands.push(command);
+      return desktopResponseSchema.parse({ ok: true, observed: true });
+    }
+    if (
       !('id' in command) ||
       command.id !== audio.active?.document_id ||
       !('recording_id' in command) ||
@@ -104,7 +111,10 @@ async function start() {
   });
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   await window.loadFile(join(directory, 'index.html'), {
-    query: { document: audio.active.document_id },
+    query: {
+      document: audio.active.document_id,
+      presentations: fixture.presentations ? '1' : '0',
+    },
   });
   app.on('window-all-closed', () => app.quit());
 }

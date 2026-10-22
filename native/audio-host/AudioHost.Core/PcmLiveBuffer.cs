@@ -7,7 +7,9 @@ public sealed record LivePcmFrame(int FormatVersion, Guid RecordingId, Guid Prev
     double ClockStartMs, double ClockEndMs, string DataBase64);
 public sealed record LiveTrackCursor(Guid TrackId, long? SampleEnd, int BufferedSamples);
 public sealed record LiveAudioBatch(Guid PreviewId, Guid CaptureEpoch, string State, string? Code,
-    LiveTrackCursor[] Tracks, LivePcmFrame[] Frames);
+    LiveTrackCursor[] Tracks, LivePcmFrame[] Frames,
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    double? ObservedClockMs = null);
 
 public sealed class PcmLiveBuffer : IDisposable
 {

@@ -1,4 +1,6 @@
 import { useEffect, useState } from 'react';
+import { usePresentation } from './Presentation.js';
+import type { Presentation } from '@windows-ai-notes/contracts/presentation';
 import type { z } from 'zod';
 import { richTextToPlainText } from '@windows-ai-notes/contracts/content';
 import {
@@ -149,6 +151,14 @@ function Transcript({
     );
   }
   const [page, setPage] = useState(initial);
+  const [presentation, setPresentation] = useState<Presentation | undefined>();
+  const marker = [presentation, ...(state.presentations ?? [])].find(
+    (value) =>
+      value?.kind === 'transcript_page' &&
+      value.revision === page?.revision &&
+      value.offset === page?.offset,
+  );
+  const presented = usePresentation<HTMLSpanElement>(state.scope, id, marker);
   const [previous, setPrevious] = useState<number[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -186,6 +196,7 @@ function Transcript({
             : [],
       );
       setPage(response.transcript_page.page);
+      setPresentation(response.transcript_page.presentation);
     } catch (failure) {
       setError(
         failure instanceof Error
@@ -251,11 +262,13 @@ function Transcript({
             </p>
           )}
           <p className="quiet-note" role="status">
-            {page.total_segments === 0
-              ? 'This transcript revision has no segments.'
-              : `Segments ${page.offset + 1}-${page.offset + page.segments.length} of ${page.total_segments}`}
+            <span ref={page.segments.length === 0 ? presented : undefined}>
+              {page.total_segments === 0
+                ? 'This transcript revision has no segments.'
+                : `Segments ${page.offset + 1}-${page.offset + page.segments.length} of ${page.total_segments}`}
+            </span>
           </p>
-          {page.segments.map((segment) => (
+          {page.segments.map((segment, index) => (
             <p className="transcript-segment" key={segment.id}>
               <span>
                 {time(segment.start_ms)}
@@ -264,7 +277,9 @@ function Transcript({
                 {segment.origin?.time_basis === 'unmapped_clock' &&
                   ' / unmapped capture clock'}
               </span>
-              {segment.text}
+              <span ref={index === 0 ? presented : undefined}>
+                {segment.text}
+              </span>
             </p>
           ))}
           <div className="inline-actions">

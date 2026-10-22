@@ -31,6 +31,7 @@ const expectedEvents: Record<
   read_chunk: 'recording.chunk_range',
   start_live_preview: 'recording.live_started',
   read_live_audio: 'recording.live_audio',
+  read_live_audio_timed: 'recording.live_audio',
   stop_live_preview: 'recording.live_stopped',
 };
 

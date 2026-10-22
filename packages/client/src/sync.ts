@@ -1,6 +1,10 @@
 import { createHash } from 'node:crypto';
 import { canonicalJson } from '@windows-ai-notes/contracts/content';
-import { documentSchema, resourceId } from '@windows-ai-notes/contracts/server';
+import {
+  documentSchema,
+  resourceId,
+  type TranscriptPage,
+} from '@windows-ai-notes/contracts/server';
 import { LocalStore, type RemoteUpdate } from '@windows-ai-notes/local';
 import { z } from 'zod';
 import { ApiClient, ClientError, serverUrl } from './http.js';
@@ -30,6 +34,10 @@ export class SyncEngine {
     private readonly api: ApiClient,
     private readonly user: string,
     private readonly workspace: string,
+    private readonly transcriptReceived?: (
+      page: TranscriptPage,
+      started: number,
+    ) => void,
   ) {
     this.profile = workspaceProfile(
       api.base,
@@ -94,9 +102,12 @@ export class SyncEngine {
   }
   private async artifacts(
     document: z.infer<typeof documentSchema>,
+    deliveries: { page: TranscriptPage; started: number }[],
   ): Promise<RemoteUpdate['artifacts']> {
     const artifacts: RemoteUpdate['artifacts'] = [];
+    let delivery: { page: TranscriptPage; started: number } | undefined;
     if (document.transcript_revision > 0) {
+      const started = performance.now();
       const transcript = await this.api.transcriptPage(
         document.id,
         document.transcript_revision,
@@ -115,6 +126,7 @@ export class SyncEngine {
         id: `transcript:${transcript.revision}`,
         value: transcript,
       });
+      if (this.transcriptReceived) delivery = { page: transcript, started };
     }
     const history = await this.api.jobs(document.id, this.controller.signal);
     for (const job of history.jobs) {
@@ -126,6 +138,7 @@ export class SyncEngine {
       artifacts.push({ id: `job:${job.id}`, value: job });
     }
     artifacts.push({ id: 'job-history', value: history });
+    if (delivery) deliveries.push(delivery);
     return artifacts;
   }
   private async run(): Promise<{ more: boolean }> {
@@ -182,6 +195,7 @@ export class SyncEngine {
         if (!checkpoint.cursor && !checkpoint.bootstrap)
           checkpoint = this.local.beginSnapshot(this.profile);
         try {
+          const deliveries: { page: TranscriptPage; started: number }[] = [];
           if (checkpoint.bootstrap) {
             const page = await this.api.snapshot(
               this.workspace,
@@ -195,7 +209,7 @@ export class SyncEngine {
             }[] = [];
             for (const document of page.documents) {
               this.checkDocument(document);
-              const values = await this.artifacts(document);
+              const values = await this.artifacts(document, deliveries);
               for (const value of values)
                 artifacts.push({ document_id: document.id, ...value });
             }
@@ -206,6 +220,8 @@ export class SyncEngine {
               page,
               artifacts,
             );
+            for (const delivery of deliveries)
+              this.transcriptReceived?.(delivery.page, delivery.started);
             continue;
           }
           const cursor = checkpoint.cursor!;
@@ -235,7 +251,7 @@ export class SyncEngine {
               updates.push({
                 id,
                 document,
-                artifacts: await this.artifacts(document),
+                artifacts: await this.artifacts(document, deliveries),
               });
             } catch (error) {
               if (
@@ -248,6 +264,8 @@ export class SyncEngine {
           }
           this.active();
           this.local.acceptChanges(this.profile, cursor, page.cursor, updates);
+          for (const delivery of deliveries)
+            this.transcriptReceived?.(delivery.page, delivery.started);
           if (!page.has_more)
             return {
               more:

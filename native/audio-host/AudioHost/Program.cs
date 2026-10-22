@@ -147,10 +147,10 @@ try
                     {
                         await Emit("recording.live_started", session.StartLive(request.MaxBufferedMs ?? 5000), request.RequestId, request.RecordingId);
                     }
-                    else if (request.Command is "read_live_audio" or "stop_live_preview")
+                    else if (request.Command is "read_live_audio" or "read_live_audio_timed" or "stop_live_preview")
                     {
-                        await Emit(request.Command == "read_live_audio" ? "recording.live_audio" : "recording.live_stopped",
-                            session.ReadLive(request.PreviewId!.Value, request.Command == "stop_live_preview"),
+                        await Emit(request.Command != "stop_live_preview" ? "recording.live_audio" : "recording.live_stopped",
+                            session.ReadLive(request.PreviewId!.Value, request.Command == "stop_live_preview", request.Command == "read_live_audio_timed"),
                             request.RequestId, request.RecordingId);
                     }
                     else if (request.Command == "pause_recording" && state == "recording")

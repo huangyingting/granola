@@ -122,7 +122,9 @@ export const audioRequestSchema = z.discriminatedUnion('command', [
       .multipleOf(50)
       .optional(),
   }),
-  ...(['read_live_audio', 'stop_live_preview'] as const).map((command) =>
+  ...(
+    ['read_live_audio', 'read_live_audio_timed', 'stop_live_preview'] as const
+  ).map((command) =>
     z.strictObject({
       ...baseRequest,
       command: z.literal(command),
@@ -346,6 +348,7 @@ export const liveAudioBatchSchema = z
       .min(1)
       .max(2),
     frames: z.array(livePcmFrameSchema).max(MAX_LIVE_FRAMES_PER_READ),
+    observed_clock_ms: z.number().min(0).max(14_400_000).optional(),
   })
   .refine((batch) => {
     if (

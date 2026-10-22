@@ -183,6 +183,7 @@ export const livePreviewSchema = z.strictObject({
       z.strictObject({
         attempt: z.number().int().min(1).max(100_000),
         event: liveRecognitionEventSchema,
+        presentation: presentationSchema.optional(),
       }),
     )
     .max(12),
@@ -259,3 +260,4 @@ export const audioStateSchema = z.strictObject({
   live: livePreviewSchema.nullable().default(null),
 });
 export type AudioState = z.infer<typeof audioStateSchema>;
+import { presentationSchema } from './presentation.js';

@@ -29,6 +29,7 @@ import {
 import { ApiClient, ClientError } from './http.js';
 import { summaryProgressSchema } from '@windows-ai-notes/contracts/evidence';
 import { SummaryEvents } from './generation.js';
+import type { DesktopDelivery } from './delivery.js';
 
 export const summaryIntentSchema = z.strictObject({
   body: summaryRequestSchema,
@@ -43,6 +44,7 @@ type Owner = {
   remote: { api: ApiClient; authorize: () => void } | null;
 };
 type Hooks = {
+  delivery?: DesktopDelivery;
   owner: (scope: number) => Owner;
   synchronize: () => Promise<void>;
   changed: () => void;

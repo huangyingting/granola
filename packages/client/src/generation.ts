@@ -12,6 +12,7 @@ import {
   type SummaryWatch,
 } from '@windows-ai-notes/contracts/generation';
 import { ApiClient, ClientError } from './http.js';
+import type { DesktopDelivery, DeliveryHandle } from './delivery.js';
 
 type Owner = { profile: string; api: ApiClient; authorize: () => void };
 type Subscription = Owner & {
@@ -21,8 +22,10 @@ type Subscription = Owner & {
   abort: AbortController;
   state: SummaryWatch;
   validated: boolean;
+  delivery: DeliveryHandle | undefined;
 };
 type Hooks = {
+  delivery?: DesktopDelivery;
   owner: (scope: number) => Owner;
   changed: () => void;
   reads: Set<AbortController>;
@@ -59,6 +62,7 @@ export class SummaryEvents {
   }
   stop(job?: string) {
     if (job && this.current?.job !== job) return;
+    this.hooks.delivery?.cancel(this.current?.delivery);
     this.current?.abort.abort();
     this.current = null;
   }
@@ -127,6 +131,12 @@ export class SummaryEvents {
       abort: new AbortController(),
       state,
       validated: false,
+      delivery: this.hooks.delivery?.begin({
+        scope,
+        document: id,
+        kind: 'summary_preview',
+        operation_id: job,
+      }),
     };
     this.current = current;
     this.hooks.reads.add(current.abort);
@@ -166,6 +176,7 @@ export class SummaryEvents {
   ) {
     this.authorize(current);
     const state = current.state;
+    let previewReceived = false;
     if (event.event_type === 'job.progress') {
       const stage = z.object({ stage: z.string() }).safeParse(event.payload);
       if (stage.success && stage.data.stage === 'summary_preview') {
@@ -173,11 +184,16 @@ export class SummaryEvents {
         if (!preview.success || preview.data.attempt < state.attempt)
           throw invalid();
         if (preview.data.attempt > state.attempt) {
+          if (this.hooks.delivery?.marker(current.delivery)) {
+            this.hooks.delivery.cancel(current.delivery, 'superseded');
+            current.delivery = undefined;
+          }
           state.attempt = preview.data.attempt;
           state.preview = '';
         }
         if (!preview.data.text.startsWith(state.preview)) throw invalid();
         state.preview = preview.data.text;
+        previewReceived = Boolean(state.preview.trim());
         state.phase = 'generate';
       } else if (stage.success) {
         const phase = /^summary_(extract|merge|generate)$/u.exec(
@@ -200,6 +216,13 @@ export class SummaryEvents {
     state.last_event_id = event.seq;
     state.status = 'streaming';
     state.error = null;
+    if (previewReceived) this.hooks.delivery?.offer(current.delivery, 'event');
+    else if (
+      ['output.completed', 'job.failed', 'job.cancelled'].includes(
+        event.event_type,
+      )
+    )
+      this.hooks.delivery?.cancel(current.delivery, 'superseded');
     this.save(current);
   }
   private async reconcile(current: Subscription, reset = false) {
@@ -211,6 +234,10 @@ export class SummaryEvents {
     this.authorize(current);
     this.acceptJob(current, snapshot.job);
     if (reset) {
+      if (this.hooks.delivery?.marker(current.delivery)) {
+        this.hooks.delivery.cancel(current.delivery, 'superseded');
+        current.delivery = undefined;
+      }
       current.state.last_event_id = snapshot.last_event_id;
       current.state.completed_stages = snapshot.completed_stages;
       current.state.preview = '';
@@ -297,6 +324,8 @@ export class SummaryEvents {
             await this.hooks.synchronize();
           this.hooks.revoked(error, current.profile, current.api);
           this.authorize(current);
+          this.hooks.delivery?.cancel(current.delivery);
+          current.delivery = undefined;
           current.state.preview = '';
           current.state.status = 'paused';
           current.state.error =

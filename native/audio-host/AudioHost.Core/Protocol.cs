@@ -21,7 +21,7 @@ public sealed record AudioRequest(int ProtocolVersion, Guid RequestId, string Co
             throw new AudioException("invalid_request", "Storage checks require an explicit device quota.");
         if (Command == "recover_recording" ? AcceptIncomplete != true : AcceptIncomplete is not null)
             throw new AudioException("invalid_request", "Only recovery accepts, and requires, explicit acceptance of a possibly missing audio tail.");
-        if (Command is "read_live_audio" or "stop_live_preview" ? PreviewId is null || PreviewId == Guid.Empty : PreviewId is not null)
+        if (Command is "read_live_audio" or "read_live_audio_timed" or "stop_live_preview" ? PreviewId is null || PreviewId == Guid.Empty : PreviewId is not null)
             throw new AudioException("invalid_request", "Only live reads and stops accept, and require, a preview ID.");
         if (MaxBufferedMs is not null && (Command != "start_live_preview"
             || MaxBufferedMs is < 50 or > 5000 || MaxBufferedMs % 50 != 0))
@@ -35,7 +35,7 @@ public sealed record AudioRequest(int ProtocolVersion, Guid RequestId, string Co
         }
         if (Command is not ("start_recording" or "pause_recording" or "resume_recording" or "stop_recording" or "inspect_recording"
             or "recover_recording" or "get_recording" or "list_recording_chunks" or "read_chunk"
-            or "start_live_preview" or "read_live_audio" or "stop_live_preview")
+            or "start_live_preview" or "read_live_audio" or "read_live_audio_timed" or "stop_live_preview")
             || RecordingId is null || RecordingId == Guid.Empty)
             throw new AudioException("invalid_request", "A supported command and recording ID are required.");
         if (Command == "get_recording")

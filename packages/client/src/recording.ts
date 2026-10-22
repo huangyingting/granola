@@ -19,6 +19,7 @@ import {
   deleteSavedRemoteRecording,
 } from './recording-upload.js';
 import { RecordingLivePreview } from './recording-live.js';
+import type { DesktopDelivery } from './delivery.js';
 import { recordingRetentionSchema } from '@windows-ai-notes/contracts/uploads';
 
 type AudioClient = Pick<
@@ -103,6 +104,7 @@ export class RecordingController {
     ) => AudioClient,
     private readonly changed: () => void,
     private readonly remove: (id: string) => Promise<void>,
+    private readonly delivery?: DesktopDelivery,
   ) {
     const interrupted = local.activeRecordingOwner();
     if (interrupted)
@@ -528,6 +530,9 @@ export class RecordingController {
       options.locale,
       previous?.recording_id === id && previous.document_id === document
         ? previous
+        : undefined,
+      this.delivery
+        ? { metrics: this.delivery, scope: context.scope }
         : undefined,
     );
     this.live = { profile, preview };

@@ -4,6 +4,36 @@
     "request": {
       "protocol_version": 1,
       "request_id": "9c73575e-426d-4f72-98ed-7b4479f890ab",
+      "command": "read_live_audio_timed",
+      "recording_id": "75048e79-2b45-440f-8609-b80a37635b4a",
+      "preview_id": "e9393508-f494-417d-b968-9ebc3a5fd4c1"
+    }
+  },
+  {
+    "valid": false,
+    "request": {
+      "protocol_version": 1,
+      "request_id": "9c73575e-426d-4f72-98ed-7b4479f890ab",
+      "command": "read_live_audio_timed",
+      "recording_id": "75048e79-2b45-440f-8609-b80a37635b4a"
+    }
+  },
+  {
+    "valid": false,
+    "request": {
+      "protocol_version": 1,
+      "request_id": "9c73575e-426d-4f72-98ed-7b4479f890ab",
+      "command": "read_live_audio",
+      "recording_id": "75048e79-2b45-440f-8609-b80a37635b4a",
+      "preview_id": "e9393508-f494-417d-b968-9ebc3a5fd4c1",
+      "include_timing": true
+    }
+  },
+  {
+    "valid": true,
+    "request": {
+      "protocol_version": 1,
+      "request_id": "9c73575e-426d-4f72-98ed-7b4479f890ab",
       "command": "check_storage",
       "storage_quota_bytes": 5368709120
     }

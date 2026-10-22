@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { Presented } from './Presentation.js';
 import type { DesktopCommand } from '@windows-ai-notes/contracts/desktop';
 import type {
   LivePreviewState,
@@ -177,7 +178,7 @@ export function LivePreview({
             aria-label="Provisional live captions"
             aria-live="off"
           >
-            {entries.map(({ attempt, event }) => {
+            {entries.map(({ attempt, event, presentation }) => {
               const kind = recording.tracks.find(
                 (track) => track.spec.track_id === event.source.track_id,
               )?.spec.kind;
@@ -190,7 +191,15 @@ export function LivePreview({
                     {kind === 'microphone' ? 'Microphone' : 'System audio'} -
                     Preview segment {attempt}
                   </small>
-                  <p>{event.text}</p>
+                  <p>
+                    <Presented
+                      scope={scope}
+                      id={recording.document_id}
+                      marker={presentation}
+                    >
+                      {event.text}
+                    </Presented>
+                  </p>
                 </div>
               );
             })}

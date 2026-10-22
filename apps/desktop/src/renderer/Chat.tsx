@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { Presented } from './Presentation.js';
 import type {
   DesktopCommand,
   DesktopState,
@@ -676,7 +677,19 @@ export function ChatPanel({ state, draft, beforeStart }: Props) {
                             aria-label="Unfinished answer preview"
                           >
                             <span className="eyebrow">UNFINISHED PREVIEW</span>
-                            <p>{generation.preview}</p>
+                            <p>
+                              <Presented
+                                scope={state.scope}
+                                id={draft.id}
+                                marker={state.presentations?.find(
+                                  (value) =>
+                                    value.kind === 'chat_preview' &&
+                                    value.operation_id === generation.turn_id,
+                                )}
+                              >
+                                {generation.preview}
+                              </Presented>
+                            </p>
                             <small>
                               Not a validated answer. Verify the completed
                               citations before relying on it.

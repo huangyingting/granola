@@ -23,6 +23,7 @@ import {
 } from '@windows-ai-notes/contracts/questions';
 import { ApiClient, ClientError } from './http.js';
 import { ChatEvents } from './chat-events.js';
+import type { DesktopDelivery } from './delivery.js';
 
 export const chatIntentSchema = z
   .strictObject({
@@ -54,6 +55,7 @@ type Owner = {
   remote: { api: ApiClient; authorize: () => void } | null;
 };
 type Hooks = {
+  delivery?: DesktopDelivery;
   owner: (scope: number) => Owner;
   synchronize: () => Promise<void>;
   changed: () => void;
@@ -87,6 +89,7 @@ export class DesktopChat {
     private readonly hooks: Hooks,
   ) {
     this.events = new ChatEvents(local, {
+      ...(hooks.delivery ? { delivery: hooks.delivery } : {}),
       owner: (scope, id, thread) => {
         const owner = this.owner(scope, id),
           remote = owner.remote;

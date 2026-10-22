@@ -21,7 +21,7 @@ test.skip(
   process.platform !== 'win32',
   'Requires a real sandboxed Windows Electron renderer.',
 );
-async function launch() {
+async function launch(presentations = false) {
   const directory = await mkdtemp(join(tmpdir(), 'notes-live-ui-'));
   let application: ElectronApplication | undefined;
   const recording = localRecordingSchema.parse({
@@ -96,7 +96,7 @@ async function launch() {
     );
     await writeFile(
       join(directory, 'fixture.json'),
-      JSON.stringify({ audio, live }),
+      JSON.stringify({ audio, live, presentations }),
     );
     application = await electron.launch({
       timeout: 15_000,
@@ -146,6 +146,125 @@ test('requires fresh inline consent, validates through the real preload, and sen
     const confirm = f.page.getByRole('button', {
       name: 'Confirm live preview',
       exact: true,
+    });
+    test('acknowledges actual caption text once, never collapsed, hidden, offscreen or superseded content', async () => {
+      const f = await launch(true);
+      try {
+        const marker = () => ({
+          token: randomUUID(),
+          kind: 'live_caption' as const,
+          operation_id: randomUUID(),
+        });
+        const first = marker();
+        const caption = async (presentation: ReturnType<typeof marker>) => {
+          await publish(f.application, {
+            ...f.audio,
+            live: {
+              ...f.live,
+              segments: [
+                {
+                  attempt: 1,
+                  presentation,
+                  event: {
+                    schema_version: 1,
+                    event_type: 'transcript.partial',
+                    provider_epoch: presentation.operation_id,
+                    source: f.source,
+                    segment_id: randomUUID(),
+                    version: 1,
+                    sample_start: 0,
+                    sample_end: 800,
+                    text: 'Synthetic visible caption.',
+                    discard_reason: null,
+                    provider_result_id: null,
+                  },
+                },
+              ],
+            },
+          });
+          await expect(
+            f.page.locator(`[data-presentation-token="${presentation.token}"]`),
+          ).toHaveCount(1);
+        };
+        const frames = () =>
+          f.page.evaluate(
+            () =>
+              new Promise<void>((resolve) =>
+                requestAnimationFrame(() =>
+                  requestAnimationFrame(() => resolve()),
+                ),
+              ),
+          );
+        await caption(first);
+        await frames();
+        expect(await commands(f.application)).toEqual([]);
+        await f.page
+          .getByText('Caption visibility fixture', { exact: true })
+          .click();
+        await f.page
+          .locator(`[data-presentation-token="${first.token}"]`)
+          .scrollIntoViewIfNeeded();
+        await expect
+          .poll(() => commands(f.application))
+          .toEqual([
+            {
+              operation: 'observePresentation',
+              scope: 7,
+              id: f.recording.document_id,
+              token: first.token,
+            },
+          ]);
+        await frames();
+        expect(await commands(f.application)).toHaveLength(1);
+        let style = await f.page.addStyleTag({
+          content: '[data-presentation-token] { display:none !important; }',
+        });
+        const replaced = marker(),
+          replacement = marker();
+        await caption(replaced);
+        await frames();
+        await caption(replacement);
+        await frames();
+        expect(await commands(f.application)).toHaveLength(1);
+        await style.evaluate((element) => element.remove());
+        await f.page
+          .locator(`[data-presentation-token="${replacement.token}"]`)
+          .scrollIntoViewIfNeeded();
+        await expect
+          .poll(async () => (await commands(f.application)).length)
+          .toBe(2);
+        expect(await commands(f.application)).not.toContainEqual(
+          expect.objectContaining({ token: replaced.token }),
+        );
+        style = await f.page.addStyleTag({
+          content:
+            '[data-presentation-token] { position:relative;top:2000px; }',
+        });
+        const offscreen = marker();
+        await caption(offscreen);
+        await frames();
+        expect(await commands(f.application)).toHaveLength(2);
+        await style.evaluate((element) => element.remove());
+        await expect
+          .poll(async () => (await commands(f.application)).length)
+          .toBe(3);
+        await f.page.addStyleTag({
+          content: '[data-presentation-token] { display:none !important; }',
+        });
+        const unmounted = marker();
+        await caption(unmounted);
+        await f.page.evaluate(() => {
+          window.location.hash = 'unmount';
+        });
+        await expect(f.page.locator('[data-presentation-token]')).toHaveCount(
+          0,
+        );
+        await frames();
+        expect(await commands(f.application)).toHaveLength(3);
+      } finally {
+        await f.application.close();
+        await rm(f.directory, { recursive: true, force: true });
+      }
     });
     await expect(confirm).toBeDisabled();
     await expect(

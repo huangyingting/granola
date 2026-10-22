@@ -10,6 +10,8 @@
     "./audit": "./dist/audit.js",
     "./deletion": "./dist/deletion.js",
     "./observability": "./dist/observability.js",
+    "./presentation": "./dist/presentation.js",
+    "./telemetry": "./dist/telemetry.js",
     "./content": "./dist/content.js",
     "./desktop": "./dist/desktop.js",
     "./generation": "./dist/generation.js",

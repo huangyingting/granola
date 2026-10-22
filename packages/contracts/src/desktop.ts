@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { presentationSchema } from './presentation.js';
 import { richTextSchema, tagsSchema } from './content.js';
 import {
   resourceId,
@@ -59,6 +60,12 @@ const scoped = { scope: z.number().int().positive() };
 const summaryScoped = { ...scoped, id: resourceId, job_id: resourceId };
 export const desktopCommandSchema = z.discriminatedUnion('operation', [
   z.strictObject({ operation: z.literal('bootstrap') }),
+  z.strictObject({
+    operation: z.literal('observePresentation'),
+    ...scoped,
+    id: resourceId,
+    token: presentationSchema.shape.token,
+  }),
   z.strictObject({
     operation: z.literal('watchChat'),
     ...scoped,
@@ -419,6 +426,7 @@ export const desktopStateSchema = z.strictObject({
   summary_submission: summarySubmissionSchema.nullable().default(null),
   summary_generation: summaryWatchSchema.nullable().default(null),
   chat_generation: chatWatchSchema.nullable().default(null),
+  presentations: z.array(presentationSchema).max(8).optional(),
 });
 export const desktopChangeSchema = z.strictObject({
   version: z.number().int().positive(),
@@ -426,6 +434,7 @@ export const desktopChangeSchema = z.strictObject({
   kind: z.enum(['data', 'scope', 'revoked', 'status', 'audio']),
 });
 export const desktopResponseSchema = z.union([
+  z.strictObject({ ok: z.literal(true), observed: z.boolean() }),
   z.strictObject({
     ok: z.literal(true),
     chat_view: z.strictObject({ ...scoped, view: chatViewSchema }),
@@ -473,7 +482,11 @@ export const desktopResponseSchema = z.union([
   z.strictObject({ ok: z.literal(true), closing: z.literal(true) }),
   z.strictObject({
     ok: z.literal(true),
-    transcript_page: z.strictObject({ ...scoped, page: transcriptPageSchema }),
+    transcript_page: z.strictObject({
+      ...scoped,
+      page: transcriptPageSchema,
+      presentation: presentationSchema.optional(),
+    }),
   }),
   z.strictObject({
     ok: z.literal(true),

@@ -2,6 +2,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Writable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import {
   S3Client,
@@ -42,6 +43,7 @@ import { RecordingBlobs } from '@windows-ai-notes/storage';
 import { AudioHostClient } from './audio.js';
 import { RecordingController } from './recording.js';
 import { runOnce } from '@windows-ai-notes/worker';
+import { DesktopDelivery } from './delivery.js';
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 describe.skipIf(!databaseUrl)(
@@ -58,16 +60,31 @@ describe.skipIf(!databaseUrl)(
     let key: Buffer;
     let actor: { user_id: string; workspace_id: string };
     let events: DesktopChange[];
+    const deliveries: DesktopDelivery[] = [];
     const schema = `notes_workspace_${randomUUID().replaceAll('-', '')}`;
     const fields = (text: string) => ({
       title: 'Synthetic meeting',
       content: richTextFromPlainText(text),
       tags: [],
     });
-    const open = (browser = issuer.browser) =>
+    const open = (browser = issuer.browser, delivery?: DesktopDelivery) =>
       new WorkspaceController(local, browser, (event) => events.push(event), {
         allowLoopback: true,
+        ...(delivery ? { delivery } : {}),
       });
+    function observe() {
+      const records: Record<string, unknown>[] = [];
+      const delivery = new DesktopDelivery(
+        new Writable({
+          write(chunk, _encoding, done) {
+            records.push(JSON.parse(String(chunk)));
+            done();
+          },
+        }),
+      );
+      deliveries.push(delivery);
+      return { delivery, records };
+    }
     const connect = () =>
       controller.execute({
         operation: 'connect',
@@ -154,6 +171,7 @@ describe.skipIf(!databaseUrl)(
       vi.restoreAllMocks();
       vi.useRealTimers();
       controller?.dispose();
+      for (const delivery of deliveries.splice(0)) delivery.close();
       await app?.close();
       await issuer?.close();
       local?.close();
@@ -617,6 +635,9 @@ describe.skipIf(!databaseUrl)(
         end_ms: index * 1000 + 999,
         text: `Synthetic immutable segment ${index}.`,
       }));
+      const { delivery, records } = observe();
+      controller.dispose();
+      controller = open(issuer.browser, delivery);
       await db.transaction((tx) =>
         db.transcripts.write(
           tx,
@@ -637,10 +658,28 @@ describe.skipIf(!databaseUrl)(
         has_more: true,
         segments: segments.slice(0, 50),
       });
+      expect(state.presentations).toContainEqual(
+        expect.objectContaining({
+          kind: 'transcript_page',
+          revision: 1,
+          offset: 0,
+        }),
+      );
+      expect(
+        records.find((value) => value.origin === 'synchronization'),
+      ).toMatchObject({ outcome: 'validated_in_main' });
       expect(
         (await controller.transcriptPage(state.scope, remote.id, 1, 50))
           .segments,
       ).toEqual(segments.slice(50, 100));
+      const marker = delivery
+        .markers(state.scope, remote.id)
+        .find((value) => value.offset === 50)!;
+      expect(marker).toMatchObject({ kind: 'transcript_page', revision: 1 });
+      expect(delivery.present(state.scope, remote.id, marker.token)).toBe(true);
+      expect(JSON.stringify(records)).not.toContain(
+        'Synthetic immutable segment',
+      );
       const profile = controller.profile;
       controller.dispose();
       local.close();
@@ -674,7 +713,27 @@ describe.skipIf(!databaseUrl)(
         )?.segments,
       ).toEqual(segments.slice(50, 100));
     });
+    it('does not fail a successful selected-document deletion because delivery instrumentation reads a missing draft', async () => {
+      const remote = await seed(),
+        { delivery } = observe();
+      controller.dispose();
+      controller = open(issuer.browser, delivery);
+      await connect();
+      await activate();
+      await controller.synchronize();
+      expect(controller.snapshot().selected_id).toBe(remote.id);
+      await db.deleteDocument(actor.user_id, remote.id);
+      await controller.synchronize();
+      expect(controller.snapshot()).toMatchObject({
+        selected_id: null,
+        connection: { status: 'ready', error: null },
+      });
+      expect(delivery.markers(controller.scope, remote.id)).toEqual([]);
+    });
     it('rejects page responses arriving after scope changes, document deletion and changed immutable headers', async () => {
+      const { delivery, records } = observe();
+      controller.dispose();
+      controller = open(issuer.browser, delivery);
       const remote = await seed();
       const segments = Array.from({ length: 60 }, (_, index) => ({
         id: randomUUID(),
@@ -748,6 +807,13 @@ describe.skipIf(!databaseUrl)(
       expect(signal?.aborted).toBe(true);
       finish(page);
       await rejected;
+      expect(
+        records.filter(
+          (value) =>
+            value.code === 'desktop_delivery_received' && value.offset === 50,
+        ),
+      ).toEqual([]);
+      expect(delivery.markers(scope, remote.id)).toEqual([]);
       expect(
         local.getArtifact(
           profile,
