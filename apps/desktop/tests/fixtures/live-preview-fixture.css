@@ -1,0 +1,8 @@
+body.presentation-fixture-hidden [data-presentation-token] {
+  display: none !important;
+}
+body.presentation-fixture-offscreen [data-presentation-token] {
+  position: fixed !important;
+  top: 2000px !important;
+  left: 0 !important;
+}

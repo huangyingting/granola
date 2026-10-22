@@ -216,9 +216,21 @@ test('requires fresh inline consent, validates through the real preload, and sen
           ]);
         await frames();
         expect(await commands(f.application)).toHaveLength(1);
-        let style = await f.page.addStyleTag({
-          content: '[data-presentation-token] { display:none !important; }',
-        });
+        const visibility = async (
+          mode: 'hidden' | 'offscreen',
+          enabled: boolean,
+        ) => {
+          await f.page.locator('body').evaluate(
+            (element, value) => {
+              element.classList.toggle(
+                `presentation-fixture-${value.mode}`,
+                value.enabled,
+              );
+            },
+            { mode, enabled },
+          );
+        };
+        await visibility('hidden', true);
         const replaced = marker(),
           replacement = marker();
         await caption(replaced);
@@ -226,9 +238,7 @@ test('requires fresh inline consent, validates through the real preload, and sen
         await caption(replacement);
         await frames();
         expect(await commands(f.application)).toHaveLength(1);
-        await style.evaluate((element) =>
-          element.parentNode?.removeChild(element),
-        );
+        await visibility('hidden', false);
         await f.page
           .locator(`[data-presentation-token="${replacement.token}"]`)
           .scrollIntoViewIfNeeded();
@@ -238,23 +248,16 @@ test('requires fresh inline consent, validates through the real preload, and sen
         expect(await commands(f.application)).not.toContainEqual(
           expect.objectContaining({ token: replaced.token }),
         );
-        style = await f.page.addStyleTag({
-          content:
-            '[data-presentation-token] { position:relative;top:2000px; }',
-        });
+        await visibility('offscreen', true);
         const offscreen = marker();
         await caption(offscreen);
         await frames();
         expect(await commands(f.application)).toHaveLength(2);
-        await style.evaluate((element) =>
-          element.parentNode?.removeChild(element),
-        );
+        await visibility('offscreen', false);
         await expect
           .poll(async () => (await commands(f.application)).length)
           .toBe(3);
-        await f.page.addStyleTag({
-          content: '[data-presentation-token] { display:none !important; }',
-        });
+        await visibility('hidden', true);
         const unmounted = marker();
         await caption(unmounted);
         await f.page.evaluate(() => {

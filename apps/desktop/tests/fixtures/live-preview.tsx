@@ -2,6 +2,7 @@ import { createRoot } from 'react-dom/client';
 import { useEffect, useState } from 'react';
 import { RecordingBar, RecordingPanel } from '../../src/renderer/Recording.js';
 import '../../src/renderer/style.css';
+import './live-preview-fixture.css';
 
 const documentId = new URLSearchParams(window.location.search).get('document');
 if (!documentId) throw new Error('Missing isolated fixture document.');
