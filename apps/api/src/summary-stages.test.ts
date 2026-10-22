@@ -662,7 +662,21 @@ describe.skipIf(!databaseUrl)(
         resume_available: false,
         resume_token: null,
       });
-      await db.cleanup();
+      // Cleanup can yield to another database-wide leader.
+      await vi.waitFor(
+        async () => {
+          await db.cleanup();
+          expect(
+            (
+              await db.pool.query(
+                'SELECT job_id FROM summary_runs WHERE job_id=$1',
+                [job.id],
+              )
+            ).rowCount,
+          ).toBe(0);
+        },
+        { timeout: 5000, interval: 25 },
+      );
       expect((await retry(job.id, confirmation)).statusCode).toBe(410);
       await db.pool.query(
         "UPDATE jobs SET state='queued',attempt=0,available_at=now() WHERE id=$1",
@@ -678,7 +692,7 @@ describe.skipIf(!databaseUrl)(
         uncertain_requests: '1',
         uncertain: { input_tokens: '10' },
       });
-    });
+    }, 15_000);
     it('does not replay a pre-upgrade provider dispatch without durable stage records', async () => {
       await queued();
       const legacy = (await db.claim())!;
