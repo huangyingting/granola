@@ -176,7 +176,7 @@ test('requires fresh inline consent, validates through the real preload, and sen
                     sample_end: 800,
                     text: 'Synthetic visible caption.',
                     discard_reason: null,
-                    provider_result_id: null,
+                    provider_result_id: 'synthetic-presentation-fixture',
                   },
                 },
               ],
@@ -226,7 +226,9 @@ test('requires fresh inline consent, validates through the real preload, and sen
         await caption(replacement);
         await frames();
         expect(await commands(f.application)).toHaveLength(1);
-        await style.evaluate((element) => element.remove());
+        await style.evaluate((element) =>
+          element.parentNode?.removeChild(element),
+        );
         await f.page
           .locator(`[data-presentation-token="${replacement.token}"]`)
           .scrollIntoViewIfNeeded();
@@ -244,7 +246,9 @@ test('requires fresh inline consent, validates through the real preload, and sen
         await caption(offscreen);
         await frames();
         expect(await commands(f.application)).toHaveLength(2);
-        await style.evaluate((element) => element.remove());
+        await style.evaluate((element) =>
+          element.parentNode?.removeChild(element),
+        );
         await expect
           .poll(async () => (await commands(f.application)).length)
           .toBe(3);
