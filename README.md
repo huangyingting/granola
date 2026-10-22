@@ -288,6 +288,16 @@ trust, arbitrary clean-machine compatibility or trusted automatic updates.
 The installation-changing test is disabled outside the explicitly enabled
 GitHub-hosted Windows check.
 
+The bundled helper also provides the native update-verification boundary:
+Windows `WinVerifyTrust` with revocation and downloaded-file policy, an embedded
+SHA-256-or-stronger signature, a valid timestamp, and exact certificate,
+publisher, product and version matching. A read-only handle remains open through
+verification and SHA-512 hashing. The desktop adapter additionally requires
+the expected digest/size and a strictly newer stable version, with bounded
+subprocess execution and no AI/signing secrets in the child environment.
+This does not require PowerShell at runtime. **Update-feed delivery, download
+and safe restart are not enabled by this verification primitive.**
+
 ### Verified signed Windows candidates
 
 `pnpm desktop:package:signed` is a separate, Windows-only producer command.
