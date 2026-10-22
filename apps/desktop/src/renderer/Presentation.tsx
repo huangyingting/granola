@@ -13,10 +13,12 @@ export function usePresentation<T extends HTMLElement>(
     let sent = false,
       first = 0,
       second = 0,
-      active = true;
+      active = true,
+      intersecting = false;
     const visible = () => {
       const box = element.getBoundingClientRect();
       return (
+        intersecting &&
         document.visibilityState === 'visible' &&
         element.checkVisibility({
           opacityProperty: true,
@@ -57,7 +59,15 @@ export function usePresentation<T extends HTMLElement>(
         });
       });
     };
-    const observer = new IntersectionObserver(schedule);
+    const observer = new IntersectionObserver((entries) => {
+      const entry = entries.at(-1);
+      intersecting = Boolean(
+        entry?.isIntersecting &&
+        entry.intersectionRect.width > 0 &&
+        entry.intersectionRect.height > 0,
+      );
+      schedule();
+    });
     observer.observe(element);
     document.addEventListener('visibilitychange', schedule);
     document.addEventListener('toggle', schedule, true);

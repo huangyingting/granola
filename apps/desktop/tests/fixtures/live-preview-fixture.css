@@ -6,3 +6,8 @@ body.presentation-fixture-offscreen [data-presentation-token] {
   top: 2000px !important;
   left: 0 !important;
 }
+body.presentation-fixture-clipped p:has([data-presentation-token]) {
+  height: 0 !important;
+  overflow: hidden !important;
+  margin: 0 !important;
+}

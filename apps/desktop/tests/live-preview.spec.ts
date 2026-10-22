@@ -18,8 +18,8 @@ import {
 } from '@windows-ai-notes/contracts/recording';
 
 test.skip(
-  process.platform !== 'win32',
-  'Requires a real sandboxed Windows Electron renderer.',
+  process.platform !== 'win32' && !process.env.DISPLAY,
+  'Requires a real sandboxed Electron renderer and a display.',
 );
 async function launch(presentations = false) {
   const directory = await mkdtemp(join(tmpdir(), 'notes-live-ui-'));
@@ -137,6 +137,137 @@ async function commands(application: ElectronApplication) {
     return result.commands;
   });
 }
+test('acknowledges actual caption text once, never collapsed, hidden, offscreen or superseded content', async () => {
+  const f = await launch(true);
+  try {
+    const marker = () => ({
+      token: randomUUID(),
+      kind: 'live_caption' as const,
+      operation_id: randomUUID(),
+    });
+    const first = marker();
+    const caption = async (presentation: ReturnType<typeof marker>) => {
+      await publish(f.application, {
+        ...f.audio,
+        live: {
+          ...f.live,
+          segments: [
+            {
+              attempt: 1,
+              presentation,
+              event: {
+                schema_version: 1,
+                event_type: 'transcript.partial',
+                provider_epoch: presentation.operation_id,
+                source: f.source,
+                segment_id: randomUUID(),
+                version: 1,
+                sample_start: 0,
+                sample_end: 800,
+                text: 'Synthetic visible caption.',
+                discard_reason: null,
+                provider_result_id: 'synthetic-presentation-fixture',
+              },
+            },
+          ],
+        },
+      });
+      await expect(
+        f.page.locator(`[data-presentation-token="${presentation.token}"]`),
+      ).toHaveCount(1);
+    };
+    const frames = () =>
+      f.page.evaluate(
+        () =>
+          new Promise<void>((resolve) =>
+            requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+          ),
+      );
+    await caption(first);
+    await frames();
+    expect(await commands(f.application)).toEqual([]);
+    await f.page
+      .getByText('Caption visibility fixture', { exact: true })
+      .click();
+    await f.page
+      .locator(`[data-presentation-token="${first.token}"]`)
+      .scrollIntoViewIfNeeded();
+    await expect
+      .poll(() => commands(f.application))
+      .toEqual([
+        {
+          operation: 'observePresentation',
+          scope: 7,
+          id: f.recording.document_id,
+          token: first.token,
+        },
+      ]);
+    await frames();
+    expect(await commands(f.application)).toHaveLength(1);
+    const visibility = async (
+      mode: 'hidden' | 'offscreen' | 'clipped',
+      enabled: boolean,
+    ) => {
+      await f.page.locator('body').evaluate(
+        (element, value) => {
+          element.classList.toggle(
+            `presentation-fixture-${value.mode}`,
+            value.enabled,
+          );
+        },
+        { mode, enabled },
+      );
+    };
+    await visibility('hidden', true);
+    const replaced = marker(),
+      replacement = marker();
+    await caption(replaced);
+    await frames();
+    await caption(replacement);
+    await frames();
+    expect(await commands(f.application)).toHaveLength(1);
+    await visibility('hidden', false);
+    await f.page
+      .locator(`[data-presentation-token="${replacement.token}"]`)
+      .scrollIntoViewIfNeeded();
+    await expect
+      .poll(async () => (await commands(f.application)).length)
+      .toBe(2);
+    expect(await commands(f.application)).not.toContainEqual(
+      expect.objectContaining({ token: replaced.token }),
+    );
+    await visibility('offscreen', true);
+    const offscreen = marker();
+    await caption(offscreen);
+    await frames();
+    expect(await commands(f.application)).toHaveLength(2);
+    await visibility('offscreen', false);
+    await expect
+      .poll(async () => (await commands(f.application)).length)
+      .toBe(3);
+    await visibility('clipped', true);
+    const clipped = marker();
+    await caption(clipped);
+    await frames();
+    expect(await commands(f.application)).toHaveLength(3);
+    await visibility('clipped', false);
+    await expect
+      .poll(async () => (await commands(f.application)).length)
+      .toBe(4);
+    await visibility('hidden', true);
+    const unmounted = marker();
+    await caption(unmounted);
+    await f.page.evaluate(() => {
+      window.location.hash = 'unmount';
+    });
+    await expect(f.page.locator('[data-presentation-token]')).toHaveCount(0);
+    await frames();
+    expect(await commands(f.application)).toHaveLength(4);
+  } finally {
+    await f.application.close();
+    await rm(f.directory, { recursive: true, force: true });
+  }
+});
 test('requires fresh inline consent, validates through the real preload, and sends only scoped start/stop commands', async () => {
   const f = await launch();
   try {
@@ -146,132 +277,6 @@ test('requires fresh inline consent, validates through the real preload, and sen
     const confirm = f.page.getByRole('button', {
       name: 'Confirm live preview',
       exact: true,
-    });
-    test('acknowledges actual caption text once, never collapsed, hidden, offscreen or superseded content', async () => {
-      const f = await launch(true);
-      try {
-        const marker = () => ({
-          token: randomUUID(),
-          kind: 'live_caption' as const,
-          operation_id: randomUUID(),
-        });
-        const first = marker();
-        const caption = async (presentation: ReturnType<typeof marker>) => {
-          await publish(f.application, {
-            ...f.audio,
-            live: {
-              ...f.live,
-              segments: [
-                {
-                  attempt: 1,
-                  presentation,
-                  event: {
-                    schema_version: 1,
-                    event_type: 'transcript.partial',
-                    provider_epoch: presentation.operation_id,
-                    source: f.source,
-                    segment_id: randomUUID(),
-                    version: 1,
-                    sample_start: 0,
-                    sample_end: 800,
-                    text: 'Synthetic visible caption.',
-                    discard_reason: null,
-                    provider_result_id: 'synthetic-presentation-fixture',
-                  },
-                },
-              ],
-            },
-          });
-          await expect(
-            f.page.locator(`[data-presentation-token="${presentation.token}"]`),
-          ).toHaveCount(1);
-        };
-        const frames = () =>
-          f.page.evaluate(
-            () =>
-              new Promise<void>((resolve) =>
-                requestAnimationFrame(() =>
-                  requestAnimationFrame(() => resolve()),
-                ),
-              ),
-          );
-        await caption(first);
-        await frames();
-        expect(await commands(f.application)).toEqual([]);
-        await f.page
-          .getByText('Caption visibility fixture', { exact: true })
-          .click();
-        await f.page
-          .locator(`[data-presentation-token="${first.token}"]`)
-          .scrollIntoViewIfNeeded();
-        await expect
-          .poll(() => commands(f.application))
-          .toEqual([
-            {
-              operation: 'observePresentation',
-              scope: 7,
-              id: f.recording.document_id,
-              token: first.token,
-            },
-          ]);
-        await frames();
-        expect(await commands(f.application)).toHaveLength(1);
-        const visibility = async (
-          mode: 'hidden' | 'offscreen',
-          enabled: boolean,
-        ) => {
-          await f.page.locator('body').evaluate(
-            (element, value) => {
-              element.classList.toggle(
-                `presentation-fixture-${value.mode}`,
-                value.enabled,
-              );
-            },
-            { mode, enabled },
-          );
-        };
-        await visibility('hidden', true);
-        const replaced = marker(),
-          replacement = marker();
-        await caption(replaced);
-        await frames();
-        await caption(replacement);
-        await frames();
-        expect(await commands(f.application)).toHaveLength(1);
-        await visibility('hidden', false);
-        await f.page
-          .locator(`[data-presentation-token="${replacement.token}"]`)
-          .scrollIntoViewIfNeeded();
-        await expect
-          .poll(async () => (await commands(f.application)).length)
-          .toBe(2);
-        expect(await commands(f.application)).not.toContainEqual(
-          expect.objectContaining({ token: replaced.token }),
-        );
-        await visibility('offscreen', true);
-        const offscreen = marker();
-        await caption(offscreen);
-        await frames();
-        expect(await commands(f.application)).toHaveLength(2);
-        await visibility('offscreen', false);
-        await expect
-          .poll(async () => (await commands(f.application)).length)
-          .toBe(3);
-        await visibility('hidden', true);
-        const unmounted = marker();
-        await caption(unmounted);
-        await f.page.evaluate(() => {
-          window.location.hash = 'unmount';
-        });
-        await expect(f.page.locator('[data-presentation-token]')).toHaveCount(
-          0,
-        );
-        await frames();
-        expect(await commands(f.application)).toHaveLength(3);
-      } finally {
-        await f.application.close();
-        await rm(f.directory, { recursive: true, force: true });
-      }
     });
     await expect(confirm).toBeDisabled();
     await expect(
