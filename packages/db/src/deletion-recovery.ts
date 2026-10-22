@@ -153,7 +153,11 @@ export async function recoverDeletions(
       );
     if (restoredBackup)
       await tx.query(
-        'UPDATE deletion_recovery_state SET usage_review_required=true,usage_proof_sha256=NULL,completed_at=NULL',
+        `WITH held AS (
+          UPDATE deletion_recovery_state SET usage_review_required=true,usage_proof_sha256=NULL,completed_at=NULL
+          RETURNING singleton
+        ) UPDATE task_outcome_coverage SET recovery_pending=true
+          WHERE singleton AND EXISTS(SELECT 1 FROM held)`,
       );
     const binding = (
       await tx.query<{
@@ -268,7 +272,11 @@ export async function recoverDeletions(
       ).rowCount;
       if (missing)
         await tx.query(
-          'UPDATE deletion_recovery_state SET usage_review_required=true,usage_proof_sha256=NULL,completed_at=NULL',
+          `WITH held AS (
+            UPDATE deletion_recovery_state SET usage_review_required=true,usage_proof_sha256=NULL,completed_at=NULL
+            RETURNING singleton
+          ) UPDATE task_outcome_coverage SET recovery_pending=true
+            WHERE singleton AND EXISTS(SELECT 1 FROM held)`,
         );
       let cursor: string | null = null;
       for (;;) {
@@ -354,8 +362,11 @@ export async function recoverDeletions(
       );
       if (pending) continue;
       await tx.query(
-        `UPDATE deletion_recovery_state SET verified_tip=$1,verified_generation=$2,
-        verified_entry_references=$3,completed_at=clock_timestamp()`,
+        `WITH completed AS (
+          UPDATE deletion_recovery_state SET verified_tip=$1,verified_generation=$2,
+            verified_entry_references=$3,completed_at=clock_timestamp() RETURNING singleton
+        ) UPDATE task_outcome_coverage SET observed_since=clock_timestamp(),recovery_pending=false
+          WHERE singleton AND recovery_pending AND EXISTS(SELECT 1 FROM completed)`,
         [completed.tip, completed.generation, completed.entry_references],
       );
       return;

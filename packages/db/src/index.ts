@@ -32,7 +32,7 @@ import { LiveSourceStore } from './live.js';
 import { SummaryStages } from './summaries.js';
 import { MeetingQuestions } from './questions.js';
 import { ChatStore } from './chat.js';
-import { operationsSnapshot } from './operations.js';
+import { operationsSnapshot, taskOutcomesSnapshot } from './operations.js';
 import { AuditStore } from './audit.js';
 import { auditTransactionContext } from './audit-context.js';
 import {
@@ -72,6 +72,7 @@ const migrationFiles = [
   '013_deletion_journal.sql',
   '014_deletion_publication.sql',
   '015_deletion_recovery.sql',
+  '016_task_outcomes.sql',
 ];
 
 export type Transaction = pg.PoolClient;
@@ -219,6 +220,9 @@ export class Database {
   }
   async operations() {
     return operationsSnapshot(this);
+  }
+  async taskOutcomes() {
+    return taskOutcomesSnapshot(this);
   }
   async assertSchemaReady(): Promise<void> {
     const applied = await this.pool.query<{ version: number }>(

@@ -338,6 +338,10 @@ export class DeletionPublications {
     );
   }
   async recover(signal: AbortSignal, restoredBackup = false) {
+    if (restoredBackup)
+      await this.db.pool.query(
+        'UPDATE task_outcome_coverage SET recovery_pending=true WHERE singleton',
+      );
     await this.replay(signal, restoredBackup);
     await this.assertUsageReady();
     this.recovered = true;

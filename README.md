@@ -959,9 +959,71 @@ Completion duration covers the full response, not first-token latency or
 live-frame backlog; disconnected/incomplete responses may have no completion
 record. Restrict log access and configure the deployment's
 log sink for at most **30 days**; this command does not manage external log storage.
-End-to-end capture/canonical/client-delivery timing, durable deployment-wide
-lifetime outcome accounting and independent deletion-ledger
-restore remain unfinished production-release requirements.
+Measured desktop delivery and independent deletion recovery are described in
+their dedicated sections. Production alert routing, capacity/load evidence and
+release acceptance remain deployment-specific gates.
+
+### Durable task-outcome observations
+
+```sh
+pnpm build
+pnpm db:migrate
+pnpm task:outcomes
+```
+
+This separate, version-1 deployment-only JSON report reuses transactional lifecycle
+audits, not retained job rows or best-effort logs. It adds no HTTP endpoint and
+accepts no options. It returns only fixed labels, timestamps, counts and ratios;
+no actor, document, job, turn, provider or request IDs are projected.
+
+For jobs and chat separately, the **preceding 24 hours** of terminal SQL state
+entries are counted as `succeeded`, `failed` or `cancelled`. The explicit
+`non_cancelled_terminal_entries` denominator is succeeded + failed.
+`success_share_ppm` is the exact integer quotient
+succeeded × 1,000,000 / denominator, truncated down; 1,000,000 means 100%.
+An empty denominator, including a cancellation-only window, has a **null** share,
+not zero or 100%. Cancellations remain visible but are not silently classified
+as provider failures. Jobs combine all supported job kinds; this is not a
+per-provider or per-transcription/summary breakdown.
+
+These are **state-entry observations, not unique accepted-task, provider-attempt,
+billing or lifetime success rates**. A failed task resumed to success contributes
+one failed and one successful entry. Distinct terminal transitions within one
+committed transaction also count separately. A retry wait, lease replacement,
+no-op terminal rewrite, rolled-back mutation or fenced worker callback does not
+add a terminal entry. Directly inserting a terminal row is an entry; deleting
+unfinished work without a terminal transition is not an invented outcome.
+Ordinary account/document/job/chat deletion does not remove the audit-backed
+counts. Existing bounded 30-day audit cleanup leaves the 24-hour window intact.
+
+Migration **016** establishes `coverage_since` without inventing completion times
+for existing terminal rows. `window_start` is the later of that boundary and
+the 24-hour cutoff; `window_complete=false` identifies partial coverage. Ordinary
+restarts and idempotent migrations preserve the boundary. The snapshot is one
+read-only, repeatable-read transaction. Timestamps retain PostgreSQL microseconds;
+event time is the audit's database-clock observation **inside a committed
+transaction**, not the exact WAL commit instant. Future-dated events are excluded.
+Do not sum repeated rolling snapshots.
+
+Keep writers stopped during restore and declare it with
+`pnpm deletion:recover --restored-backup`. Declared restore suspends reporting
+before archive preflight. Detection of missing independent deletion intents
+atomically suspends reporting with the recovery/usage hold. Both report
+`status=recovery_pending`, `entries=null`. Failed replay
+leaves it unavailable. Only full verified deletion replay starts a fresh
+coverage boundary, excluding restored history and replay-induced cancellations.
+This does not bypass the separate authoritative provider-usage review.
+An ordinary archive recheck with no missing history does not erase coverage.
+Undeclared restores, privileged audit edits and primary-database rollback cannot
+be detected or repaired by these primary-database observations; the independent
+deletion archive is not a metrics or billing authority.
+
+Collectors must alert on non-observing status, missing/failed polls and incomplete
+windows, and require a meaningful sample size before judging the success share.
+Route recording/transcription/summary faults using their task-specific lifecycle
+and worker diagnostics, not this combined job ratio alone. Actual thresholds,
+retention of external aggregate snapshots, alert delivery and production
+load/restore drills remain deployment responsibilities.
 
 ### Measured live gateway telemetry
 
@@ -1239,7 +1301,7 @@ recent events remain. Keep that worker running and alert on growing backlog.
 This is a moving inspection window, not a complete concurrent-change export,
 tamper-evident archive or restore protocol. **The 30-day audit table is not the
 independently retained deletion ledger** required to prevent backup resurrection;
-that separate recovery requirement remains open.
+use the separate independent archive and verified recovery procedure above.
 
 ### Server API
 

@@ -834,6 +834,145 @@ describe.skipIf(!url || !endpoint)(
       }
     });
 
+    it('keeps outcomes unavailable after failed declared recovery, then resets coverage only after verified replay and preserves it on restart', async () => {
+      const source = await actor();
+      const job = await db.enqueueSummary(
+        source.owner.user_id,
+        source.document.id,
+        { note_revision: 1, transcript_revision: 0, language: 'en' },
+        randomUUID(),
+      );
+      await db.pool.query(`UPDATE jobs SET state='failed' WHERE id=$1`, [
+        job.id,
+      ]);
+      await db.deletions.initialize(signal());
+      const before = await db.taskOutcomes();
+      expect(before.entries?.jobs.failed).toBe('1');
+      const verify = vi
+        .spyOn(archive, 'verify')
+        .mockRejectedValueOnce(
+          new ServiceError(
+            'deletion_archive_invalid',
+            'Synthetic verification failure.',
+            503,
+          ),
+        );
+      await expect(db.deletions.recover(signal(), true)).rejects.toMatchObject({
+        code: 'deletion_archive_invalid',
+      });
+      expect(await db.taskOutcomes()).toMatchObject({
+        status: 'recovery_pending',
+        entries: null,
+        coverage_since: before.coverage_since,
+      });
+      expect((await db.operations()).jobs.failed).toBe('1');
+      verify.mockRestore();
+      await expect(db.deletions.recover(signal())).rejects.toMatchObject({
+        code: 'deletion_usage_review_required',
+      });
+      const recovered = await db.taskOutcomes();
+      expect(recovered).toMatchObject({
+        status: 'observing',
+        window_complete: false,
+        entries: {
+          jobs: {
+            failed: '0',
+            non_cancelled_terminal_entries: '0',
+            success_share_ppm: null,
+          },
+        },
+      });
+      expect(recovered.coverage_since > before.coverage_since).toBe(true);
+      await db.deletions.reviewUsage(
+        digest({ fixture: 'outcome-restart-reviewed' }, true),
+        signal(),
+      );
+      const other = open(),
+        restarted = new Database(scopedUrl, other);
+      try {
+        await restarted.assertReady();
+        expect((await restarted.taskOutcomes()).coverage_since).toBe(
+          recovered.coverage_since,
+        );
+        await restarted.pool.query(
+          `UPDATE jobs SET state='queued' WHERE id=$1`,
+          [job.id],
+        );
+        await restarted.pool.query(
+          `UPDATE jobs SET state='succeeded' WHERE id=$1`,
+          [job.id],
+        );
+        expect((await restarted.taskOutcomes()).entries?.jobs).toEqual({
+          succeeded: '1',
+          failed: '0',
+          cancelled: '0',
+          non_cancelled_terminal_entries: '1',
+          success_share_ppm: 1_000_000,
+        });
+      } finally {
+        await restarted.close();
+        other.close();
+      }
+    });
+
+    it('excludes replay-induced cancellations when missing independent history is detected without an explicit restore flag', async () => {
+      const source = await actor();
+      await db.enqueueSummary(
+        source.owner.user_id,
+        source.document.id,
+        { note_revision: 1, transcript_revision: 0, language: 'en' },
+        randomUUID(),
+      );
+      await db.deletions.initialize(signal());
+      const before = await db.taskOutcomes();
+      await publish([recoveryIntent('document_erased', source.document.id)]);
+      await expect(db.assertReady()).rejects.toMatchObject({
+        code: 'deletion_usage_review_required',
+      });
+      const after = await db.taskOutcomes();
+      expect(after.coverage_since > before.coverage_since).toBe(true);
+      expect(after.status).toBe('observing');
+      expect(after.entries?.jobs.cancelled).toBe('0');
+      expect(
+        (
+          await db.pool.query(`SELECT count(*)::text n FROM audit_events
+        WHERE action='job_state_changed' AND to_state='cancelled'`)
+        ).rows[0],
+      ).toEqual({ n: '1' });
+      expect((await db.operations()).jobs.cancelled).toBe('1');
+    });
+
+    it('rolls back the final recovery acknowledgement if outcome coverage cannot resume', async () => {
+      await db.deletions.initialize(signal());
+      await db.pool
+        .query(`CREATE FUNCTION reject_outcome_resume() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN RAISE EXCEPTION 'synthetic_outcome_resume_failure'; END; $$;
+        CREATE TRIGGER reject_outcome_resume BEFORE UPDATE ON task_outcome_coverage
+          FOR EACH ROW WHEN(OLD.recovery_pending AND NOT NEW.recovery_pending)
+          EXECUTE FUNCTION reject_outcome_resume()`);
+      await expect(db.deletions.recover(signal(), true)).rejects.toThrow(
+        'synthetic_outcome_resume_failure',
+      );
+      expect(await db.taskOutcomes()).toMatchObject({
+        status: 'recovery_pending',
+        entries: null,
+      });
+      expect(
+        (
+          await db.pool.query(
+            `SELECT completed_at,usage_review_required FROM deletion_recovery_state`,
+          )
+        ).rows[0],
+      ).toEqual({ completed_at: null, usage_review_required: true });
+      await db.pool.query(
+        'DROP TRIGGER reject_outcome_resume ON task_outcome_coverage',
+      );
+      await expect(db.deletions.recover(signal())).rejects.toMatchObject({
+        code: 'deletion_usage_review_required',
+      });
+      expect((await db.taskOutcomes()).status).toBe('observing');
+    });
+
     it('applies permanent missing-resource fences and preserved bounds before a late offline creation can resurrect them', async () => {
       const source = await actor(),
         erased = randomUUID(),
@@ -934,6 +1073,17 @@ describe.skipIf(!url || !endpoint)(
             configurationVersion: privateText,
             budget: { input_tokens: 10, output_tokens: 10, audio_ms: 0 },
           });
+          const historical = await db.enqueueSummary(
+            source.owner.user_id,
+            source.document.id,
+            { note_revision: 1, transcript_revision: 0, language: 'en' },
+            randomUUID(),
+          );
+          await db.pool.query(`UPDATE jobs SET state='failed' WHERE id=$1`, [
+            historical.id,
+          ]);
+          const beforeDump = await db.taskOutcomes();
+          expect(beforeDump.entries?.jobs.failed).toBe('1');
           await db.deletions.initialize(signal());
           const dumped = await promisify(execFile)(
             'docker',
@@ -1013,6 +1163,22 @@ describe.skipIf(!url || !endpoint)(
           await expect(
             restored.deletions.recover(AbortSignal.timeout(60_000), true),
           ).rejects.toMatchObject({ code: 'deletion_usage_review_required' });
+          const restoredOutcomes = await restored.taskOutcomes();
+          expect(
+            restoredOutcomes.coverage_since > beforeDump.coverage_since,
+          ).toBe(true);
+          expect(restoredOutcomes).toMatchObject({
+            status: 'observing',
+            window_complete: false,
+            entries: {
+              jobs: {
+                failed: '0',
+                cancelled: '0',
+                non_cancelled_terminal_entries: '0',
+                success_share_ppm: null,
+              },
+            },
+          });
           expect(
             (
               await restored.pool.query(
@@ -1498,6 +1664,7 @@ describe.skipIf(!url || !endpoint)(
         }),
       ).toEqual({ xid: null });
       expect(await db.operations()).toBeDefined();
+      expect(await db.taskOutcomes()).toMatchObject({ status: 'observing' });
       expect((await db.audit.page()).events.length).toBeGreaterThan(0);
       expect(append).not.toHaveBeenCalled();
     });

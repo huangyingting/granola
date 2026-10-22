@@ -1,4 +1,7 @@
-import { operationsSnapshotSchema } from '@windows-ai-notes/contracts/operations';
+import {
+  operationsSnapshotSchema,
+  taskOutcomesSnapshotSchema,
+} from '@windows-ai-notes/contracts/operations';
 import type { Database, Transaction } from './index.js';
 import {
   recordingCleanupEligibility,
@@ -172,5 +175,53 @@ export async function operationsSnapshot(database: Database) {
       audio,
       usage,
     });
+  });
+}
+
+export async function taskOutcomesSnapshot(database: Database) {
+  await database.assertSchemaReady();
+  return database.transaction(async (tx) => {
+    await tx.query(
+      'SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY',
+    );
+    return taskOutcomesSnapshotSchema.parse(
+      await value(
+        tx,
+        `WITH clock AS MATERIALIZED (
+           SELECT observed_since,recovery_pending,clock_timestamp() observed_at
+           FROM task_outcome_coverage WHERE singleton
+         ), bounds AS (
+           SELECT *,greatest(observed_since,observed_at-interval '24 hours') window_start FROM clock
+         ), recent AS (
+           SELECT a.resource_type,a.to_state FROM audit_events a CROSS JOIN bounds b
+           WHERE NOT b.recovery_pending AND a.created_at BETWEEN b.window_start AND b.observed_at
+             AND ((a.resource_type='job' AND a.action IN ('job_created','job_state_changed')) OR
+               (a.resource_type='chat_turn' AND a.action IN ('chat_turn_created','chat_turn_state_changed')))
+             AND a.to_state IN ('succeeded','failed','cancelled') AND a.from_state IS DISTINCT FROM a.to_state
+         ), totals AS (
+           SELECT f.family,
+             count(*) FILTER (WHERE a.to_state='succeeded') succeeded,
+             count(*) FILTER (WHERE a.to_state='failed') failed,
+             count(*) FILTER (WHERE a.to_state='cancelled') cancelled
+           FROM (VALUES ('jobs','job'),('chat','chat_turn')) f(family,resource_type)
+           LEFT JOIN recent a ON a.resource_type=f.resource_type GROUP BY f.family
+         ), entries AS (
+           SELECT jsonb_object_agg(family,jsonb_build_object(
+             'succeeded',succeeded::text,'failed',failed::text,'cancelled',cancelled::text,
+             'non_cancelled_terminal_entries',(succeeded::numeric+failed)::text,
+             'success_share_ppm',CASE WHEN succeeded::numeric+failed>0
+               THEN div(succeeded::numeric*1000000,succeeded::numeric+failed)::integer END
+           )) value FROM totals
+         ) SELECT jsonb_build_object(
+           'version',1,'scope','deployment','basis','audit_terminal_state_entries',
+           'status',CASE WHEN b.recovery_pending THEN 'recovery_pending' ELSE 'observing' END,
+           'observed_at',to_char(b.observed_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
+           'coverage_since',to_char(b.observed_since AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
+           'window_start',to_char(b.window_start AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
+           'window_hours',24,'window_complete',b.observed_since<=b.observed_at-interval '24 hours',
+           'entries',CASE WHEN b.recovery_pending THEN NULL ELSE entries.value END
+         ) value FROM bounds b CROSS JOIN entries`,
+      ),
+    );
   });
 }

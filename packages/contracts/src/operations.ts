@@ -60,3 +60,71 @@ export const operationsSnapshotSchema = z.strictObject({
   }),
 });
 export type OperationsSnapshot = z.infer<typeof operationsSnapshotSchema>;
+
+const terminalEntriesSchema = z
+  .strictObject({
+    ...outcomes,
+    non_cancelled_terminal_entries: count,
+    success_share_ppm: z.number().int().min(0).max(1_000_000).nullable(),
+  })
+  .superRefine((value, context) => {
+    if (
+      ![
+        value.succeeded,
+        value.failed,
+        value.non_cancelled_terminal_entries,
+      ].every((entry) => count.safeParse(entry).success)
+    )
+      return;
+    const denominator = BigInt(value.succeeded) + BigInt(value.failed);
+    if (
+      denominator !== BigInt(value.non_cancelled_terminal_entries) ||
+      value.success_share_ppm !==
+        (denominator === 0n
+          ? null
+          : Number((BigInt(value.succeeded) * 1_000_000n) / denominator))
+    )
+      context.addIssue({
+        code: 'custom',
+        message: 'Terminal counts and non-cancelled success share disagree.',
+      });
+  });
+
+export const taskOutcomesSnapshotSchema = z
+  .strictObject({
+    version: z.literal(1),
+    scope: z.literal('deployment'),
+    basis: z.literal('audit_terminal_state_entries'),
+    status: z.enum(['observing', 'recovery_pending']),
+    observed_at: z.iso.datetime({ precision: 6 }),
+    coverage_since: z.iso.datetime({ precision: 6 }),
+    window_start: z.iso.datetime({ precision: 6 }),
+    window_hours: z.literal(24),
+    window_complete: z.boolean(),
+    entries: z
+      .strictObject({
+        jobs: terminalEntriesSchema,
+        chat: terminalEntriesSchema,
+      })
+      .nullable(),
+  })
+  .refine(
+    (value) =>
+      (value.status === 'recovery_pending') === (value.entries === null),
+    'Recovery-pending observations must not report counts.',
+  )
+  .refine((value) => {
+    const end = Date.parse(value.observed_at);
+    if (!Number.isFinite(end)) return false;
+    const cutoff =
+      new Date(end - 86_400_000).toISOString().slice(0, 23) +
+      value.observed_at.slice(23);
+    const complete = value.coverage_since <= cutoff;
+    return (
+      value.coverage_since <= value.observed_at &&
+      value.window_start ===
+        (value.coverage_since > cutoff ? value.coverage_since : cutoff) &&
+      value.window_complete === complete
+    );
+  }, 'Task-outcome observation window is inconsistent.');
+export type TaskOutcomesSnapshot = z.infer<typeof taskOutcomesSnapshotSchema>;

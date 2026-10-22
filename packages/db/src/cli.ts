@@ -41,7 +41,7 @@ async function main() {
   try {
     if (positionals.length !== 1)
       throw new Error(
-        'Choose migrate, provision, usage-limits, audio-retention, operations, audit, deletion-init, deletion-recover or deletion-usage-reviewed.',
+        'Choose migrate, provision, usage-limits, audio-retention, operations, task-outcomes, audit, deletion-init, deletion-recover or deletion-usage-reviewed.',
       );
     if (positionals[0] === 'migrate') {
       await database.migrate();
@@ -95,6 +95,14 @@ async function main() {
           400,
         );
       console.log(JSON.stringify(await database.operations()));
+    } else if (positionals[0] === 'task-outcomes') {
+      if (tokens.some((token) => token.kind === 'option'))
+        throw new ServiceError(
+          'invalid_task_outcomes',
+          'Task outcomes are deployment-wide and do not accept filters or other options.',
+          400,
+        );
+      console.log(JSON.stringify(await database.taskOutcomes()));
     } else if (positionals[0] === 'audit') {
       if (
         tokens.some(
@@ -177,7 +185,7 @@ async function main() {
       );
     } else
       throw new Error(
-        'Choose migrate, provision, usage-limits, audio-retention, operations, audit, deletion-init, deletion-recover or deletion-usage-reviewed.',
+        'Choose migrate, provision, usage-limits, audio-retention, operations, task-outcomes, audit, deletion-init, deletion-recover or deletion-usage-reviewed.',
       );
   } finally {
     try {
