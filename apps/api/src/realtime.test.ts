@@ -468,6 +468,9 @@ describe.skipIf(!url)(
       },
     );
     it('commits the fixed reservation before provider startup, returns authorization-only cursors and never persists preview text or uploads', async () => {
+      const telemetry = vi
+        .spyOn(process.stdout, 'write')
+        .mockImplementation(() => true);
       const user = await actor();
       onOpen = async () => {
         expect((await db.usage.snapshot(user.user_id)).uncertain.audio_ms).toBe(
@@ -554,6 +557,43 @@ describe.skipIf(!url)(
       expect(new Set(audit.map((event) => event.request_id)).size).toBe(1);
       expect(audit[0]!.request_id).not.toBeNull();
       expect(JSON.stringify(audit)).not.toContain('Synthetic Orion evidence.');
+      await vi.waitFor(() => {
+        const rows = telemetry.mock.calls.map(([line]) =>
+          JSON.parse(String(line)),
+        );
+        expect(rows).toContainEqual(
+          expect.objectContaining({
+            code: 'live_socket_opened',
+            request_id: audit[0]!.request_id,
+            open_sockets: 1,
+          }),
+        );
+        expect(rows).toContainEqual(
+          expect.objectContaining({
+            code: 'live_socket_closed',
+            request_id: audit[0]!.request_id,
+            open_sockets: 0,
+            outcome: 'finished',
+            received_audio_frames: 2,
+            authorized_audio_frames: 2,
+            forwarded_audio_frames: 2,
+            input_inflight_frames_peak: 2,
+            result_queue_messages_peak: expect.any(Number),
+            provider_startup_ms: expect.any(Number),
+            first_recognition_after_forward_ms: expect.any(Number),
+          }),
+        );
+      });
+      const logs = JSON.stringify(telemetry.mock.calls);
+      for (const privateValue of [
+        'Synthetic Orion evidence.',
+        'Keep manual notes.',
+        user.doc,
+        selected.recording_id,
+        selected.capture_epoch,
+        frame(selected).data_base64,
+      ])
+        expect(logs).not.toContain(privateValue);
     });
     it('rolls back source metadata and the lease when shared account allowance is insufficient', async () => {
       const user = await actor();
@@ -637,6 +677,9 @@ describe.skipIf(!url)(
       }
     });
     it('rejects replay before a second provider write and retains unknown usage', async () => {
+      const telemetry = vi
+        .spyOn(process.stdout, 'write')
+        .mockImplementation(() => true);
       const user = await actor();
       const { socket, model, selected } = await live(user);
       socket.audio([frame(selected)]);
@@ -649,8 +692,26 @@ describe.skipIf(!url)(
       expect((await db.usage.snapshot(user.user_id)).uncertain.audio_ms).toBe(
         '60000',
       );
+      await socket.closed;
+      await vi.waitFor(() =>
+        expect(
+          telemetry.mock.calls.map(([line]) => JSON.parse(String(line))),
+        ).toContainEqual(
+          expect.objectContaining({
+            code: 'live_socket_closed',
+            outcome: 'failed',
+            rejected_discontinuities: 1,
+            received_audio_frames: 2,
+            authorized_audio_frames: 1,
+            forwarded_audio_frames: 1,
+          }),
+        ),
+      );
     });
     it('fails instead of queuing another audio batch while the previous metadata transaction is blocked', async () => {
+      const telemetry = vi
+        .spyOn(process.stdout, 'write')
+        .mockImplementation(() => true);
       const user = await actor();
       const { socket, model, selected } = await live(user);
       const blocked = gate();
@@ -670,6 +731,19 @@ describe.skipIf(!url)(
       blocked.release();
       await socket.closed;
       expect(model.frames).toEqual([]);
+      await vi.waitFor(() =>
+        expect(
+          telemetry.mock.calls.map(([line]) => JSON.parse(String(line))),
+        ).toContainEqual(
+          expect.objectContaining({
+            code: 'live_socket_closed',
+            outcome: 'failed',
+            input_backpressure_failures: 1,
+            input_inflight_frames_peak: 1,
+            forwarded_audio_frames: 0,
+          }),
+        ),
+      );
     });
     it('cancels a provider that is still opening without refunding its committed reservation', async () => {
       const user = await actor();
@@ -834,6 +908,9 @@ describe.skipIf(!url)(
       },
     );
     it('bounds pending results even when provider callbacks arrive faster than authorization', async () => {
+      const telemetry = vi
+        .spyOn(process.stdout, 'write')
+        .mockImplementation(() => true);
       const user = await actor();
       const { socket, model, selected } = await live(user);
       socket.audio([frame(selected)]);
@@ -842,6 +919,19 @@ describe.skipIf(!url)(
       expect(await socket.next('live.error')).toMatchObject({
         code: 'live_result_backpressure',
       });
+      await socket.closed;
+      await vi.waitFor(() =>
+        expect(
+          telemetry.mock.calls.map(([line]) => JSON.parse(String(line))),
+        ).toContainEqual(
+          expect.objectContaining({
+            code: 'live_socket_closed',
+            outcome: 'failed',
+            result_backpressure_failures: 1,
+            result_queue_messages_peak: 8,
+          }),
+        ),
+      );
     });
     it('terminates a socket whose network write callback never drains, without retaining an unbounded send', async () => {
       let transport!: WebSocket;
@@ -1005,6 +1095,9 @@ describe.skipIf(!url)(
       expect(JSON.stringify(failed)).not.toContain('private-provider');
     });
     it('reports unverified continuity even for a contiguous reconnect and explicit authorized forward gaps', async () => {
+      const telemetry = vi
+        .spyOn(process.stdout, 'write')
+        .mockImplementation(() => true);
       const user = await actor();
       const first = await live(user);
       first.socket.audio([frame(first.selected)]);
@@ -1034,6 +1127,19 @@ describe.skipIf(!url)(
         gap: { sample_start: 5600, sample_end: 7200 },
       });
       await finished(third.socket);
+      await vi.waitFor(() =>
+        expect(
+          telemetry.mock.calls.map(([line]) => JSON.parse(String(line))),
+        ).toContainEqual(
+          expect.objectContaining({
+            code: 'live_socket_closed',
+            outcome: 'finished',
+            authorized_gap_batches: 1,
+            authorized_gap_ms: 100,
+            rejected_discontinuities: 0,
+          }),
+        ),
+      );
       expect((await db.usage.snapshot(user.user_id)).uncertain.audio_ms).toBe(
         '60000',
       );

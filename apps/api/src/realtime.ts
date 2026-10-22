@@ -25,6 +25,10 @@ import {
 } from '@windows-ai-notes/db';
 import { principal, type Principal } from './auth.js';
 import { parse } from './parse.js';
+import {
+  liveObservability,
+  type LiveMeasurements,
+} from './live-observability.js';
 
 const MAX_SOCKETS = 16;
 const MAX_OUTPUT_BYTES = 65_536;
@@ -66,6 +70,7 @@ export async function prepareRealtimeRoutes(
   provider: RealtimeProvider | null,
 ) {
   if (!provider) return () => undefined;
+  const telemetry = liveObservability(app);
   const connections = new Set<LiveConnection>();
   await app.register(websocket, {
     options: { maxPayload: 32_768, perMessageDeflate: false, autoPong: false },
@@ -129,6 +134,8 @@ export async function prepareRealtimeRoutes(
           [...connections].filter(
             (connection) => connection.owner === identity.userId,
           ).length < 2;
+        const measured = telemetry.open(request.id);
+        socket.once('close', () => measured.close());
         const connection = new LiveConnection(
           socket,
           db,
@@ -137,6 +144,7 @@ export async function prepareRealtimeRoutes(
           id,
           request.id,
           () => connections.delete(connection),
+          measured,
         );
         connections.add(connection);
         if (!available) connection.fail(error('live_capacity', true));
@@ -185,6 +193,7 @@ class LiveConnection {
     private readonly document: string,
     private readonly requestId: string,
     private readonly release: () => void,
+    private readonly measured: LiveMeasurements,
   ) {
     this.owner = identity.userId;
     this.accessExpiresAt = identity.expiresAt;
@@ -252,14 +261,19 @@ class LiveConnection {
       this.fail(error('invalid_live_message'));
       return;
     }
+    if (message.event_type === 'live.audio')
+      this.measured.received(message.frames.length);
     if (message.event_type === 'live.cancel') {
       void this.stop('cancelled');
       return;
     }
     if (this.input) {
+      this.measured.pressure('input');
       this.fail(error('live_input_backpressure'));
       return;
     }
+    if (message.event_type === 'live.audio')
+      this.measured.input(message.frames.length);
     this.input = this.process(message)
       .catch((err) => this.fail(err))
       .finally(() => {
@@ -304,6 +318,7 @@ class LiveConnection {
       this.reservation = reserved.call;
       if (this.isTerminal()) return;
       this.renew();
+      this.measured.providerOpening();
       const session = await this.provider.open(
         this.claim.source,
         message.locale,
@@ -317,6 +332,7 @@ class LiveConnection {
           return undefined;
         },
       );
+      this.measured.providerReady();
       this.session = session;
       this.receipt = this.observeReceipt(session);
       if (this.isTerminal()) return;
@@ -361,12 +377,15 @@ class LiveConnection {
       ),
     );
     this.accepted = accepted.accepted_samples;
+    this.measured.authorized(message.frames.length, accepted.gap);
     if (this.isTerminal()) return;
     this.base ??= first.sample_start;
     for (const frame of message.frames) {
       this.checkDeadline();
       this.forwarded += 800;
+      this.measured.forwarding();
       this.session.write(frame);
+      this.measured.forwarded(this.forwarded, this.finalized);
     }
     if (this.isTerminal()) return;
     this.armIdle(5000, 'live_input_idle');
@@ -424,10 +443,21 @@ class LiveConnection {
       return this.fail(error('live_invalid_result'));
     }
     const bytes = Buffer.byteLength(JSON.stringify(value));
-    if (this.results.length >= MAX_RESULTS || this.resultBytes + bytes > 32_768)
+    if (
+      this.results.length >= MAX_RESULTS ||
+      this.resultBytes + bytes > 32_768
+    ) {
+      this.measured.pressure('result');
       return this.fail(error('live_result_backpressure'));
+    }
+    if (
+      value.event_type === 'transcript.partial' ||
+      value.event_type === 'transcript.final'
+    )
+      this.measured.recognition();
     this.results.push({ value, at: performance.now(), bytes });
     this.resultBytes += bytes;
+    this.measured.queued(this.results.length, this.resultBytes);
     this.startPublishing();
   }
   private startPublishing() {
@@ -503,12 +533,15 @@ class LiveConnection {
     if (this.isTerminal()) return;
     this.checkDeadline();
     const encoded = JSON.stringify(liveServerMessageSchema.parse(value));
+    this.measured.output(this.socket.bufferedAmount);
     if (
       this.socket.readyState !== 1 ||
       this.sends.size >= 16 ||
       this.socket.bufferedAmount + Buffer.byteLength(encoded) > MAX_OUTPUT_BYTES
-    )
+    ) {
+      this.measured.pressure('output');
       return this.fail(error('live_output_backpressure'));
+    }
     const timer = setTimeout(
       () => this.fail(error('live_output_stalled')),
       5000,
@@ -520,6 +553,7 @@ class LiveConnection {
         this.sends.delete(timer);
         if (err) this.fail(error('live_socket_failed', true));
       });
+      this.measured.output(this.socket.bufferedAmount);
     } catch {
       clearTimeout(timer);
       this.sends.delete(timer);
@@ -535,6 +569,11 @@ class LiveConnection {
   }
   fail(value: unknown) {
     if (this.isTerminal()) return;
+    if (
+      value instanceof ServiceError &&
+      value.code === 'live_frame_discontinuity'
+    )
+      this.measured.discontinuity();
     if (!(value instanceof ServiceError))
       report('live_gateway_failed', this.requestId);
     const safe =
@@ -548,6 +587,7 @@ class LiveConnection {
     failure?: ServiceError,
   ): Promise<void> {
     if (this.cleanup) return this.cleanup;
+    this.measured.terminal(reason, failure !== undefined);
     this.phase = 'terminal';
     this.closeReason = failure ? 'failed' : 'cancelled';
     clearTimeout(this.deadline);

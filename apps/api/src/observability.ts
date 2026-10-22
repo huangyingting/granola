@@ -11,16 +11,15 @@ const methods = new Set([
   'OPTIONS',
 ]);
 
-export function registerRequestObservability(
-  app: FastifyInstance,
-  output: Writable = process.stdout,
+export function boundedTelemetry(
+  output: Writable,
+  prefix: 'http_request' | 'live_gateway',
 ) {
-  const routes = new Set<string>();
   let dropped = 0n;
   let waiting = false;
   let failed = false;
   const droppedRecord = () => ({
-    code: 'http_request_telemetry_dropped',
+    code: `${prefix}_telemetry_dropped`,
     finished_at: new Date().toISOString(),
     count: dropped.toString(),
   });
@@ -43,29 +42,43 @@ export function registerRequestObservability(
     failed = true;
     console.error(
       JSON.stringify({
-        code: 'http_request_telemetry_unavailable',
+        code: `${prefix}_telemetry_unavailable`,
         finished_at: new Date().toISOString(),
       }),
     );
   };
   output.on('error', unavailable);
   if (!output.writable) unavailable();
-  app.addHook('onClose', async () => {
-    output.off('drain', drain);
-    output.off('error', unavailable);
-    if (dropped) console.error(JSON.stringify(droppedRecord()));
-  });
+  return {
+    emit(record: object) {
+      if (failed || output.writableNeedDrain) {
+        dropped++;
+        if (!failed) awaitDrain();
+        return;
+      }
+      write(record);
+    },
+    close() {
+      output.off('drain', drain);
+      output.off('error', unavailable);
+      if (dropped) console.error(JSON.stringify(droppedRecord()));
+    },
+  };
+}
+
+export function registerRequestObservability(
+  app: FastifyInstance,
+  output: Writable = process.stdout,
+) {
+  const routes = new Set<string>();
+  const telemetry = boundedTelemetry(output, 'http_request');
+  app.addHook('onClose', async () => telemetry.close());
   app.addHook('onRoute', (route) => {
     routes.add(route.url);
   });
   app.addHook('onResponse', async (request, reply) => {
-    if (failed || output.writableNeedDrain) {
-      dropped++;
-      if (!failed) awaitDrain();
-      return;
-    }
     const route = request.routeOptions.url;
-    write({
+    telemetry.emit({
       code: 'http_request_completed',
       finished_at: new Date().toISOString(),
       request_id: request.id,

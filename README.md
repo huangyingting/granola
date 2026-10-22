@@ -808,9 +808,45 @@ Completion duration covers the full response, not first-token latency or
 live-frame backlog; disconnected/incomplete responses may have no completion
 record. Restrict log access and configure the deployment's
 log sink for at most **30 days**; this command does not manage external log storage.
-End-to-end provider correlation, actual
-connection/frame/first-token instrumentation and independent deletion-ledger
+End-to-end provider correlation, canonical transcription/LLM first-token
+instrumentation, lifetime outcome rates and independent deletion-ledger
 restore remain unfinished production-release requirements.
+
+### Measured live gateway telemetry
+
+An enabled live gateway emits bounded, body-free `live_socket_opened` and
+`live_socket_closed` records and a `live_gateway_snapshot` every 15 seconds.
+Each gateway instance has a generated UUID; counters reset when that instance
+restarts. `open_sockets` counts actual upgraded sockets until their transport
+closes, including waiting/closing/capacity-rejected sockets, **not database
+leases or confirmed active recordings**. Do not sum repeated snapshots.
+
+Close records correlate the server-generated handshake request ID and summarize
+only observations made by transport close: parsed audio frames, committed
+authorization, successful provider write returns, authorized forward-gap
+duration, rejected cursor discontinuities, input-in-flight/result-queue/socket
+buffer peaks and explicit backpressure failures. Authorized reconnect gaps and
+rejected replay/skips are different counters. These are gateway observations,
+not client/native backlog, transport delivery acknowledgements, physical
+capture continuity or canonical transcript quality.
+
+`provider_startup_ms` measures successful provider opening at the gateway.
+`first_recognition_after_forward_ms` measures the first valid, admitted
+non-discarded recognition callback after the first provider-write attempt;
+it does not establish browser/client delivery or end-to-end capture latency.
+`forwarded_unfinalized_ms_peak` samples the successful-write cursor minus the
+last validated provider-finalization progress callback, not semantic recognition
+completion. Missing startup/recognition measurements are **null**, never zero.
+Socket-close outcome describes gateway termination only, not final billing,
+canonical transcription or job success; provider cleanup/usage can finish later.
+
+No frame samples, transcript text, source/document/account/device IDs, provider
+result/configuration, exception details or URLs are logged. A blocked sink
+does not queue unbounded events: `live_gateway_telemetry_dropped` reports exact
+intentional omissions and periodic snapshots refresh current socket counts.
+`live_gateway_telemetry_unavailable` reports output failure. Apply the same
+restricted-access, at-most-30-day external log retention as request telemetry;
+these best-effort records are neither durable audit nor a deletion ledger.
 
 ### Durable lifecycle audits
 
