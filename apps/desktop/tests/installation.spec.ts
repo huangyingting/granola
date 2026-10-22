@@ -445,7 +445,6 @@ test('preserves encrypted data and new edits through actual installation, compat
         input: {
           module: string;
           helper: string;
-          application: string;
           version: string;
           product: string;
         },
@@ -458,7 +457,7 @@ test('preserves encrypted data and new edits through actual installation, compat
         );
         const lease = await client.holdUpdateRuntime(
           input.helper,
-          input.application,
+          process.execPath,
           input.version,
           input.product,
         );
@@ -493,7 +492,6 @@ test('preserves encrypted data and new edits through actual installation, compat
       {
         module: new URL('../dist/main/update-runtime.js', import.meta.url).href,
         helper: join(current.resources, 'audio-host', 'AudioHost.exe'),
-        application: executable,
         version,
         product: z.string().min(1).parse(base.productName),
       },
