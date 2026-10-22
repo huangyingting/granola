@@ -9,6 +9,7 @@ import {
 import {
   chatSubmissionSchema,
   chatResumeSchema,
+  CHAT_VERSION,
 } from '@windows-ai-notes/contracts/questions';
 import { principal } from './auth.js';
 import { parse } from './parse.js';
@@ -23,7 +24,7 @@ export function registerChatRoutes(
   shutdown: AbortSignal,
 ) {
   app.get('/v1/chat-capabilities', async () => ({
-    questions: 'durable-questions-v1',
+    questions: CHAT_VERSION,
     max_attempts: 3,
     max_pending_work: 8,
     history_context: 'meeting-question-context-v1',

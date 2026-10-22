@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { createServer, type ServerResponse } from 'node:http';
 import { once } from 'node:events';
 import { createRemoteJWKSet, jwtVerify } from 'jose';
@@ -22,6 +22,7 @@ import {
   LONG_SUMMARY_VERSION,
   summaryRequestSchema,
   citationSchema,
+  citationKey,
   type SummarySnapshot,
 } from '@windows-ai-notes/contracts/server';
 import {
@@ -35,6 +36,18 @@ import {
   SUMMARY_TEMPLATES,
 } from '@windows-ai-notes/contracts/templates';
 import { summaryProgressSchema } from '@windows-ai-notes/contracts/evidence';
+import {
+  CHAT_VERSION,
+  QUESTION_PROMPT_VERSION,
+  QUESTION_CONTEXT_PROMPT_VERSION,
+  chatSubmissionSchema,
+  chatResumeSchema,
+  chatThreadSchema,
+  chatTurnSchema,
+  insufficientQuestionEvidence,
+  type ChatTurn,
+  type ChatSource,
+} from '@windows-ai-notes/contracts/questions';
 
 type Document = z.infer<typeof documentSchema>;
 type Change = {
@@ -66,6 +79,14 @@ export async function desktopFixture() {
     z.infer<typeof transcriptTimelineEntrySchema>[]
   >();
   const jobs = new Map<string, Job>();
+  const chatTurns = new Map<string, ChatTurn>();
+  const chatThreads = new Map<string, z.infer<typeof chatThreadSchema>>();
+  const chatSnapshots = new Map<
+    string,
+    { units: ChatSource['excerpts']; context: boolean }
+  >();
+  const chatReceipts = new Map<string, { hash: string; turn: string }>();
+  const chatResumes = new Map<string, Set<string>>();
   const events = new Map<string, z.infer<typeof jobEventSchema>[]>();
   function event(
     id: string,
@@ -144,6 +165,12 @@ export async function desktopFixture() {
     summary_resume_tokens: [] as string[],
     summary_event_cursors: [] as number[],
     summary_online: true,
+    chatTurns,
+    lose_chat_response: false,
+    lose_chat_resume_response: false,
+    lose_chat_delete_response: false,
+    chat_resume_tokens: [] as string[],
+    chat_online: true,
     workspaces: [{ id: workspace, name: 'Synthetic cloud workspace' }],
     failures: [] as unknown[],
     usage,
@@ -445,6 +472,95 @@ export async function desktopFixture() {
     });
     record(document, 'job', id);
   }
+  function chatTurn(id: string) {
+    const turn = chatTurns.get(id),
+      document = turn ? documents.get(turn.document_id) : null;
+    return turn && document
+      ? {
+          ...turn,
+          input_stale:
+            turn.request.note_revision !== document.revision ||
+            turn.request.transcript_revision !== document.transcript_revision,
+        }
+      : null;
+  }
+  function publishChat(id: string) {
+    const turn = chatTurn(id),
+      snapshot = chatSnapshots.get(id);
+    if (!turn || !snapshot || !['queued', 'running'].includes(turn.state))
+      throw new Error('Missing active synthetic question.');
+    const citations = [
+      ...new Map(
+        snapshot.units.map((unit) => [
+          citationKey(unit.citation),
+          unit.citation,
+        ]),
+      ).values(),
+    ].slice(0, 16);
+    const usage = {
+      input_tokens: citations.length ? 70 : 0,
+      output_tokens: citations.length ? 18 : 0,
+      audio_ms: 0,
+    };
+    chatTurns.set(
+      id,
+      chatTurnSchema.parse({
+        ...turn,
+        state: 'succeeded',
+        attempt: turn.attempt + 1,
+        last_event_id: turn.last_event_id + 1,
+        error: null,
+        resume_available: false,
+        resume_token: null,
+        provider_requests:
+          turn.provider_requests + Number(citations.length > 0),
+        result: {
+          answer: citations.length
+            ? {
+                status: 'answered',
+                answer: {
+                  text:
+                    turn.request.language === 'zh'
+                      ? '清单负责人是 Mira，截止日期为周五。'
+                      : 'Mira owns the launch checklist. It is due Friday.',
+                  citations,
+                },
+              }
+            : insufficientQuestionEvidence(turn.request.language),
+          provider: 'fixture',
+          configuration_version: 'synthetic-chat-v1',
+          prompt_version: snapshot.context
+            ? QUESTION_CONTEXT_PROMPT_VERSION
+            : QUESTION_PROMPT_VERSION,
+          usage,
+        },
+      }),
+    );
+  }
+  function failChat(id: string) {
+    const turn = chatTurn(id);
+    if (!turn || !['queued', 'running'].includes(turn.state))
+      throw new Error('Missing active synthetic question.');
+    const resumable = turn.attempt + 1 < 3;
+    chatTurns.set(
+      id,
+      chatTurnSchema.parse({
+        ...turn,
+        state: 'failed',
+        attempt: turn.attempt + 1,
+        last_event_id: turn.last_event_id + 1,
+        provider_requests: turn.provider_requests + 1,
+        uncertain_requests: turn.uncertain_requests + 1,
+        resume_available: resumable,
+        resume_token: resumable ? randomUUID() : null,
+        error: {
+          code: 'question_dispatch_unconfirmed',
+          message: 'Synthetic lost question response.',
+          retryable: false,
+        },
+      }),
+    );
+  }
   function send(response: ServerResponse, value: unknown, status = 200) {
     response.writeHead(status, { 'Content-Type': 'application/json' });
     response.end(status === 204 ? undefined : JSON.stringify(value));
@@ -492,6 +608,13 @@ export async function desktopFixture() {
         return send(response, { templates: SUMMARY_TEMPLATES });
       if (path === '/v1/summary-capabilities')
         return send(response, { long_meetings: LONG_SUMMARY_VERSION });
+      if (path === '/v1/chat-capabilities')
+        return send(response, {
+          questions: CHAT_VERSION,
+          max_attempts: 3,
+          max_pending_work: 8,
+          history_context: 'meeting-question-context-v1',
+        });
       if (path === '/v1/workspaces')
         return send(response, { workspaces: state.workspaces });
       if (path === '/v1/sync/snapshot') {
@@ -524,6 +647,30 @@ export async function desktopFixture() {
       const parts = path.split('/');
       const id = parts[3] ?? '';
       const existing = documents.get(id);
+      if (
+        ['chat-turns', 'chat-threads'].includes(parts[2] ?? '') &&
+        !state.chat_online
+      )
+        return error(response, 'service_unavailable', 503);
+      if (request.method === 'GET' && parts[2] === 'chat-turns') {
+        const turn = chatTurn(id);
+        return turn
+          ? send(response, turn)
+          : error(response, 'chat_not_found', 404);
+      }
+      if (request.method === 'GET' && parts[2] === 'chat-threads') {
+        const thread = chatThreads.get(id);
+        if (!thread || !documents.has(thread.document_id))
+          return error(response, 'chat_not_found', 404);
+        const after = Number(url.searchParams.get('after') ?? 0);
+        const turns = [...chatTurns.values()]
+          .filter((turn) => turn.thread_id === id && turn.position > after)
+          .sort((a, b) => a.position - b.position);
+        return send(response, {
+          turns: turns.slice(0, 50).map((turn) => chatTurn(turn.id)),
+          has_more: turns.length > 50,
+        });
+      }
       if (request.method === 'GET' && parts[2] === 'jobs') {
         const job = jobs.get(id);
         if (parts[4] === 'event-state') {
@@ -598,6 +745,22 @@ export async function desktopFixture() {
       }
       if (request.method === 'GET' && parts[2] === 'documents') {
         if (!existing) return error(response, 'document_not_found', 404);
+        if (parts[4] === 'chat-threads') {
+          if (!state.chat_online)
+            return error(response, 'service_unavailable', 503);
+          const offset = Number(url.searchParams.get('offset') ?? 0);
+          const threads = [...chatThreads.values()]
+            .filter((thread) => thread.document_id === id)
+            .sort(
+              (a, b) =>
+                b.created_at.localeCompare(a.created_at) ||
+                b.id.localeCompare(a.id),
+            );
+          return send(response, {
+            threads: threads.slice(offset, offset + 50),
+            has_more: threads.length > offset + 50,
+          });
+        }
         if (parts[4] === 'jobs')
           return send(response, {
             jobs: [...jobs.values()]
@@ -655,6 +818,203 @@ export async function desktopFixture() {
         : null;
       const key = `${request.method}:${path}:${request.headers['idempotency-key']}`;
       const hash = canonicalJson(body);
+      if (
+        request.method === 'POST' &&
+        parts[2] === 'documents' &&
+        parts[4] === 'chat-turns'
+      ) {
+        if (!existing) return error(response, 'document_not_found', 404);
+        if (!state.chat_online)
+          return error(response, 'service_unavailable', 503);
+        const value = chatSubmissionSchema.parse(body),
+          digest = createHash('sha256').update(hash).digest('hex'),
+          receipt = chatReceipts.get(key);
+        if (receipt) {
+          if (receipt.hash !== digest)
+            return error(response, 'idempotency_conflict', 409);
+          const turn = chatTurn(receipt.turn);
+          return turn
+            ? send(response, turn, 202)
+            : error(response, 'chat_request_deleted', 410);
+        }
+        if (
+          value.note_revision !== existing.revision ||
+          value.transcript_revision !== existing.transcript_revision
+        )
+          return error(response, 'revision_conflict', 409);
+        const old = value.thread_id
+          ? chatThreads.get(value.thread_id)
+          : undefined;
+        if (value.thread_id && (!old || old.document_id !== id))
+          return error(response, 'chat_not_found', 404);
+        if (
+          old &&
+          [...chatTurns.values()].some(
+            (turn) =>
+              turn.thread_id === old.id &&
+              ['queued', 'running'].includes(turn.state),
+          )
+        )
+          return error(response, 'chat_turn_pending', 409);
+        const thread = old
+          ? { ...old, last_position: old.last_position + 1 }
+          : {
+              id: randomUUID(),
+              document_id: id,
+              title: value.question.trim().slice(0, 200),
+              last_position: 1,
+              created_at: new Date().toISOString(),
+            };
+        const turn = chatTurnSchema.parse({
+          id: randomUUID(),
+          thread_id: thread.id,
+          document_id: id,
+          position: thread.last_position,
+          request: value,
+          mode: 'full',
+          state: 'queued',
+          attempt: 0,
+          input_stale: false,
+          result: null,
+          error: null,
+          resume_available: false,
+          resume_token: null,
+          provider_requests: 0,
+          uncertain_requests: 0,
+          last_event_id: 1,
+          created_at: new Date().toISOString(),
+        });
+        const units: ChatSource['excerpts'] = existing.notes.trim()
+          ? [
+              {
+                citation: { source: 'note', id, revision: existing.revision },
+                text: existing.notes,
+                text_start: 0,
+                text_end: existing.notes.length,
+                start_ms: null,
+                end_ms: null,
+                overlap: false,
+              },
+            ]
+          : [];
+        for (const segment of transcripts.get(
+          `${id}:${existing.transcript_revision}`,
+        )?.segments ?? [])
+          units.push({
+            citation: {
+              source: 'transcript',
+              id: segment.id,
+              revision: existing.transcript_revision,
+            },
+            text: segment.text,
+            text_start: 0,
+            text_end: segment.text.length,
+            start_ms: segment.start_ms,
+            end_ms: segment.end_ms,
+            overlap: false,
+          });
+        const context = [...chatTurns.values()].some(
+          (previous) =>
+            previous.thread_id === thread.id && previous.state === 'succeeded',
+        );
+        chatThreads.set(thread.id, chatThreadSchema.parse(thread));
+        chatTurns.set(turn.id, turn);
+        chatSnapshots.set(turn.id, { units, context });
+        chatReceipts.set(key, { hash: digest, turn: turn.id });
+        if (state.lose_chat_response) {
+          state.lose_chat_response = false;
+          response.destroy();
+          return;
+        }
+        return send(response, turn, 202);
+      }
+      if (parts[2] === 'chat-turns' && request.method === 'POST') {
+        let turn = chatTurn(id);
+        if (!turn) return error(response, 'chat_not_found', 404);
+        if (parts[4] === 'citation') {
+          const citation = citationSchema.parse(body);
+          if (
+            !turn.result?.answer.answer.citations.some(
+              (item) => citationKey(item) === citationKey(citation),
+            )
+          )
+            return error(response, 'citation_not_found', 404);
+          return send(response, {
+            document_id: turn.document_id,
+            turn_id: id,
+            citation,
+            excerpts: chatSnapshots
+              .get(id)!
+              .units.filter(
+                (unit) => citationKey(unit.citation) === citationKey(citation),
+              ),
+          });
+        }
+        if (parts[4] === 'resume') {
+          const value = chatResumeSchema.parse(body);
+          state.chat_resume_tokens.push(value.resume_token);
+          const tokens = chatResumes.get(id) ?? new Set<string>();
+          if (!tokens.has(value.resume_token)) {
+            if (
+              !turn.resume_available ||
+              turn.resume_token !== value.resume_token
+            )
+              return error(response, 'question_not_resumable', 409);
+            tokens.add(value.resume_token);
+            chatResumes.set(id, tokens);
+            turn = {
+              ...turn,
+              state: 'queued',
+              error: null,
+              resume_available: false,
+              resume_token: null,
+              last_event_id: turn.last_event_id + 1,
+            };
+            chatTurns.set(id, turn);
+          }
+          if (state.lose_chat_resume_response) {
+            state.lose_chat_resume_response = false;
+            response.destroy();
+            return;
+          }
+          return send(response, turn, 202);
+        }
+        if (parts[4] === 'cancel') {
+          z.strictObject({ confirmed: z.literal(true) }).parse(body);
+          if (!['succeeded', 'cancelled'].includes(turn.state)) {
+            turn = {
+              ...turn,
+              state: 'cancelled',
+              error: null,
+              resume_available: false,
+              resume_token: null,
+              last_event_id: turn.last_event_id + 1,
+            };
+            chatTurns.set(id, turn);
+            chatSnapshots.delete(id);
+          }
+          return send(response, turn);
+        }
+      }
+      if (parts[2] === 'chat-threads' && request.method === 'DELETE') {
+        const thread = chatThreads.get(id);
+        if (!thread || !documents.has(thread.document_id))
+          return error(response, 'chat_not_found', 404);
+        z.strictObject({ confirmed: z.literal(true) }).parse(body);
+        for (const turn of chatTurns.values())
+          if (turn.thread_id === id) {
+            chatTurns.delete(turn.id);
+            chatSnapshots.delete(turn.id);
+            chatResumes.delete(turn.id);
+          }
+        chatThreads.delete(id);
+        if (state.lose_chat_delete_response) {
+          state.lose_chat_delete_response = false;
+          response.destroy();
+          return;
+        }
+        return send(response, { deleted: true });
+      }
       const replay = replays.get(key);
       if (replay) {
         if (hash !== replay.hash)
@@ -963,6 +1323,8 @@ export async function desktopFixture() {
     publishSummary,
     previewSummary,
     failSummary,
+    publishChat,
+    failChat,
     registerRecording(
       document_id: string,
       value: {

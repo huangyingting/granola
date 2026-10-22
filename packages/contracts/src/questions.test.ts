@@ -10,6 +10,7 @@ import {
   questionSearchTerms,
   insufficientQuestionEvidence,
   questionContextSchema,
+  chatSourceSchema,
   validateQuestionAnswer,
   type QuestionEvidence,
 } from './questions.js';
@@ -45,6 +46,30 @@ const answered = () => ({
   status: 'answered',
 });
 describe('versioned current-meeting question evidence', () => {
+  it('binds every frozen chat excerpt to its one requested original citation and document', () => {
+    const source = {
+      document_id: document,
+      turn_id: randomUUID(),
+      citation: evidence.units[0]!.citation,
+      excerpts: evidence.units,
+    };
+    expect(chatSourceSchema.parse(source)).toEqual(source);
+    expect(
+      chatSourceSchema.safeParse({ ...source, document_id: randomUUID() })
+        .success,
+    ).toBe(false);
+    expect(
+      chatSourceSchema.safeParse({
+        ...source,
+        excerpts: [
+          {
+            ...evidence.units[0],
+            citation: { ...source.citation, revision: 4 },
+          },
+        ],
+      }).success,
+    ).toBe(false);
+  });
   it('bounds server-owned conversation context independently and rejects client-shaped extra source fields', () => {
     const turn = { question: 'Who owns the checklist?', answer: 'Mira.' };
     const context = { version: 'meeting-question-context-v1', turns: [turn] };

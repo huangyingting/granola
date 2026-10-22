@@ -313,6 +313,50 @@ async function start() {
             : { ok: true, state: state() };
         }
         const db = database();
+        if (command.operation === 'getChat') {
+          const view = await workspace().chat.read(command);
+          return desktopResponseSchema.parse({
+            ok: true,
+            chat_view: { scope: command.scope, view },
+          });
+        }
+        if (command.operation === 'getChatSource') {
+          const source = await workspace().chat.source(command);
+          return desktopResponseSchema.parse({
+            ok: true,
+            chat_source: { scope: command.scope, source },
+          });
+        }
+        if (
+          command.operation === 'askMeeting' ||
+          command.operation === 'controlChatTurn' ||
+          command.operation === 'deleteChatThread'
+        ) {
+          const active = workspace();
+          let thread: string | null;
+          if (command.operation === 'deleteChatThread') {
+            await active.chat.remove(command);
+            thread = null;
+          } else {
+            const turn =
+              command.operation === 'askMeeting'
+                ? await active.chat.start(command)
+                : await active.chat.control(command);
+            thread = turn.thread_id;
+          }
+          const view = await active.chat.read({
+            operation: 'getChat',
+            scope: command.scope,
+            id: command.id,
+            thread_id: thread,
+            offset: 0,
+            refresh: false,
+          });
+          return desktopResponseSchema.parse({
+            ok: true,
+            chat_view: { scope: command.scope, view },
+          });
+        }
         if (command.operation === 'getAccountUsage') {
           const account = await workspace().accountUsage(command.scope);
           return desktopResponseSchema.parse({

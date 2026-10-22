@@ -432,6 +432,24 @@ export class LocalStore {
     this.get(profile, document);
     this.deleteValue(profile, `artifact:${document}:${id}`);
   }
+  deleteArtifactPrefix(
+    profile: string,
+    document: string,
+    prefix: string,
+  ): void {
+    this.get(profile, document);
+    z.string()
+      .min(1)
+      .max(200)
+      .refine((value) => !value.includes('\0'))
+      .parse(prefix);
+    const name = `artifact:${document}:${prefix}`;
+    this.database
+      .prepare(
+        'DELETE FROM vault WHERE profile=? AND document_id=? AND substr(id,1,length(?))=?',
+      )
+      .run(profile, document, name, name);
+  }
   putArtifact(
     profile: string,
     document: string,

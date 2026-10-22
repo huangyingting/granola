@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -85,6 +85,96 @@ describe('Windows desktop synthetic service contract', () => {
       preserve_unsent: true,
     });
     expect(controller.snapshot().connection.user_id).toBeNull();
+  });
+  it('serves separate chat receipts, frozen sources, lost recovery replies and deletion acknowledgements through Main', async () => {
+    const document = fixture.seed(
+      'Mira owns the launch checklist. It is due Friday.',
+      'Frozen chat transcript.',
+    );
+    await connect();
+    const command = {
+      operation: 'askMeeting' as const,
+      scope: controller.scope,
+      id: document.id,
+      question: 'Who owns the launch checklist?',
+      language: 'en' as const,
+      confirmed: true as const,
+      new_attempt: true,
+      consent_id: randomUUID(),
+    };
+    const read = () =>
+      controller.chat.read({
+        operation: 'getChat',
+        scope: controller.scope,
+        id: document.id,
+        offset: 0,
+        refresh: true,
+      });
+    await read();
+    fixture.state.lose_chat_response = true;
+    await expect(controller.chat.start(command)).rejects.toMatchObject({
+      code: 'service_unavailable',
+    });
+    expect(fixture.state.chatTurns.size).toBe(1);
+    const turn = await controller.chat.start({
+      ...command,
+      new_attempt: false,
+    });
+    fixture.failChat(turn.id);
+    await read();
+    const failed = fixture.state.chatTurns.get(turn.id)!;
+    const resume = {
+      operation: 'controlChatTurn' as const,
+      scope: controller.scope,
+      id: document.id,
+      thread_id: turn.thread_id,
+      turn_id: turn.id,
+      action: 'resume' as const,
+      resume_token: failed.resume_token!,
+      confirmed: true as const,
+    };
+    fixture.state.lose_chat_resume_response = true;
+    await expect(controller.chat.control(resume)).rejects.toMatchObject({
+      code: 'service_unavailable',
+    });
+    fixture.failChat(turn.id);
+    const second = fixture.state.chatTurns.get(turn.id)!;
+    expect((await controller.chat.control(resume)).state).toBe('failed');
+    expect(fixture.state.chat_resume_tokens).toEqual([
+      failed.resume_token,
+      failed.resume_token,
+    ]);
+    await controller.chat.control({
+      ...resume,
+      resume_token: second.resume_token!,
+    });
+    fixture.publishChat(turn.id);
+    const view = await read(),
+      completed = view.turns[0]!;
+    expect(completed.result?.answer.status).toBe('answered');
+    const source = await controller.chat.source({
+      operation: 'getChatSource',
+      scope: controller.scope,
+      id: document.id,
+      thread_id: turn.thread_id,
+      turn_id: turn.id,
+      citation: completed.result!.answer.answer.citations[0]!,
+    });
+    expect(source.excerpts[0]?.text).toBe(document.notes);
+    const remove = {
+      operation: 'deleteChatThread' as const,
+      scope: controller.scope,
+      id: document.id,
+      thread_id: turn.thread_id,
+      confirmed: true as const,
+    };
+    fixture.state.lose_chat_delete_response = true;
+    await expect(controller.chat.remove(remove)).rejects.toMatchObject({
+      code: 'service_unavailable',
+    });
+    await controller.chat.remove(remove);
+    expect((await read()).threads).toEqual([]);
+    expect(fixture.state.jobs.size).toBe(0);
   });
   it('reproduces stale-editor recovery without overwriting the newer server version and then revokes the account', async () => {
     const document = fixture.seed('Original source.');

@@ -1168,6 +1168,76 @@ describe('encrypted local drafts and durable outbox', () => {
     ).toThrow('no longer available');
     expect(store.list(profile)).toHaveLength(0);
   });
+  it('deletes only the exact literal artifact prefix in its document and profile', () => {
+    const store = open(),
+      source = store.create('fixtures', fields('Original.')),
+      other = store.create('fixtures', fields('Other.'));
+    store.applyRemote(profile, remote(source));
+    store.applyRemote(profile, remote(other));
+    store.applyRemote('another-account', remote(source));
+    store.putArtifact(
+      profile,
+      source.id,
+      'chat-thread:%_:source',
+      'Remove only this private source.',
+    );
+    store.putArtifact(
+      profile,
+      source.id,
+      'chat-thread:other:source',
+      'Keep another thread.',
+    );
+    store.putArtifact(
+      profile,
+      source.id,
+      'summary-source:1',
+      'Keep the summary.',
+    );
+    store.putArtifact(
+      profile,
+      other.id,
+      'chat-thread:%_:source',
+      'Keep another document.',
+    );
+    store.putArtifact(
+      'another-account',
+      source.id,
+      'chat-thread:%_:source',
+      'Keep another account.',
+    );
+    store.deleteArtifactPrefix(profile, source.id, 'chat-thread:%_:');
+    expect(
+      store.getArtifact(
+        profile,
+        source.id,
+        'chat-thread:%_:source',
+        z.string(),
+      ),
+    ).toBeNull();
+    expect(
+      store.getArtifact(
+        profile,
+        source.id,
+        'chat-thread:other:source',
+        z.string(),
+      ),
+    ).toBe('Keep another thread.');
+    expect(
+      store.getArtifact(profile, source.id, 'summary-source:1', z.string()),
+    ).toBe('Keep the summary.');
+    expect(
+      store.getArtifact(profile, other.id, 'chat-thread:%_:source', z.string()),
+    ).toBe('Keep another document.');
+    expect(
+      store.getArtifact(
+        'another-account',
+        source.id,
+        'chat-thread:%_:source',
+        z.string(),
+      ),
+    ).toBe('Keep another account.');
+    expect(() => store.deleteArtifactPrefix(profile, source.id, '')).toThrow();
+  });
   it('removes artifacts on remote deletion even when local recovery keeps the draft', () => {
     const store = open();
     const source = store.create('fixtures', fields('Original.'));

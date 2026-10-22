@@ -22,6 +22,11 @@ import {
   summarySubmissionSchema,
   summaryWatchSchema,
 } from './generation.js';
+import {
+  questionRequestSchema,
+  chatViewSchema,
+  chatSourceSchema,
+} from './questions.js';
 
 export const editableSchema = z.strictObject({
   title: z
@@ -49,6 +54,56 @@ const scoped = { scope: z.number().int().positive() };
 const summaryScoped = { ...scoped, id: resourceId, job_id: resourceId };
 export const desktopCommandSchema = z.discriminatedUnion('operation', [
   z.strictObject({ operation: z.literal('bootstrap') }),
+  z.strictObject({
+    operation: z.literal('getChat'),
+    ...scoped,
+    id: resourceId,
+    thread_id: resourceId.nullable().optional(),
+    offset: z.number().int().min(0).max(10_000).multipleOf(50),
+    after: z.number().int().min(0).max(99_950).multipleOf(50).optional(),
+    refresh: z.boolean(),
+  }),
+  z.strictObject({
+    operation: z.literal('askMeeting'),
+    ...scoped,
+    id: resourceId,
+    thread_id: resourceId.optional(),
+    question: questionRequestSchema.shape.question,
+    language: questionRequestSchema.shape.language,
+    confirmed: z.literal(true),
+    new_attempt: z.boolean(),
+    consent_id: resourceId,
+  }),
+  z
+    .strictObject({
+      operation: z.literal('controlChatTurn'),
+      ...scoped,
+      id: resourceId,
+      thread_id: resourceId,
+      turn_id: resourceId,
+      action: z.enum(['cancel', 'resume']),
+      resume_token: resourceId.optional(),
+      confirmed: z.literal(true),
+    })
+    .refine(
+      (command) =>
+        (command.action === 'resume') === (command.resume_token !== undefined),
+    ),
+  z.strictObject({
+    operation: z.literal('deleteChatThread'),
+    ...scoped,
+    id: resourceId,
+    thread_id: resourceId,
+    confirmed: z.literal(true),
+  }),
+  z.strictObject({
+    operation: z.literal('getChatSource'),
+    ...scoped,
+    id: resourceId,
+    thread_id: resourceId,
+    turn_id: resourceId,
+    citation: chatSourceSchema.shape.citation,
+  }),
   z.strictObject({
     operation: z.literal('watchSummary'),
     ...summaryScoped,
@@ -344,6 +399,14 @@ export const desktopChangeSchema = z.strictObject({
   kind: z.enum(['data', 'scope', 'revoked', 'status', 'audio']),
 });
 export const desktopResponseSchema = z.union([
+  z.strictObject({
+    ok: z.literal(true),
+    chat_view: z.strictObject({ ...scoped, view: chatViewSchema }),
+  }),
+  z.strictObject({
+    ok: z.literal(true),
+    chat_source: z.strictObject({ ...scoped, source: chatSourceSchema }),
+  }),
   z.strictObject({
     ok: z.literal(true),
     summary_progress: z.strictObject({

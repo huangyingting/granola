@@ -20,6 +20,7 @@ import { NoteExtras } from './NoteExtras.js';
 import { AudioDevices } from './AudioDevices.js';
 import { RecordingBar, RecordingPanel } from './Recording.js';
 import { SummaryPanel } from './Summaries.js';
+import { ChatPanel } from './Chat.js';
 
 declare global {
   interface Window {
@@ -911,6 +912,9 @@ function Note({
         })}
       </div>
       <EditorContent editor={editor} className="editor" />
+      {draft.status !== 'deleted_remote' && (
+        <ChatPanel state={state} draft={draft} beforeStart={save} />
+      )}
       <footer className="editor-footer">
         <span>
           {

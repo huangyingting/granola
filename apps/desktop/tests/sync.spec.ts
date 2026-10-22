@@ -56,6 +56,257 @@ async function synchronize(application: ElectronApplication) {
     });
   });
 }
+test('recovers consented chat and recovery receipts across Windows restarts, inspects encrypted frozen history offline and reconciles conversation deletion', async () => {
+  test.setTimeout(180_000);
+  const directory = await mkdtemp(join(tmpdir(), 'windows-notes-chat-ui-'));
+  const fixture = await desktopFixture();
+  const original =
+    'Original UI chat evidence: Mira owns the launch checklist. It is due Friday.';
+  const question = 'Who owns the launch checklist?';
+  const remote = fixture.seed(original, 'Frozen UI chat transcript evidence.');
+  let application: ElectronApplication | null = null;
+  try {
+    application = await launch(directory);
+    let page = await application.firstWindow();
+    await page.getByRole('button', { name: /Account & sync/ }).click();
+    await page.getByRole('textbox', { name: 'Service URL' }).fill(fixture.url);
+    await page
+      .getByRole('button', { name: 'Sign in with browser', exact: true })
+      .click();
+    await page
+      .getByRole('button', {
+        name: /^Synthetic cloud workspace (Open workspace|Current workspace)$/,
+      })
+      .click();
+    await page.getByText('Ask this meeting', { exact: true }).click();
+    await page
+      .getByRole('textbox', { name: 'Meeting question', exact: true })
+      .fill(question);
+    await page
+      .getByRole('combobox', { name: 'Chat answer language' })
+      .selectOption('zh');
+    await expect(
+      page.getByRole('button', { name: 'Ask question', exact: true }),
+    ).toBeDisabled();
+    await page
+      .getByRole('checkbox', {
+        name: 'Send this question and frozen meeting evidence to Azure for an answer.',
+      })
+      .check();
+    fixture.state.lose_chat_response = true;
+    await page
+      .getByRole('button', { name: 'Ask question', exact: true })
+      .click();
+    await expect.poll(() => fixture.state.chatTurns.size).toBe(1);
+    await expect(
+      page.getByRole('button', {
+        name: 'Recover question request',
+        exact: true,
+      }),
+    ).toBeVisible();
+    await close(application);
+    application = null;
+    application = await launch(directory);
+    page = await application.firstWindow();
+    await page.getByText('Ask this meeting', { exact: true }).click();
+    await expect(
+      page.getByRole('textbox', { name: 'Meeting question', exact: true }),
+    ).toHaveValue(question);
+    await expect(
+      page.getByRole('textbox', { name: 'Meeting question', exact: true }),
+    ).toBeDisabled();
+    await expect(
+      page.getByRole('combobox', { name: 'Chat answer language' }),
+    ).toHaveValue('zh');
+    await page
+      .getByRole('checkbox', {
+        name: 'Recover the original authorized question, submitting it only if its receipt was lost.',
+      })
+      .check();
+    await page
+      .getByRole('button', { name: 'Recover question request', exact: true })
+      .click();
+    await expect(
+      page.getByRole('button', {
+        name: 'Recover question request',
+        exact: true,
+      }),
+    ).toHaveCount(0);
+    expect(fixture.state.chatTurns.size).toBe(1);
+    const turn = [...fixture.state.chatTurns.values()][0]!;
+    fixture.failChat(turn.id);
+    await page
+      .getByRole('button', { name: 'Refresh answers', exact: true })
+      .click();
+    await expect(
+      page.getByRole('button', { name: 'Resume answer', exact: true }),
+    ).toBeDisabled();
+    const firstToken = fixture.state.chatTurns.get(turn.id)!.resume_token!;
+    await page
+      .getByRole('checkbox', {
+        name: 'Authorize another Azure answer attempt; previous usage may still be charged.',
+      })
+      .check();
+    fixture.state.lose_chat_resume_response = true;
+    await page
+      .getByRole('button', { name: 'Resume answer', exact: true })
+      .click();
+    await expect(page.getByLabel('Saved chat recovery')).toBeVisible();
+    fixture.failChat(turn.id);
+    const secondToken = fixture.state.chatTurns.get(turn.id)!.resume_token!;
+    await close(application);
+    application = null;
+    application = await launch(directory);
+    page = await application.firstWindow();
+    await page.getByText('Ask this meeting', { exact: true }).click();
+    await page
+      .getByRole('checkbox', {
+        name: 'Reconcile the original confirmed recovery.',
+      })
+      .check();
+    await page
+      .getByRole('button', { name: 'Recover confirmed attempt', exact: true })
+      .click();
+    await expect(page.getByLabel('Saved chat recovery')).toHaveCount(0);
+    expect(fixture.state.chat_resume_tokens).toEqual([firstToken, firstToken]);
+    expect(fixture.state.chatTurns.get(turn.id)?.state).toBe('failed');
+    await page
+      .getByRole('checkbox', {
+        name: 'Authorize another Azure answer attempt; previous usage may still be charged.',
+      })
+      .check();
+    await page
+      .getByRole('button', { name: 'Resume answer', exact: true })
+      .click();
+    await expect.poll(() => fixture.state.chat_resume_tokens.length).toBe(3);
+    expect(fixture.state.chat_resume_tokens).toEqual([
+      firstToken,
+      firstToken,
+      secondToken,
+    ]);
+    fixture.publishChat(turn.id);
+    await page
+      .getByRole('button', { name: 'Refresh answers', exact: true })
+      .click();
+    await expect(page.getByLabel('Completed meeting answer')).toContainText(
+      '清单负责人是 Mira',
+    );
+    await page
+      .getByRole('button', { name: 'Chat source 1', exact: true })
+      .click();
+    await expect(page.getByLabel('Frozen chat source')).toContainText(original);
+    await page
+      .getByRole('button', { name: 'Close source', exact: true })
+      .click();
+    await page
+      .getByRole('textbox', { name: 'Meeting question', exact: true })
+      .fill('那截止日期呢？');
+    await page
+      .getByRole('checkbox', {
+        name: 'Send this question and frozen meeting evidence to Azure for an answer.',
+      })
+      .check();
+    await page
+      .getByRole('button', { name: 'Ask question', exact: true })
+      .click();
+    await expect.poll(() => fixture.state.chatTurns.size).toBe(2);
+    const followup = [...fixture.state.chatTurns.values()].find(
+      (value) => value.id !== turn.id,
+    )!;
+    expect(followup.thread_id).toBe(turn.thread_id);
+    fixture.publishChat(followup.id);
+    await page
+      .getByRole('button', { name: 'Refresh answers', exact: true })
+      .click();
+    await expect(page.getByLabel('Completed meeting answer')).toHaveCount(2);
+    fixture.change(
+      remote.id,
+      'Later human UI notes, not the frozen answer evidence.',
+    );
+    await synchronize(application);
+    await expect(
+      page.getByRole('textbox', { name: 'Meeting notes', exact: true }),
+    ).toHaveText('Later human UI notes, not the frozen answer evidence.');
+    await page
+      .getByRole('button', { name: 'Chat source 1', exact: true })
+      .first()
+      .click();
+    await expect(page.getByLabel('Frozen chat source')).toContainText(original);
+    await close(application);
+    application = null;
+    fixture.state.chat_online = false;
+    application = await launch(directory);
+    page = await application.firstWindow();
+    await page.getByText('Ask this meeting', { exact: true }).click();
+    await expect(page.getByLabel('Completed meeting answer')).toHaveCount(2);
+    await page
+      .getByRole('button', { name: 'Chat source 1', exact: true })
+      .first()
+      .click();
+    await expect(page.getByLabel('Frozen chat source')).toContainText(original);
+    await expect(
+      page.getByRole('textbox', { name: 'Meeting notes', exact: true }),
+    ).toHaveText('Later human UI notes, not the frozen answer evidence.');
+    fixture.state.chat_online = true;
+    await page
+      .getByRole('button', { name: 'Refresh answers', exact: true })
+      .click();
+    await page
+      .getByRole('button', { name: 'Delete conversation', exact: true })
+      .click();
+    await expect(
+      page.getByRole('button', {
+        name: 'Delete conversation permanently',
+        exact: true,
+      }),
+    ).toBeDisabled();
+    await page
+      .getByRole('checkbox', {
+        name: 'Delete this conversation and its saved sources. Earlier provider usage is retained.',
+      })
+      .check();
+    fixture.state.lose_chat_delete_response = true;
+    await page
+      .getByRole('button', {
+        name: 'Delete conversation permanently',
+        exact: true,
+      })
+      .click();
+    await expect(
+      page.getByLabel('Pending conversation deletion'),
+    ).toBeVisible();
+    await expect(page.getByLabel('Completed meeting answer')).toHaveCount(0);
+    await expect(page.getByLabel('Frozen chat source')).toHaveCount(0);
+    await close(application);
+    application = null;
+    const stored = await readFile(join(directory, 'notes.sqlite'));
+    expect(stored.includes(Buffer.from(question))).toBe(false);
+    expect(stored.includes(Buffer.from(original))).toBe(false);
+    application = await launch(directory);
+    page = await application.firstWindow();
+    await page.getByText('Ask this meeting', { exact: true }).click();
+    await page
+      .getByRole('button', {
+        name: 'Finish conversation deletion',
+        exact: true,
+      })
+      .click();
+    await expect(page.getByLabel('Pending conversation deletion')).toHaveCount(
+      0,
+    );
+    expect(fixture.state.chatTurns.size).toBe(0);
+    expect(fixture.state.jobs.size).toBe(0);
+    expect(fixture.state.documents.get(remote.id)?.notes).toBe(
+      'Later human UI notes, not the frozen answer evidence.',
+    );
+    expect(fixture.state.failures).toEqual([]);
+    expect(fixture.issuer.state.failures).toEqual([]);
+  } finally {
+    if (application) await close(application);
+    await fixture.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 test('recovers one summary and resume receipt, inspects frozen evidence, persists review edits and explicitly appends and exports without replacing notes', async () => {
   test.setTimeout(120_000);
   const directory = await mkdtemp(join(tmpdir(), 'windows-notes-summary-ui-'));

@@ -714,9 +714,9 @@ export class ChatStore {
     await this.database.transaction(async (tx) => {
       await this.authorize(tx, user, visible.document_id);
       const row = await this.row(user, id, tx, true);
-      if (terminal(row.state)) return;
+      if (row.state === 'succeeded' || row.state === 'cancelled') return;
       await tx.query(
-        "UPDATE chat_turns SET state='cancelled',evidence=NULL,lease_until=NULL,lease_token=lease_token+1,preview_text=NULL,resume_token=NULL WHERE id=$1",
+        "UPDATE chat_turns SET state='cancelled',evidence=NULL,error=NULL,lease_until=NULL,lease_token=lease_token+1,preview_text=NULL,resume_token=NULL WHERE id=$1",
         [id],
       );
       await this.event(tx, id, 'turn.cancelled', { state: 'cancelled' });

@@ -360,7 +360,8 @@ therefore pause when their account allowance cannot reserve another stage.
 Original cited segments remain inspectable after a newer canonical transcript
 replaces the selected revision. These structural checks do not prove semantic
 support, complete decision/action recall or language quality; approved
-real-meeting evaluation remains a release gate. Desktop chat is not implemented yet.
+real-meeting evaluation remains a release gate. Desktop chat workflows are described
+below; desktop chat streaming/replay remains unfinished.
 
 ### Current-meeting questions and durable chat
 
@@ -411,7 +412,8 @@ priority. Known failed usage and uncertain earlier calls remain accounted for.
 A later question supersedes recovery of an earlier failed turn. Provider/prompt
 substitutions require a new request instead of silently changing a resumed call.
 
-`POST /v1/chat-turns/{id}/cancel` requires `{confirmed:true}`.
+`POST /v1/chat-turns/{id}/cancel` requires `{confirmed:true}`. Cancelling a failed
+question also revokes its recovery token, without dispatching another model call.
 `POST /v1/chat-turns/{id}/citation` accepts only a completed answer's citation and
 returns its authorized frozen original excerpts, even after note/transcript edits.
 `DELETE /v1/chat-threads/{id}` requires `{confirmed:true}` and removes its turns,
@@ -423,8 +425,29 @@ successful answer sources survive cache expiry until conversation/document delet
 
 Apply migration `009_chat.sql` through `pnpm db:migrate` before starting the
 updated API/worker. Existing strict job/result contracts are unchanged.
-Main-owned desktop chat intents, encrypted offline history/replay and the chat UI
-still need implementation; server support is not a finished desktop chat feature.
+
+The desktop's inline **Ask this meeting** panel supports English/Chinese questions,
+same-thread follow-ups, conversation/history paging, cancellation, explicit recovery
+and frozen cited-source inspection without replacing human notes. Main checks the
+server capability, synchronizes and validates the selected revisions, then encrypts
+the exact consent/body/key before submission. An unresolved accepted receipt blocks
+a fresh paid request; **Recover question request** reuses its original input even
+after notes change or the app restarts. Recovery tokens are encrypted before their
+POST and a lost recovery reply can only replay that same token, not authorize a
+later attempt. **Cancel saved recovery** revokes it without resending a model call.
+
+Visited history pages and inspected original source excerpts are encrypted with
+the owning account/workspace/document. Cached offline content is labelled; uncached
+pages/sources require reconnection. Late replies cannot cross a workspace change
+or resurrect deleted conversation content. Deletion scrubs that thread's private
+cache first and durably records a pending acknowledgement; a lost deletion reply
+is reconciled against current document access. Body-free local tombstones continue
+to fence older reads after deletion succeeds. Other threads, summaries and notes
+are preserved. Resolve an unknown question receipt before deleting its conversation.
+
+Use **Refresh answers** to read durable question status/results. Desktop chat does
+not yet consume the server's SSE previews, event cursors or replay; this workflow
+must not be mistaken for finished desktop streaming or production acceptance.
 
 ### Live generation and replay
 
@@ -723,7 +746,7 @@ cancelled/completed jobs cannot be resumed. Recording tracks remain bounded to f
 hours each (the desktop capture preview stops at one hour), with at most two tracks.
 
 This first slice uses PostgreSQL polling/leases as the durable scheduler rather
-than introducing unused Redis/BullMQ infrastructure. Desktop chat and
+than introducing unused Redis/BullMQ infrastructure. Desktop chat event replay and
 the remaining production release gates are still implementation work.
 Durable usage reservations and receipts are implemented as described above;
 they do not provide exactly-once billing or reconcile Azure invoices.

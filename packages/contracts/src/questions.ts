@@ -11,6 +11,7 @@ import {
 import { summaryEvidenceUnitSchema } from './evidence.js';
 
 export const QUESTION_VERSION = 'meeting-question-v1';
+export const CHAT_VERSION = 'durable-questions-v1';
 export const QUESTION_RETRIEVAL_VERSION = 'meeting-lexical-v1';
 export const QUESTION_PROMPT_VERSION = 'meeting-question-answer-v1';
 export const QUESTION_CONTEXT_PROMPT_VERSION =
@@ -251,9 +252,62 @@ export const chatResumeSchema = z.strictObject({
   confirmed: z.literal(true),
   resume_token: resourceId,
 });
-export const chatSourceSchema = z.strictObject({
-  document_id: resourceId,
-  turn_id: resourceId,
-  citation: citationSchema,
-  excerpts: z.array(summaryEvidenceUnitSchema).min(1).max(256),
+export const chatSourceSchema = z
+  .strictObject({
+    document_id: resourceId,
+    turn_id: resourceId,
+    citation: citationSchema,
+    excerpts: z.array(summaryEvidenceUnitSchema).min(1).max(256),
+  })
+  .refine(
+    (value) =>
+      (value.citation.source !== 'note' ||
+        value.citation.id === value.document_id) &&
+      value.excerpts.every(
+        (unit) => citationKey(unit.citation) === citationKey(value.citation),
+      ),
+  );
+export const chatCapabilitiesSchema = z.strictObject({
+  questions: z.string().min(1).max(100),
+  max_attempts: z.number().int().min(1).max(100),
+  max_pending_work: z.number().int().min(1).max(100),
+  history_context: z.string().min(1).max(100),
 });
+export const chatThreadPageSchema = z.strictObject({
+  threads: z.array(chatThreadSchema).max(50),
+  has_more: z.boolean(),
+});
+export const chatTurnPageSchema = z.strictObject({
+  turns: z.array(chatTurnSchema).max(50),
+  has_more: z.boolean(),
+});
+export const chatSubmissionViewSchema = z.strictObject({
+  question: questionRequestSchema.shape.question,
+  language: questionRequestSchema.shape.language,
+  consent_id: resourceId,
+  thread_id: resourceId.nullable(),
+  turn_id: resourceId.nullable(),
+  rejected: z.boolean(),
+});
+export const chatRecoveryViewSchema = z.strictObject({
+  thread_id: resourceId,
+  turn_id: resourceId,
+  resume_token: resourceId,
+});
+export const chatViewSchema = z.strictObject({
+  document_id: resourceId,
+  offset: z.number().int().min(0).max(10_000),
+  threads: chatThreadPageSchema.shape.threads,
+  threads_has_more: z.boolean(),
+  thread_id: resourceId.nullable(),
+  after: z.number().int().min(0).max(100_000),
+  turns: chatTurnPageSchema.shape.turns,
+  turns_has_more: z.boolean(),
+  history_complete: z.boolean(),
+  cached: z.boolean(),
+  submission: chatSubmissionViewSchema.nullable(),
+  recovery: chatRecoveryViewSchema.nullable(),
+  deleting_thread_id: resourceId.nullable(),
+});
+export type ChatView = z.infer<typeof chatViewSchema>;
+export type ChatSource = z.infer<typeof chatSourceSchema>;
