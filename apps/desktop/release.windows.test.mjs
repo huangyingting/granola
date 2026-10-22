@@ -10,26 +10,36 @@ import {
   verifiedFile,
 } from './release.mjs';
 
+function signedReference() {
+  if (!process.env.ProgramFiles)
+    throw new Error(
+      'The Windows PowerShell 7 signed test reference is unavailable.',
+    );
+  return join(process.env.ProgramFiles, 'PowerShell', '7', 'pwsh.exe');
+}
+
 describe.skipIf(process.platform !== 'win32')(
   'actual Windows signed-candidate verification',
   () => {
-    it('accepts the trusted timestamped Node runtime only with its exact signer and rejects a different certificate pin', async () => {
-      const observed = await inspectWindowsSignature(process.execPath);
+    it('accepts the trusted timestamped Microsoft reference only with its exact signer and rejects a different certificate pin', async () => {
+      const reference = signedReference();
+      const observed = await inspectWindowsSignature(reference);
       expect(observed).toMatchObject({
         status: 'Valid',
         signature_type: 'Authenticode',
         timestamped: true,
+        publisher: 'Microsoft Corporation',
       });
       const policy = {
         certificate_sha256: observed.certificate_sha256,
         publisher: observed.publisher,
       };
-      const measured = await verifiedFile(process.execPath, policy);
+      const measured = await verifiedFile(reference, policy);
       expect(measured).toMatchObject(policy);
       expect(measured.sha256).toMatch(/^[0-9a-f]{64}$/);
       expect(measured.sha512).toMatch(/^[A-Za-z0-9+/]{86}==$/);
       await expect(
-        verifiedFile(process.execPath, {
+        verifiedFile(reference, {
           ...policy,
           certificate_sha256: '0'.repeat(64),
         }),
@@ -39,7 +49,7 @@ describe.skipIf(process.platform !== 'win32')(
       const directory = await mkdtemp(join(tmpdir(), 'notes-tampered-pe-'));
       try {
         const file = join(directory, 'tampered.exe');
-        await copyFile(process.execPath, file);
+        await copyFile(signedReference(), file);
         const handle = await open(file, 'r+');
         try {
           const dos = Buffer.alloc(64);

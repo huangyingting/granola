@@ -332,7 +332,8 @@ in `finally`, and uploads only a successfully verified installer and public rece
 It does not publish a GitHub release or run on pull requests.
 
 Normal CI needs no private certificate: it checks the policy, staging failures
-and actual Windows verification against the signed Node runtime, a tampered copy
+and actual Windows verification against the preinstalled Microsoft-signed
+PowerShell 7 executable, a tampered copy
 and a compiled unsigned PE without adding a test CA to Windows trust. Creating a real candidate
 still requires the deployment owner's trusted certificate. Physical-device,
 semantic-quality, clean-machine installation/upgrade/rollback, trusted update
