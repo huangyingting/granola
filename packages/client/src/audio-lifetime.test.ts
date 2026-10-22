@@ -35,6 +35,7 @@ describe('physical audio helper termination evidence', () => {
     });
     const failure = new Error('Synthetic child error before close.');
     child.emit('error', failure);
+    child.emit('error', new Error('Synthetic later kill failure.'));
     await expect(client.close()).rejects.toBe(failure);
     expect(stopped).toBe(false);
     child.emit('close', 0);
@@ -58,6 +59,29 @@ describe('physical audio helper termination evidence', () => {
     await client.stopped;
     expect(stopped).toBe(true);
   });
+
+  it.each(['stdin', 'stdout', 'stderr'] as const)(
+    'handles repeated %s failures without mistaking them for process closure',
+    async (stream) => {
+      const client = new AudioHostClient('Synthetic.exe', [], () => {});
+      let stopped = false;
+      void client.stopped.then(() => {
+        stopped = true;
+      });
+      const failure = new Error('Synthetic stream failure.');
+      child[stream].emit('error', failure);
+      child[stream].emit(
+        'error',
+        new Error('Synthetic repeated stream failure.'),
+      );
+      await expect(client.failure).rejects.toBe(failure);
+      expect(stopped).toBe(false);
+      const closing = client.close();
+      const rejected = expect(closing).rejects.toBe(failure);
+      child.emit('close', 2);
+      await Promise.all([rejected, client.stopped]);
+    },
+  );
 
   it('confirms physical closure even when a nonzero native exit is not successful capture', async () => {
     const client = new AudioHostClient('Synthetic.exe', [], () => {});

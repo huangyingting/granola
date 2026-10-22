@@ -123,7 +123,7 @@ export class AudioHostClient {
       ...(isAbsolute(executable) ? { cwd: dirname(executable) } : {}),
     });
     this.exited = new Promise((resolve) => {
-      this.child.once('error', (error) => {
+      this.child.on('error', (error) => {
         this.fail(error);
         resolve(null);
       });
@@ -159,7 +159,12 @@ export class AudioHostClient {
     this.child.stderr.on('data', (bytes: Buffer) =>
       process.stderr.write(bytes),
     );
-    this.child.stdin.on('error', (error) => this.fail(error));
+    for (const stream of [
+      this.child.stdin,
+      this.child.stdout,
+      this.child.stderr,
+    ])
+      stream.on('error', (error) => this.fail(error));
     this.child.stdout.on('data', (bytes: Buffer) => {
       if (this.fatalError) return;
       try {
