@@ -14,6 +14,7 @@ import {
   deleteSavedRemoteRecording,
 } from './recording-upload.js';
 import { RecordingLivePreview } from './recording-live.js';
+import { recordingRetentionSchema } from '@windows-ai-notes/contracts/uploads';
 
 type AudioClient = Pick<
   AudioHostClient,
@@ -25,6 +26,7 @@ export interface RecordingUploadContext {
   api: ApiClient;
   authorize: () => void;
   allowLoopback?: boolean;
+  reads?: Set<AbortController>;
 }
 type Problem = { code: string; message: string };
 function problem(error: unknown): Problem {
@@ -77,6 +79,11 @@ export class RecordingController {
   private uploading: { profile: string; document: string; id: string } | null =
     null;
   private uploadTimer: NodeJS.Timeout | null = null;
+  private retentionRead: AbortController | null = null;
+  private retentionAfter: string | null = null;
+  private retentionReadAt = 0;
+  private retentionError: Problem | null = null;
+  private retentionRoundFailed = false;
   private deviceRequest: Promise<
     Extract<AudioEvent, { event_type: 'devices' }>['payload']['devices']
   > | null = null;
@@ -409,6 +416,7 @@ export class RecordingController {
   async stop(authorize: () => void) {
     this.live?.preview.cancel();
     this.uploadContext = null;
+    this.retentionRead?.abort();
     if (this.uploadTimer) clearTimeout(this.uploadTimer);
     this.uploadTimer = null;
     this.uploadAbort?.abort();
@@ -698,9 +706,16 @@ export class RecordingController {
       previous?.profile !== context.profile ||
       previous.scope !== context.scope ||
       previous.api !== context.api
-    )
+    ) {
       this.live?.preview.cancel(true);
+      this.retentionRead?.abort();
+      this.retentionAfter = null;
+      this.retentionReadAt = 0;
+      this.retentionError = null;
+      this.retentionRoundFailed = false;
+    }
     this.uploadContext = context;
+    if (context) this.refreshRetention(context);
     if (this.uploadTimer) clearTimeout(this.uploadTimer);
     this.uploadTimer = null;
     if (this.uploadTask) {
@@ -821,6 +836,118 @@ export class RecordingController {
       });
     this.uploadTask = work;
     this.changed();
+  }
+  private refreshRetention(context: RecordingUploadContext): void {
+    if (
+      this.retentionRead ||
+      this.closing ||
+      Date.now() < this.retentionReadAt ||
+      (context.reads?.size ?? 0) >= 4
+    )
+      return;
+    const read = new AbortController();
+    const current = () =>
+      !read.signal.aborted &&
+      this.uploadContext?.profile === context.profile &&
+      this.uploadContext.scope === context.scope &&
+      this.uploadContext.api === context.api;
+    this.retentionRead = read;
+    context.reads?.add(read);
+    const operation = async () => {
+      context.authorize();
+      const page = this.local.recordingRetentionCandidates(
+        context.profile,
+        this.retentionAfter,
+      );
+      this.retentionReadAt = Date.now() + (page.after ? 2_000 : 60_000);
+      for (const intent of page.recordings) {
+        if (!current()) return;
+        context.authorize();
+        try {
+          const status = await context.api.request(
+            `/v1/recordings/${intent.recording_id}/retention`,
+            recordingRetentionSchema,
+            {
+              signal: AbortSignal.any([
+                read.signal,
+                AbortSignal.timeout(10_000),
+              ]),
+            },
+          );
+          if (!current()) return;
+          context.authorize();
+          if (
+            status.id !== intent.recording_id ||
+            status.document_id !== intent.document_id
+          )
+            throw new ClientError(
+              'invalid_retention_response',
+              'The service returned audio retention for a different recording or document.',
+            );
+          this.local.rememberRecordingRetention(
+            context.profile,
+            context.api.base,
+            status,
+          );
+        } catch (error) {
+          if (!current()) return;
+          if (!missing(error) && !this.retentionFailed(error)) return;
+        }
+      }
+      if (current()) {
+        this.retentionAfter = page.after;
+        if (!page.after) {
+          if (!this.retentionRoundFailed) this.retentionError = null;
+          this.retentionRoundFailed = false;
+        }
+      }
+    };
+    void operation()
+      .catch((error: unknown) => {
+        if (!current()) return;
+        this.retentionFailed(error);
+      })
+      .finally(() => {
+        context.reads?.delete(read);
+        if (this.retentionRead === read) this.retentionRead = null;
+        if (current()) this.changed();
+      });
+  }
+  private retentionFailed(error: unknown): boolean {
+    const failure = problem(error);
+    if (
+      [
+        'workspace_changed',
+        'workspace_closed',
+        'workspace_transition',
+      ].includes(failure.code)
+    )
+      return false;
+    this.retentionError = {
+      code: 'audio_retention_confirmation_failed',
+      message:
+        'Cloud audio retention could not be confirmed. Unconfirmed local audio was preserved; reconnect to the original workspace or check the service.',
+    };
+    this.retentionRoundFailed = true;
+    this.retentionReadAt = Date.now() + 60_000;
+    console.error(
+      JSON.stringify({
+        code: failure.code,
+        operation: 'audio_retention_confirmation',
+      }),
+    );
+    return true;
+  }
+  async setRetentionDays(
+    profile: string,
+    days: number,
+    authorize: () => void,
+  ): Promise<void> {
+    authorize();
+    this.local.setRecordingRetentionDays(profile, days);
+    this.changed();
+    await this.reconcile(profile);
+    authorize();
   }
   private async runUpload(
     context: RecordingUploadContext,
@@ -1115,6 +1242,17 @@ export class RecordingController {
       pending_deletions: this.local.pendingRecordingDeletions().length,
       error: this.error,
       cleanup_error: this.cleanupError,
+      retention_days: this.local.recordingRetentionDays(profile),
+      retention: page.recordings.flatMap((recording) => {
+        const status = this.local.recordingRetention(
+          profile,
+          recording.document_id,
+          recording.id,
+        );
+        return status ? [status] : [];
+      }),
+      retention_error:
+        this.uploadContext?.profile === profile ? this.retentionError : null,
       upload_available: this.uploadContext?.profile === profile,
       uploads: page.recordings.flatMap((recording) => {
         const status = this.local.recordingUploadStatus(
@@ -1177,6 +1315,12 @@ export class RecordingController {
           this.report(error),
         );
       }
+    }
+    try {
+      if (this.local.expireRecordingRetention()) this.changed();
+    } catch (error) {
+      this.report(error);
+      throw error;
     }
     await this.cleanup();
   }

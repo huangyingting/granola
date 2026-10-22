@@ -467,13 +467,16 @@ process.stdin.on('data', (bytes) => {
       request.command === 'inspect_recording' &&
       (mode.startsWith('capture') || mode.startsWith('inspection'))
     ) {
-      send(request, 'recording.inspected', {
-        state: 'sealed',
-        verified_chunks: 1,
-        recovered_chunks: 0,
-        issues: [],
-        total_samples: 16000,
-      });
+      const reply = () =>
+        send(request, 'recording.inspected', {
+          state: 'sealed',
+          verified_chunks: 1,
+          recovered_chunks: 0,
+          issues: [],
+          total_samples: 16000,
+        });
+      if (mode === 'inspection-slow') setTimeout(reply, 100);
+      else reply();
     } else if (request.command === 'list_devices') {
       const reply = () => send(request, 'devices', { devices: [] });
       if (mode === 'slow') setTimeout(reply, 100);

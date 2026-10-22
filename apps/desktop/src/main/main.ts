@@ -505,7 +505,8 @@ async function start() {
           command.operation === 'pauseRecordingUpload' ||
           command.operation === 'startLivePreview' ||
           command.operation === 'stopLivePreview' ||
-          command.operation === 'retryRecordingCleanup'
+          command.operation === 'retryRecordingCleanup' ||
+          command.operation === 'setAudioRetentionDays'
         ) {
           const active = workspace();
           const profile = active.profile;
@@ -577,6 +578,8 @@ async function start() {
             );
           else if (command.operation === 'retryRecordingCleanup')
             await capture.cleanup();
+          else if (command.operation === 'setAudioRetentionDays')
+            await capture.setRetentionDays(profile, command.days, authorize);
           authorize();
           const document =
             command.operation === 'getRecordingState'
@@ -723,6 +726,9 @@ async function start() {
   });
   await current.loadURL(page);
   audioMaintenance();
+  const audioTimer = setInterval(audioMaintenance, 30_000);
+  audioTimer.unref();
+  current.once('closed', () => clearInterval(audioTimer));
   controller?.start();
 }
 if (!app.requestSingleInstanceLock()) app.quit();

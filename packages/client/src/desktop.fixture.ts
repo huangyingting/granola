@@ -30,6 +30,7 @@ import {
   summarySourceSchema,
 } from '@windows-ai-notes/contracts/generation';
 import { canonicalJson } from '@windows-ai-notes/contracts/content';
+import { recordingRetentionSchema } from '@windows-ai-notes/contracts/uploads';
 import { oidcFixture } from './oidc.fixture.js';
 import {
   DEFAULT_SUMMARY_TEMPLATE,
@@ -153,6 +154,7 @@ export async function desktopFixture() {
       track_id: string;
       seal_sha256: string;
       partial: boolean;
+      canonical_at: string | null;
     }
   >();
   const replays = new Map<string, { hash: string; value: unknown }>();
@@ -183,6 +185,9 @@ export async function desktopFixture() {
   const state = {
     active: true,
     transcript_online: true,
+    retention_online: true,
+    retention_reads: 0,
+    recording_deletes: 0,
     user,
     workspace,
     documents,
@@ -723,6 +728,34 @@ export async function desktopFixture() {
       const parts = path.split('/');
       const id = parts[3] ?? '';
       const existing = documents.get(id);
+      if (request.method === 'DELETE' && parts[2] === 'recordings') {
+        state.recording_deletes++;
+        return error(response, 'fixture_delete_not_supported', 501);
+      }
+      if (
+        request.method === 'GET' &&
+        parts[2] === 'recordings' &&
+        parts[4] === 'retention'
+      ) {
+        state.retention_reads++;
+        if (!state.retention_online)
+          return error(response, 'service_unavailable', 503);
+        const source = recordings.get(id);
+        if (!source || !documents.has(source.document_id))
+          return error(response, 'recording_not_found', 404);
+        return send(
+          response,
+          recordingRetentionSchema.parse({
+            id,
+            document_id: source.document_id,
+            state: 'retained',
+            canonical_at: source.canonical_at,
+            expires_at: new Date(Date.now() + 7 * 86_400_000).toISOString(),
+            retention_days: 7,
+            deletion: null,
+          }),
+        );
+      }
       if (
         ['chat-turns', 'chat-threads'].includes(parts[2] ?? '') &&
         !state.chat_online
@@ -1396,6 +1429,11 @@ export async function desktopFixture() {
           is_candidate: false,
           based_on_revision: value.source_revision,
         };
+        if (source.recording) {
+          const recording = recordings.get(source.recording.id);
+          if (recording && !recording.canonical_at)
+            recording.canonical_at = new Date().toISOString();
+        }
         transcripts.set(`${id}:${revision}`, next);
         timelines.set(
           `${id}:${revision}`,
@@ -1500,7 +1538,12 @@ export async function desktopFixture() {
     ) {
       if (!documents.has(document_id))
         throw new Error('Missing synthetic recording document.');
-      recordings.set(value.id, { ...value, document_id });
+      recordings.set(value.id, { ...value, document_id, canonical_at: null });
+    },
+    confirmRecording(id: string) {
+      const recording = recordings.get(id);
+      if (!recording) throw new Error('Missing synthetic recording.');
+      recording.canonical_at ??= new Date().toISOString();
     },
     url: `http://127.0.0.1:${address.port}`,
     async close() {

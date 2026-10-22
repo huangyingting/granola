@@ -265,6 +265,12 @@ export const desktopCommandSchema = z.discriminatedUnion('operation', [
   }),
   z.strictObject({ operation: z.literal('retryRecordingCleanup'), ...scoped }),
   z.strictObject({
+    operation: z.literal('setAudioRetentionDays'),
+    ...scoped,
+    days: z.number().int().min(0).max(7),
+    confirmed: z.literal(true),
+  }),
+  z.strictObject({
     operation: z.literal('startLivePreview'),
     ...scoped,
     id: resourceId,

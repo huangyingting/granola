@@ -1,6 +1,7 @@
 import {
   createCipheriv,
   createDecipheriv,
+  createHash,
   randomBytes,
   randomUUID,
 } from 'node:crypto';
@@ -38,7 +39,40 @@ import {
   type RecordingUploadIntent,
   recordingUploadStatusSchema,
   type RecordingUploadStatus,
+  localAudioRetentionSchema,
+  localAudioRetentionDaysSchema,
+  type LocalAudioRetention,
 } from '@windows-ai-notes/contracts/recording';
+import { recordingRetentionSchema } from '@windows-ai-notes/contracts/uploads';
+
+const retentionProofSchema = localAudioRetentionSchema.extend({
+  service_url: z.url().max(2048),
+  server_days: localAudioRetentionDaysSchema,
+  seal_sha256: z.string().regex(/^[a-f0-9]{64}$/),
+});
+type RetentionProof = z.infer<typeof retentionProofSchema>;
+const DAY = 86_400_000;
+
+type VerifiedRecording = RecordingUploadIntent & {
+  plan: NonNullable<RecordingUploadIntent['plan']>;
+};
+function verifiedRecording(
+  intent: RecordingUploadIntent | null,
+): intent is VerifiedRecording {
+  return Boolean(
+    intent?.plan &&
+    ['complete', 'delete_pending', 'deleting'].includes(intent.state) &&
+    intent.total_chunks === intent.plan.chunks.length &&
+    intent.verified_chunks === intent.total_chunks &&
+    intent.verified_bytes ===
+      intent.plan.chunks.reduce((sum, chunk) => sum + chunk.size_bytes, 0),
+  );
+}
+function sealHash(intent: VerifiedRecording) {
+  return createHash('sha256')
+    .update(canonicalJson(intent.plan.seal))
+    .digest('hex');
+}
 
 export class LocalError extends Error {
   constructor(
@@ -189,7 +223,8 @@ export class LocalStore {
             version !== 3 &&
             version !== 4 &&
             version !== 5 &&
-            version !== 6
+            version !== 6 &&
+            version !== 7
           )
             throw new LocalError(
               'local_version_unsupported',
@@ -201,9 +236,13 @@ export class LocalStore {
               'drafts',
               'outbox',
               ...(version !== 1 ? ['snapshot_candidates'] : []),
-              ...(version === 4 || version === 5 || version === 6
+              ...(version === 4 ||
+              version === 5 ||
+              version === 6 ||
+              version === 7
                 ? ['recording_uploads']
                 : []),
+              ...(version === 7 ? ['recording_retention'] : []),
             ].every((name) => tables.some((row) => row.name === name))
           )
             throw new LocalError(
@@ -274,6 +313,13 @@ export class LocalStore {
           FOREIGN KEY(profile,document_id) REFERENCES drafts(profile,id) ON DELETE CASCADE
         );
         CREATE INDEX IF NOT EXISTS recording_uploads_pending ON recording_uploads(profile,state,retry_at);
+        CREATE TABLE IF NOT EXISTS recording_retention (
+          profile TEXT NOT NULL,recording_id TEXT NOT NULL,document_id TEXT NOT NULL,
+          delete_after INTEGER NOT NULL,payload BLOB NOT NULL,
+          PRIMARY KEY(profile,recording_id),
+          FOREIGN KEY(profile,document_id) REFERENCES drafts(profile,id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS recording_retention_due ON recording_retention(delete_after);
       `);
         if (version === 1) {
           const values = this.database
@@ -301,7 +347,7 @@ export class LocalStore {
             .get()
         )
           this.putValue('root', 'key-check', 'windows-ai-notes-local-v1');
-        this.database.exec('PRAGMA user_version=6');
+        this.database.exec('PRAGMA user_version=7');
       });
     } catch (error) {
       try {
@@ -705,6 +751,11 @@ export class LocalStore {
         'DELETE FROM recording_uploads WHERE profile=? AND (? IS NULL OR document_id=?)',
       )
       .run(profile, document ?? null, document ?? null);
+    this.database
+      .prepare(
+        'DELETE FROM recording_retention WHERE profile=? AND (? IS NULL OR document_id=?)',
+      )
+      .run(profile, document ?? null, document ?? null);
   }
   private queueRecordingIds(profile: string, ids: string[]): void {
     const pending = z
@@ -726,6 +777,228 @@ export class LocalStore {
           'DELETE FROM recording_uploads WHERE profile=? AND recording_id=?',
         )
         .run(profile, id);
+      this.database
+        .prepare(
+          'DELETE FROM recording_retention WHERE profile=? AND recording_id=?',
+        )
+        .run(profile, id);
+    });
+  }
+  recordingRetentionDays(profile: string): number {
+    return (
+      this.getValue(
+        profile,
+        'audio-retention-days',
+        localAudioRetentionDaysSchema,
+      ) ?? 7
+    );
+  }
+  setRecordingRetentionDays(profile: string, value: number): void {
+    const days = localAudioRetentionDaysSchema.parse(value);
+    this.transaction(() => {
+      const rows = this.database
+        .prepare(
+          'SELECT recording_id,document_id FROM recording_retention WHERE profile=?',
+        )
+        .all(profile);
+      this.putValue(profile, 'audio-retention-days', days);
+      for (const row of rows) {
+        const proof = this.retentionProof(
+          profile,
+          resourceId.parse(row.document_id),
+          resourceId.parse(row.recording_id),
+        )!;
+        this.writeRetentionProof(profile, {
+          ...proof,
+          delete_after: Math.min(
+            proof.delete_after,
+            Date.parse(proof.canonical_at) + days * DAY,
+          ),
+        });
+      }
+    });
+  }
+  private retentionProof(
+    profile: string,
+    document: string,
+    id: string,
+  ): RetentionProof | null {
+    this.getRecording(profile, document, id);
+    const row = this.database
+      .prepare(
+        'SELECT document_id,delete_after,payload FROM recording_retention WHERE profile=? AND recording_id=?',
+      )
+      .get(profile, id);
+    if (!row) return null;
+    const proof = this.open(
+      retentionProofSchema,
+      z.instanceof(Uint8Array).parse(row.payload),
+      aad('recording-retention', profile, id, document),
+    );
+    if (
+      row.document_id !== document ||
+      proof.document_id !== document ||
+      proof.recording_id !== id ||
+      row.delete_after !== proof.delete_after
+    )
+      throw new LocalError(
+        'local_data_corrupt',
+        'The encrypted audio deadline does not match its ownership or queue metadata. Audio was preserved.',
+      );
+    return proof;
+  }
+  recordingRetention(
+    profile: string,
+    document: string,
+    id: string,
+  ): LocalAudioRetention | null {
+    const proof = this.retentionProof(profile, document, id);
+    if (!proof) return null;
+    const {
+      service_url: _service,
+      server_days: _days,
+      seal_sha256: _seal,
+      ...status
+    } = proof;
+    return status;
+  }
+  private writeRetentionProof(profile: string, value: RetentionProof): void {
+    const proof = retentionProofSchema.parse(value);
+    this.database
+      .prepare(
+        `INSERT INTO recording_retention VALUES (?,?,?,?,?)
+        ON CONFLICT(profile,recording_id) DO UPDATE SET delete_after=excluded.delete_after,payload=excluded.payload`,
+      )
+      .run(
+        profile,
+        proof.recording_id,
+        proof.document_id,
+        proof.delete_after,
+        this.seal(
+          proof,
+          aad(
+            'recording-retention',
+            profile,
+            proof.recording_id,
+            proof.document_id,
+          ),
+        ),
+      );
+  }
+  rememberRecordingRetention(
+    profile: string,
+    service: string,
+    value: z.infer<typeof recordingRetentionSchema>,
+  ): LocalAudioRetention | null {
+    const status = recordingRetentionSchema.parse(value);
+    return this.transaction(() => {
+      const recording = this.getRecording(
+        profile,
+        status.document_id,
+        status.id,
+      );
+      const previous = this.retentionProof(
+        profile,
+        status.document_id,
+        status.id,
+      );
+      const intent = this.recordingUpload(
+        profile,
+        status.document_id,
+        status.id,
+      );
+      if (
+        !verifiedRecording(intent) ||
+        ['starting', 'recording', 'paused'].includes(recording.state)
+      )
+        throw new LocalError(
+          'audio_retention_not_eligible',
+          'Only stopped, fully uploaded and verified audio can receive a local deletion deadline.',
+        );
+      if (
+        previous &&
+        (previous.service_url !== service ||
+          previous.canonical_at !== status.canonical_at ||
+          previous.seal_sha256 !== sealHash(intent))
+      )
+        throw new LocalError(
+          'audio_retention_proof_changed',
+          'The service or immutable canonical recording proof changed. The existing local deadline was not extended.',
+        );
+      if (!status.canonical_at) return null;
+      const proof = retentionProofSchema.parse({
+        recording_id: status.id,
+        document_id: status.document_id,
+        canonical_at: status.canonical_at,
+        delete_after: Math.min(
+          previous?.delete_after ?? Infinity,
+          Date.parse(status.canonical_at) +
+            Math.min(
+              this.recordingRetentionDays(profile),
+              status.retention_days,
+            ) *
+              DAY,
+        ),
+        service_url: service,
+        server_days: Math.min(
+          previous?.server_days ?? 7,
+          status.retention_days,
+        ),
+        seal_sha256: sealHash(intent),
+      });
+      this.writeRetentionProof(profile, proof);
+      return this.recordingRetention(profile, status.document_id, status.id);
+    });
+  }
+  recordingRetentionCandidates(profile: string, after: string | null) {
+    const rows = this.database
+      .prepare(
+        `SELECT document_id,recording_id FROM recording_uploads
+        WHERE profile=? AND state IN ('complete','delete_pending','deleting')
+          AND (? IS NULL OR recording_id>?)
+        ORDER BY recording_id LIMIT 4`,
+      )
+      .all(profile, after, after);
+    return {
+      recordings: rows.flatMap((row) => {
+        const intent = this.recordingUpload(
+          profile,
+          resourceId.parse(row.document_id),
+          resourceId.parse(row.recording_id),
+        );
+        return verifiedRecording(intent) ? [intent] : [];
+      }),
+      after: rows.length ? resourceId.parse(rows.at(-1)!.recording_id) : null,
+    };
+  }
+  expireRecordingRetention(now = Date.now()): number {
+    z.number().int().min(0).max(8_640_000_000_000_000).parse(now);
+    return this.transaction(() => {
+      const rows = this.database
+        .prepare(
+          'SELECT profile,document_id,recording_id FROM recording_retention WHERE delete_after<=? ORDER BY delete_after,recording_id LIMIT 50',
+        )
+        .all(now);
+      for (const row of rows) {
+        const profile = z.string().parse(row.profile);
+        const document = resourceId.parse(row.document_id);
+        const id = resourceId.parse(row.recording_id);
+        const proof = this.retentionProof(profile, document, id)!;
+        const recording = this.getRecording(profile, document, id);
+        const intent = this.recordingUpload(profile, document, id);
+        if (
+          proof.delete_after > now ||
+          !verifiedRecording(intent) ||
+          sealHash(intent) !== proof.seal_sha256 ||
+          ['starting', 'recording', 'paused'].includes(recording.state)
+        )
+          throw new LocalError(
+            'audio_retention_not_eligible',
+            'The recording no longer matches its verified deletion proof. Audio was preserved.',
+          );
+        this.removeRecording(profile, document, id);
+      }
+      return rows.length;
     });
   }
   recordingUpload(

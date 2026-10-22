@@ -155,6 +155,390 @@ describe('encrypted local drafts and durable outbox', () => {
       },
     });
   }
+  function retainedUpload(store: LocalStore) {
+    const saved = savedUpload(store);
+    const value = frozen(saved.recording, saved.intent);
+    store.saveRecordingUpload(profile, {
+      ...value,
+      state: 'complete',
+      verified_chunks: 1,
+      verified_bytes: 32044,
+    });
+    store.applyRemote(profile, remote(saved.draft));
+    const canonical = new Date(Date.now() - 86_400_000).toISOString();
+    const status = {
+      id: saved.recording.id,
+      document_id: saved.draft.id,
+      canonical_at: canonical,
+      state: 'retained' as const,
+      expires_at: new Date(
+        Date.parse(canonical) + 7 * 86_400_000,
+      ).toISOString(),
+      retention_days: 7,
+      deletion: null,
+    };
+    return {
+      ...saved,
+      status,
+      service: 'https://private-retention.example.test',
+    };
+  }
+  it('persists scoped encrypted canonical proof and a default seven-day local deadline across restart', () => {
+    const store = open();
+    const c = retainedUpload(store);
+    const proof = store.rememberRecordingRetention(
+      profile,
+      c.service,
+      c.status,
+    )!;
+    expect(proof.delete_after).toBe(
+      Date.parse(c.status.canonical_at) + 7 * 86_400_000,
+    );
+    expect(store.recordingRetentionDays(profile)).toBe(7);
+    expect(store.expireRecordingRetention(proof.delete_after - 1)).toBe(0);
+    close(store);
+    const reopened = open();
+    expect(
+      reopened.recordingRetention(profile, c.draft.id, c.recording.id),
+    ).toEqual(proof);
+    expect(() =>
+      reopened.recordingRetention(
+        'another-account',
+        c.draft.id,
+        c.recording.id,
+      ),
+    ).toThrow();
+    const other = reopened.create(profile);
+    expect(() =>
+      reopened.recordingRetention(profile, other.id, c.recording.id),
+    ).toThrow();
+    for (const file of [path, `${path}-wal`])
+      if (existsSync(file))
+        for (const privateValue of [c.service, c.status.canonical_at])
+          expect(readFileSync(file).includes(Buffer.from(privateValue))).toBe(
+            false,
+          );
+  });
+  it('only shortens existing deadlines when either local or server policy changes, including across restart', () => {
+    const store = open();
+    const c = retainedUpload(store);
+    const at = Date.parse(c.status.canonical_at);
+    store.rememberRecordingRetention(profile, c.service, c.status);
+    store.setRecordingRetentionDays(profile, 3);
+    expect(
+      store.recordingRetention(profile, c.draft.id, c.recording.id)
+        ?.delete_after,
+    ).toBe(at + 3 * 86_400_000);
+    store.rememberRecordingRetention(profile, c.service, {
+      ...c.status,
+      retention_days: 1,
+    });
+    store.setRecordingRetentionDays(profile, 7);
+    store.rememberRecordingRetention(profile, c.service, c.status);
+    close(store);
+    const reopened = open();
+    expect(reopened.recordingRetentionDays(profile)).toBe(7);
+    expect(
+      reopened.recordingRetention(profile, c.draft.id, c.recording.id)
+        ?.delete_after,
+    ).toBe(at + 86_400_000);
+    for (const days of [-1, 8, 1.5, NaN, Infinity])
+      expect(() => reopened.setRecordingRetentionDays(profile, days)).toThrow();
+    expect(reopened.recordingRetentionDays(profile)).toBe(7);
+  });
+  it('never treats unconfirmed, unuploaded or partially verified audio as eligible, including forged completion counters', () => {
+    const store = open();
+    const c = retainedUpload(store);
+    expect(
+      store.rememberRecordingRetention(profile, c.service, {
+        ...c.status,
+        canonical_at: null,
+      }),
+    ).toBeNull();
+    const incomplete = store.recordingUpload(
+      profile,
+      c.draft.id,
+      c.recording.id,
+    )!;
+    store.saveRecordingUpload(profile, {
+      ...incomplete,
+      state: 'complete',
+      verified_chunks: 0,
+      verified_bytes: 0,
+    });
+    expect(() =>
+      store.rememberRecordingRetention(profile, c.service, c.status),
+    ).toThrow('fully uploaded');
+    expect(
+      store.recordingRetentionCandidates(profile, null).recordings,
+    ).toEqual([]);
+    expect(store.expireRecordingRetention(Date.now() + 40 * 86_400_000)).toBe(
+      0,
+    );
+    expect(store.getRecording(profile, c.draft.id, c.recording.id).id).toBe(
+      c.recording.id,
+    );
+    const only = savedUpload(store);
+    expect(() =>
+      store.rememberRecordingRetention(profile, c.service, {
+        ...c.status,
+        id: only.recording.id,
+        document_id: only.draft.id,
+      }),
+    ).toThrow('fully uploaded');
+    const active = store.beginRecording(profile, only.draft.id, tracks());
+    expect(store.expireRecordingRetention(Date.now() + 40 * 86_400_000)).toBe(
+      0,
+    );
+    expect(store.activeRecordingOwner()?.recording_id).toBe(active.id);
+  });
+  it('uses post-canonical policy, not an earlier expired server processing deadline, and allows proof after remote raw deletion', () => {
+    const store = open();
+    for (const state of ['expired', 'deleted'] as const) {
+      const c = retainedUpload(store);
+      const proof = store.rememberRecordingRetention(profile, c.service, {
+        ...c.status,
+        state,
+        expires_at: new Date(
+          Date.parse(c.status.canonical_at) - 86_400_000,
+        ).toISOString(),
+        deletion:
+          state === 'deleted'
+            ? {
+                state: 'cleanup_confirmed',
+                pending_objects: 0,
+                cleanup_errors: 0,
+                repeated_cleanup: true,
+              }
+            : null,
+      })!;
+      expect(proof.delete_after).toBe(
+        Date.parse(c.status.canonical_at) + 7 * 86_400_000,
+      );
+      expect(
+        store.expireRecordingRetention(Date.parse(c.status.canonical_at)),
+      ).toBe(0);
+    }
+  });
+  it('expires audio locally without deleting notes, transcripts, remote mutations or a unique unuploaded recording', () => {
+    const store = open();
+    const c = retainedUpload(store);
+    store.putArtifact(
+      profile,
+      c.draft.id,
+      'transcript:1',
+      'Published private transcript.',
+    );
+    const unuploaded = savedUpload(store);
+    const proof = store.rememberRecordingRetention(
+      profile,
+      c.service,
+      c.status,
+    )!;
+    expect(store.expireRecordingRetention(proof.delete_after)).toBe(1);
+    expect(store.pendingRecordingDeletions()).toEqual([c.recording.id]);
+    expect(() =>
+      store.getRecording(profile, c.draft.id, c.recording.id),
+    ).toThrow('not available');
+    expect(store.get(profile, c.draft.id).title).toBe(c.draft.title);
+    expect(
+      store.getArtifact(profile, c.draft.id, 'transcript:1', z.string()),
+    ).toBe('Published private transcript.');
+    expect(
+      store.getRecording(profile, unuploaded.draft.id, unuploaded.recording.id),
+    ).toBeTruthy();
+    expect(store.nextMutation(profile, workspace)?.document_id).toBe(
+      unuploaded.draft.id,
+    );
+    expect(store.expireRecordingRetention(proof.delete_after + 1)).toBe(0);
+    const inspect = new DatabaseSync(path, { readOnly: true });
+    try {
+      expect(
+        inspect.prepare('SELECT count(*) count FROM recording_retention').get()
+          ?.count,
+      ).toBe(0);
+      expect(
+        inspect.prepare('SELECT count(*) count FROM recording_uploads').get()
+          ?.count,
+      ).toBe(0);
+    } finally {
+      inspect.close();
+    }
+  });
+  it('handles zero-day eligibility and already-verified user deletion without waiting for remote cleanup', () => {
+    const store = open();
+    const c = retainedUpload(store);
+    store.setRecordingRetentionDays(profile, 0);
+    const proof = store.rememberRecordingRetention(
+      profile,
+      c.service,
+      c.status,
+    )!;
+    const intent = store.recordingUpload(profile, c.draft.id, c.recording.id)!;
+    store.saveRecordingUpload(profile, { ...intent, state: 'delete_pending' });
+    expect(store.expireRecordingRetention(proof.delete_after)).toBe(1);
+    close(store);
+    const reopened = open();
+    expect(reopened.pendingRecordingDeletions()).toEqual([c.recording.id]);
+    reopened.acknowledgeRecordingDeletion(c.recording.id);
+    expect(reopened.pendingRecordingDeletions()).toEqual([]);
+    expect(reopened.recordingRetentionDays(profile)).toBe(0);
+  });
+  it.each(['service', 'canonical', 'counters'])(
+    'preserves the deadline and raw copy when %s proof changes',
+    (change) => {
+      const store = open();
+      const c = retainedUpload(store);
+      const proof = store.rememberRecordingRetention(
+        profile,
+        c.service,
+        c.status,
+      )!;
+      if (change === 'counters') {
+        const current = store.recordingUpload(
+          profile,
+          c.draft.id,
+          c.recording.id,
+        )!;
+        store.saveRecordingUpload(profile, {
+          ...current,
+          verified_chunks: 0,
+          verified_bytes: 0,
+        });
+        expect(() =>
+          store.expireRecordingRetention(proof.delete_after),
+        ).toThrow('no longer matches');
+      } else {
+        expect(() =>
+          store.rememberRecordingRetention(
+            profile,
+            change === 'service' ? 'https://different.example.test' : c.service,
+            change === 'canonical'
+              ? { ...c.status, canonical_at: null }
+              : c.status,
+          ),
+        ).toThrow('proof changed');
+      }
+      expect(
+        store.recordingRetention(profile, c.draft.id, c.recording.id),
+      ).toEqual(proof);
+      expect(store.pendingRecordingDeletions()).toEqual([]);
+    },
+  );
+  it.each(['delete_after', 'document_id', 'profile', 'payload'])(
+    'authenticates the %s retention index hint before deletion',
+    (field) => {
+      const store = open();
+      const a = retainedUpload(store),
+        b = retainedUpload(store);
+      store.rememberRecordingRetention(profile, a.service, a.status);
+      store.rememberRecordingRetention(profile, b.service, b.status);
+      const inspect = new DatabaseSync(path);
+      try {
+        inspect.exec('PRAGMA foreign_keys=OFF');
+        if (field === 'payload')
+          inspect
+            .prepare(
+              'UPDATE recording_retention SET payload=(SELECT payload FROM recording_retention WHERE recording_id=?) WHERE recording_id=?',
+            )
+            .run(b.recording.id, a.recording.id);
+        else
+          inspect
+            .prepare(
+              `UPDATE recording_retention SET ${field}=? WHERE recording_id=?`,
+            )
+            .run(
+              field === 'delete_after'
+                ? 0
+                : field === 'profile'
+                  ? 'different-profile'
+                  : b.draft.id,
+              a.recording.id,
+            );
+      } finally {
+        inspect.close();
+      }
+      expect(() =>
+        store.expireRecordingRetention(Date.now() + 40 * 86_400_000),
+      ).toThrow();
+      expect(
+        store.getRecording(profile, a.draft.id, a.recording.id),
+      ).toBeTruthy();
+      expect(store.pendingRecordingDeletions()).toEqual([]);
+    },
+  );
+  it('purges retention proof together with document, account and explicit audio removal and rejects late proof recreation', () => {
+    const store = open();
+    for (const action of ['audio', 'remote', 'account']) {
+      const c = retainedUpload(store);
+      store.rememberRecordingRetention(profile, c.service, c.status);
+      if (action === 'audio')
+        store.removeRecording(profile, c.draft.id, c.recording.id);
+      if (action === 'remote') store.remoteDeleted(profile, c.draft.id);
+      if (action === 'account') store.purgeProfile(profile);
+      expect(() =>
+        store.rememberRecordingRetention(profile, c.service, c.status),
+      ).toThrow();
+      const inspect = new DatabaseSync(path, { readOnly: true });
+      try {
+        expect(
+          inspect
+            .prepare('SELECT count(*) count FROM recording_retention')
+            .get()?.count,
+        ).toBe(0);
+      } finally {
+        inspect.close();
+      }
+    }
+  });
+  it('bounds each global sweep and never queues more than fifty eligible removals at once', () => {
+    const store = open();
+    for (let i = 0; i < 51; i++) {
+      const c = retainedUpload(store);
+      store.rememberRecordingRetention(profile, c.service, c.status);
+    }
+    const due = Date.now() + 8 * 86_400_000;
+    expect(store.expireRecordingRetention(due)).toBe(50);
+    expect(store.pendingRecordingDeletions()).toHaveLength(50);
+    expect(store.expireRecordingRetention(due)).toBe(1);
+    expect(store.pendingRecordingDeletions()).toHaveLength(51);
+  });
+  it('rolls back the entire expiry batch when the native deletion journal cannot be committed', () => {
+    const store = open();
+    const a = retainedUpload(store),
+      b = retainedUpload(store);
+    for (const c of [a, b])
+      store.rememberRecordingRetention(profile, c.service, c.status);
+    const write = store.putValue.bind(store);
+    let queued = 0;
+    vi.spyOn(store, 'putValue').mockImplementation((profile, id, value) => {
+      if (profile === 'root' && id === 'recording:deletions' && ++queued === 2)
+        throw new Error('Synthetic full encrypted journal.');
+      return write(profile, id, value);
+    });
+    expect(() =>
+      store.expireRecordingRetention(Date.now() + 8 * 86_400_000),
+    ).toThrow('full encrypted journal');
+    expect(store.pendingRecordingDeletions()).toEqual([]);
+    for (const c of [a, b]) {
+      expect(
+        store.recordingRetention(profile, c.draft.id, c.recording.id),
+      ).not.toBeNull();
+      expect(
+        store.recordingUpload(profile, c.draft.id, c.recording.id)?.state,
+      ).toBe('complete');
+    }
+  });
+  it('refuses to recreate a missing current retention journal or destroy older encrypted audio', () => {
+    const store = open();
+    const c = retainedUpload(store);
+    store.rememberRecordingRetention(profile, c.service, c.status);
+    close(store);
+    const inspect = new DatabaseSync(path);
+    inspect.exec('DROP TABLE recording_retention');
+    inspect.close();
+    expect(() => open()).toThrow('structure is incomplete');
+  });
   it('persists encrypted scoped upload plans and separate lightweight status across restart without exposing source metadata', () => {
     const store = open();
     const { recording, intent } = savedUpload(store);
@@ -353,7 +737,7 @@ describe('encrypted local drafts and durable outbox', () => {
             .get(`recording:${recording.id}`)?.payload,
         ).toEqual(bytes);
         expect(after.prepare('PRAGMA user_version').get()?.user_version).toBe(
-          6,
+          7,
         );
       } finally {
         after.close();
@@ -369,7 +753,7 @@ describe('encrypted local drafts and durable outbox', () => {
     inspect.close();
     expect(() => open()).toThrow('structure is incomplete');
   });
-  it.each([4, 5])(
+  it.each([4, 5, 6])(
     'upgrades v%s semantics without rewriting encrypted legacy transcript or upload evidence',
     (version) => {
       const store = open();
@@ -392,7 +776,9 @@ describe('encrypted local drafts and durable outbox', () => {
       store.putArtifact(profile, draft.id, 'transcript:1', transcript);
       close(store);
       const old = new DatabaseSync(path);
-      old.exec(`PRAGMA user_version=${version}`);
+      old.exec(
+        `DROP TABLE recording_retention; PRAGMA user_version=${version}`,
+      );
       const payloads = old
         .prepare('SELECT profile,id,payload FROM vault ORDER BY profile,id')
         .all();
@@ -407,7 +793,7 @@ describe('encrypted local drafts and durable outbox', () => {
       const inspect = new DatabaseSync(path, { readOnly: true });
       try {
         expect(inspect.prepare('PRAGMA user_version').get()?.user_version).toBe(
-          6,
+          7,
         );
         expect(
           inspect
@@ -490,7 +876,7 @@ describe('encrypted local drafts and durable outbox', () => {
     const inspect = new DatabaseSync(path, { readOnly: true });
     try {
       expect(inspect.prepare('PRAGMA user_version').get()?.user_version).toBe(
-        6,
+        7,
       );
     } finally {
       inspect.close();

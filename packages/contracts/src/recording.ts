@@ -208,6 +208,14 @@ export const livePreviewSchema = z.strictObject({
   error: recordingProblemSchema.nullable(),
 });
 export type LivePreviewState = z.infer<typeof livePreviewSchema>;
+export const localAudioRetentionDaysSchema = z.number().int().min(0).max(7);
+export const localAudioRetentionSchema = z.strictObject({
+  recording_id: resourceId,
+  document_id: resourceId,
+  canonical_at: z.iso.datetime(),
+  delete_after: z.number().int().min(0).max(8_640_000_000_000_000),
+});
+export type LocalAudioRetention = z.infer<typeof localAudioRetentionSchema>;
 export const audioStateSchema = z.strictObject({
   document_id: resourceId.nullable(),
   active: localRecordingSchema.nullable(),
@@ -218,6 +226,9 @@ export const audioStateSchema = z.strictObject({
   pending_deletions: z.number().int().min(0).max(10_000),
   error: recordingProblemSchema.nullable(),
   cleanup_error: recordingProblemSchema.nullable(),
+  retention_days: localAudioRetentionDaysSchema.default(7),
+  retention: z.array(localAudioRetentionSchema).max(50).default([]),
+  retention_error: recordingProblemSchema.nullable().default(null),
   upload_available: z.boolean().default(false),
   uploads: z.array(recordingUploadStatusSchema).max(50).default([]),
   active_upload: recordingUploadStatusSchema.nullable().default(null),

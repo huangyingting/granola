@@ -248,6 +248,7 @@ export class WorkspaceController {
       scope,
       api,
       allowLoopback: this.options.allowLoopback ?? false,
+      reads: this.transcriptReads,
       authorize: () => {
         this.assertScope(scope);
         if (

@@ -4,7 +4,8 @@ import {
   test,
   type ElectronApplication,
 } from '@playwright/test';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -859,6 +860,121 @@ async function savedRecording(
     { directory, id, uploaded },
   );
 }
+
+test('persists scoped local audio deadlines with real DPAPI, cleans verified audio offline and protects the unuploaded copy', async () => {
+  test.setTimeout(90_000);
+  const directory = await mkdtemp(
+    join(tmpdir(), 'windows-notes-local-retention-'),
+  );
+  const fixture = await desktopFixture();
+  const remote = fixture.seed(
+    'Keep these notes after local audio removal.',
+    'Keep this published transcript.',
+  );
+  let application: ElectronApplication | null = null;
+  try {
+    application = await launch(directory);
+    let page = await application.firstWindow();
+    await page.getByRole('button', { name: /Account & sync/ }).click();
+    await page.getByRole('textbox', { name: 'Service URL' }).fill(fixture.url);
+    await page
+      .getByRole('button', { name: 'Sign in with browser', exact: true })
+      .click();
+    await page
+      .getByRole('button', {
+        name: /^Synthetic cloud workspace (Open workspace|Current workspace)$/,
+      })
+      .click();
+    await expect(
+      page.getByRole('textbox', { name: 'Meeting notes', exact: true }),
+    ).toHaveText(remote.notes);
+    const verified = await savedRecording(
+      application,
+      directory,
+      remote.id,
+      true,
+    );
+    const unuploaded = await savedRecording(application, directory, remote.id);
+    fixture.registerRecording(remote.id, verified);
+    fixture.confirmRecording(verified.id);
+    const verifiedPath = join(directory, 'recordings', verified.id);
+    const unuploadedPath = join(directory, 'recordings', unuploaded.id);
+    for (const path of [verifiedPath, unuploadedPath]) {
+      await mkdir(path, { recursive: true });
+      await writeFile(
+        join(path, 'synthetic-encrypted-file.bin'),
+        Buffer.alloc(32, 17),
+      );
+    }
+    await close(application);
+    application = await launch(directory);
+    page = await application.firstWindow();
+    await page.getByText(/^Saved audio \(/).click();
+    await expect(
+      page.getByText(/^Local audio scheduled for removal:/),
+    ).toBeVisible();
+    await page.getByText('Local audio retention', { exact: true }).click();
+    const retention = () =>
+      page.getByRole('combobox', {
+        name: 'Local audio retention',
+        exact: true,
+      });
+    await expect(retention()).toHaveValue('7');
+    await retention().selectOption('3');
+    await expect(retention()).toHaveValue('3');
+    expect(existsSync(verifiedPath)).toBe(true);
+    expect(existsSync(unuploadedPath)).toBe(true);
+    const state = await page.evaluate(async (id) => {
+      const boot = await window.notes.invoke({ operation: 'bootstrap' });
+      if (!boot.ok || !('state' in boot)) throw new Error('No desktop scope.');
+      const result = await window.notes.invoke({
+        operation: 'getRecordingState',
+        scope: boot.state.scope,
+        document_id: id,
+        offset: 0,
+      });
+      if (!result.ok || !('audio_state' in result))
+        throw new Error('No audio state.');
+      return result.audio_state.state;
+    }, remote.id);
+    expect(state.retention).toHaveLength(1);
+    expect(state.retention[0]!.delete_after).toBe(
+      Date.parse(state.retention[0]!.canonical_at) + 3 * 86_400_000,
+    );
+    await close(application);
+    application = null;
+    fixture.state.retention_online = false;
+    const reads = fixture.state.retention_reads;
+    application = await launch(directory);
+    page = await application.firstWindow();
+    await page.getByText('Local audio retention', { exact: true }).click();
+    await expect(retention()).toHaveValue('3');
+    await expect
+      .poll(() => fixture.state.retention_reads)
+      .toBeGreaterThan(reads);
+    await expect(
+      page.getByText(/Cloud audio retention could not be confirmed/),
+    ).toBeVisible();
+    await retention().selectOption('0');
+    await expect.poll(() => existsSync(verifiedPath)).toBe(false);
+    expect(existsSync(unuploadedPath)).toBe(true);
+    await expect(page.getByText(/^Saved audio \(1\)/)).toBeVisible();
+    await expect(
+      page.getByRole('textbox', { name: 'Meeting notes', exact: true }),
+    ).toHaveText(remote.notes);
+    expect(fixture.state.documents.get(remote.id)?.transcript_revision).toBe(1);
+    expect(fixture.state.recording_deletes).toBe(0);
+    expect(fixture.state.jobs.size).toBe(0);
+    await close(application);
+    application = null;
+  } finally {
+    if (application) await application.close();
+    await fixture.close();
+    expect(fixture.state.failures).toEqual([]);
+    expect(fixture.issuer.state.failures).toEqual([]);
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 test('requires inline upload consent and preserves the encrypted journal after native preflight fails and the app restarts', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'windows-notes-upload-ui-'));

@@ -534,7 +534,8 @@ function UploadControls({
               />
               <span>
                 {status.verified_chunks} / {status.total_chunks || '?'} chunks
-                verified. Encrypted local audio is kept.
+                verified. Local audio follows this device&apos;s retention
+                policy after a transcript is published.
               </span>
               {status.partial && (
                 <span>Incomplete capture was explicitly accepted.</span>
@@ -543,8 +544,9 @@ function UploadControls({
           )}
           {deleting && (
             <span>
-              Local audio is kept until the service confirms cleanup. Reconnect
-              to the original workspace if offline.
+              Local audio is kept until the service confirms cleanup or its
+              existing local retention deadline is reached. Reconnect to the
+              original workspace if offline.
             </span>
           )}
           {status.error && (
@@ -610,8 +612,9 @@ function UploadControls({
           <p>
             Send saved audio to{' '}
             {destination ? new URL(destination).host : 'your workspace service'}
-            ? The encrypted local copy stays on this device. This does not start
-            Azure transcription.
+            ? The encrypted local copy follows this device&apos;s retention
+            policy after a transcript is published. This does not start Azure
+            transcription.
           </p>
           {!status?.total_chunks ? (
             <label className="checkbox-label">
@@ -792,6 +795,47 @@ export function RecordingPanel({
           {error || deviceError}
         </p>
       )}
+      {state && (
+        <details className="audio-configuration">
+          <summary>Local audio retention</summary>
+          <label>
+            Keep verified audio after transcript publication
+            <select
+              aria-label="Local audio retention"
+              className="service-input"
+              value={state.retention_days}
+              disabled={acting}
+              onChange={(event) =>
+                void act({
+                  operation: 'setAudioRetentionDays',
+                  scope,
+                  days: Number(event.target.value),
+                  confirmed: true,
+                })
+              }
+            >
+              {[0, 1, 2, 3, 4, 5, 6, 7].map((days) => (
+                <option key={days} value={days}>
+                  {days === 0
+                    ? 'Remove after confirmation'
+                    : `${days} day${days === 1 ? '' : 's'}`}
+                </option>
+              ))}
+            </select>
+          </label>
+          <p className="quiet-note">
+            This device and workspace only. Active capture and unuploaded audio
+            stay protected. Shorter workspace policies also apply. Increasing
+            this setting cannot extend existing deadlines; cleanup runs while
+            the app is open. Notes and published transcripts stay.
+          </p>
+        </details>
+      )}
+      {state?.retention_error && (
+        <p className="account-alert" role="alert">
+          {state.retention_error.message}
+        </p>
+      )}
       {liveRecording && (
         <LivePreview
           scope={scope}
@@ -932,6 +976,9 @@ export function RecordingPanel({
             const deleting =
               upload?.state === 'delete_pending' ||
               upload?.state === 'deleting';
+            const retention = state.retention.find(
+              (value) => value.recording_id === recording.id,
+            );
             return (
               <article key={recording.id}>
                 <div>
@@ -951,6 +998,11 @@ export function RecordingPanel({
                 {recording.error && (
                   <p className="account-alert">{recording.error.message}</p>
                 )}
+                <p className="quiet-note" role="status">
+                  {retention
+                    ? `Local audio scheduled for removal: ${new Date(retention.delete_after).toLocaleString()}. Notes and published transcripts stay.`
+                    : 'No automatic deletion deadline: waiting for a verified upload and canonical transcript confirmation.'}
+                </p>
                 {recording.inspection && (
                   <p>
                     Integrity: {recording.inspection.state}.{' '}

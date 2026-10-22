@@ -656,9 +656,31 @@ recordings a fresh bounded grace window: seven days if a matching canonical
 recording transcript already exists, otherwise 30 days. It does not purge old
 audio immediately based on historical or client-supplied timestamps.
 
-Local audio TTL/disk-budget enforcement, independent backup deletion-ledger
-replay and production storage drills remain release work. This server policy
-never deletes the sole unuploaded local copy.
+Local audio retention is separately enforced by Electron Main. Only a stopped
+recording with a fully verified immutable upload receipt and an authorized
+server canonical-transcript confirmation receives a local deletion deadline.
+Pending candidates and unique unuploaded recordings never qualify. The default
+is seven days from first canonical publication, capped by any shorter workspace
+policy. **Meeting audio → Local audio retention** sets a shorter 0–7-day
+device/workspace preference; zero removes eligible audio after confirmation.
+Increasing either preference cannot extend a recorded deadline. A server
+processing deadline that preceded later canonical publication is not used as
+the local post-canonical clock.
+
+Canonical proof, service/source binding and deadlines are encrypted locally;
+the due-time index is authenticated against that proof before removal. Cleanup
+runs at startup and every 30 seconds while the app is open, including offline
+for already confirmed recordings. It closes matching native review handles,
+uses the durable local deletion journal and reports failed filesystem cleanup
+for retry. It makes no remote DELETE request and preserves notes and all
+published text. New confirmation reads require the original authorized scope,
+share Main's bounded read budget and cannot recache after deletion or scope
+changes. Unavailable or older services leave unconfirmed audio intact and
+report confirmation failure rather than guessing eligibility.
+
+Disk-budget enforcement, independent backup deletion-ledger replay and
+production storage drills remain release work. Neither server expiry nor local
+retention deletes the sole unuploaded local copy.
 The main-process transfer core reads authenticated native ranges, checks the
 approved object origin/staging path and immutable checksum, excludes API
 credentials, rejects redirects, and reconciles already-verified chunks after a
