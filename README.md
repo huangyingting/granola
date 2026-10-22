@@ -294,7 +294,9 @@ Set `WIN_CSC_LINK` to an absolute local PFX/P12 file and
 certificate's **SHA-256 DER fingerprint** as `WINDOWS_SIGNING_CERT_SHA256`
 and its exact simple/common publisher name as `WINDOWS_PUBLISHER_NAME`.
 Never derive those trust pins from a downloaded candidate or commit private keys.
-PFX/P12 files and local environment files are ignored by Git.
+PFX/P12 files and local environment files are ignored by Git. PFX/P12 files
+are also excluded from server Docker build contexts, including nested paths
+and uppercase extensions; CI checks this with synthetic, non-certificate fixtures.
 
 This path supports **local PFX/P12 signing only**, using a certificate already
 trusted on the target Windows machines. Hardware tokens, HSMs and cloud signing

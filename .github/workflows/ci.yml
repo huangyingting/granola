@@ -53,9 +53,12 @@ jobs:
       - run: pnpm format:check
       - name: Build the unprivileged server image without credentials
         run: |
+          trap 'rm -f apps/.ci-signing-context-canary.PFX tools/.ci-signing-context-canary.p12' EXIT
+          printf '%s\n' 'Synthetic context exclusion fixture; not a certificate.' > apps/.ci-signing-context-canary.PFX
+          printf '%s\n' 'Synthetic context exclusion fixture; not a certificate.' > tools/.ci-signing-context-canary.p12
           docker build --tag windows-ai-notes-server:ci .
           docker run --rm --network none --entrypoint /opt/pnpm/pnpm windows-ai-notes-server:ci --version
-          docker run --rm --network none --entrypoint node windows-ai-notes-server:ci --input-type=module --eval "await import('./apps/api/dist/server.js'); await import('./apps/worker/dist/worker.js'); if (process.getuid() === 0) throw new Error('The server must not run as root.'); console.log('Unprivileged runtime imports verified.');"
+          docker run --rm --network none --entrypoint node windows-ai-notes-server:ci --input-type=module --eval "import {existsSync} from 'node:fs'; await import('./apps/api/dist/server.js'); await import('./apps/worker/dist/worker.js'); if (process.getuid() === 0) throw new Error('The server must not run as root.'); for (const path of ['apps/.ci-signing-context-canary.PFX', 'tools/.ci-signing-context-canary.p12']) if (existsSync(path)) throw new Error('Signing material entered the server image.'); console.log('Unprivileged runtime imports and signing-material exclusion verified.');"
   probe:
     strategy:
       fail-fast: false
