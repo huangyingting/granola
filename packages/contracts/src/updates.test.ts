@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  cachedUpdateSchema,
   compareUpdateVersions,
   packagedUpdatePolicySchema,
   updateFeedSchema,
@@ -64,5 +65,31 @@ describe('packaged update and feed contracts', () => {
     expect(updateFeedSchema.safeParse({ ...feed, ...change }).success).toBe(
       false,
     );
+  });
+  it('validates bounded cache receipts without granting their saved verification claims authority', () => {
+    const receipt = {
+      version: 1,
+      feed,
+      expected: {
+        current_version: '0.1.0',
+        version: '0.1.1',
+        certificate_sha256: policy.certificate_sha256,
+        publisher: policy.publisher,
+        product_name: policy.product_name,
+        bytes: feed.bytes,
+        sha512: feed.sha512,
+      },
+      verified_at: '2026-01-01T00:00:00.000Z',
+    };
+    expect(cachedUpdateSchema.parse(receipt)).toEqual(receipt);
+    for (const change of [
+      { verified: true },
+      { verified_at: 'not a date' },
+      { version: 2 },
+      { expected: { ...receipt.expected, version: '01.1.1' } },
+    ])
+      expect(
+        cachedUpdateSchema.safeParse({ ...receipt, ...change }).success,
+      ).toBe(false);
   });
 });

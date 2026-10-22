@@ -85,6 +85,12 @@ export const verifiedUpdateArtifactSchema = z.strictObject({
   ...identity,
   product_version: label,
 });
+export const cachedUpdateSchema = z.strictObject({
+  version: z.literal(1),
+  feed: updateFeedSchema,
+  expected: updateExpectationSchema,
+  verified_at: z.iso.datetime(),
+});
 export type PackagedUpdatePolicy = z.infer<typeof packagedUpdatePolicySchema>;
 export type UpdateFeed = z.infer<typeof updateFeedSchema>;
 export type UpdateExpectation = z.infer<typeof updateExpectationSchema>;

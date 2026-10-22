@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { createReadStream, existsSync } from 'node:fs';
-import { copyFile, mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { copyFile, mkdtemp, open, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -108,6 +108,36 @@ describe.skipIf(process.platform !== 'win32')(
             ),
           ),
         ).toMatchObject({ version: 1, feed, expected: ready.expected });
+        const restarted = new UpdateDownloads(
+          join(directory, 'Update cache'),
+          helper,
+          packagedPolicy,
+          '0.0.0',
+          {
+            fetch: async () => {
+              throw new Error('Restart recovery must not use the network.');
+            },
+          },
+        );
+        expect(await restarted.recover()).toMatchObject({
+          ready: { directory: ready.directory, installer: ready.installer },
+          removed: 0,
+          rejected: 0,
+          incomplete: 0,
+        });
+        const handle = await open(ready.installer, 'r+');
+        try {
+          await handle.write(Buffer.from([0]), 0, 1, 0);
+          await handle.sync();
+        } finally {
+          await handle.close();
+        }
+        expect(await restarted.recover()).toMatchObject({
+          ready: null,
+          removed: 0,
+          rejected: 1,
+        });
+        expect((await stat(ready.installer)).size).toBe(policy.bytes);
       } finally {
         await rm(directory, { recursive: true, force: true });
       }

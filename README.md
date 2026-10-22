@@ -307,6 +307,16 @@ allocations plus 512 MiB before a binary request. Cancellation and failures
 remove only that operation's stage; successful verification precedes atomic
 promotion. Cache metadata is not independent proof and must not replace
 signature/digest revalidation before installation.
+Restart recovery is bounded to 128 cache entries and two minutes. It reconstructs
+verification expectations from the current packaged policy and running version,
+never from saved signer pins or a receipt's previous verification claim. Only a
+freshly native-verified newer candidate is returned. Once one is accepted, older
+complete candidates are removed; already-installed versions and recognized
+partial stages older than 24 hours can also be pruned. Recent partial stages,
+rejected candidates and unknown contents are preserved and reported separately.
+Cleanup unlinks only recognized regular cache files and removes empty directories;
+it does not recursively delete discovered trees or follow links. This is staged
+download recovery, **not interrupted-installation rollback**.
 **The service is not wired to the application UI or an enabled update channel;
 safe installation/restart and failed-upgrade recovery remain unfinished.**
 
