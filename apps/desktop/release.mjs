@@ -135,6 +135,8 @@ export function childEnvironment(environment = process.env) {
     ),
     DOTNET_CLI_TELEMETRY_OPTOUT: '1',
     DOTNET_NOLOGO: '1',
+    POWERSHELL_TELEMETRY_OPTOUT: '1',
+    POWERSHELL_UPDATECHECK: 'Off',
   };
 }
 export function windowsVerifierPath(environment = process.env) {

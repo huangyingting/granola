@@ -152,6 +152,8 @@ describe('fail-closed signed candidate policy', () => {
       ProgramData: 'C:\\ProgramData',
       DOTNET_CLI_TELEMETRY_OPTOUT: '1',
       DOTNET_NOLOGO: '1',
+      POWERSHELL_TELEMETRY_OPTOUT: '1',
+      POWERSHELL_UPDATECHECK: 'Off',
     });
   });
   it('requires an explicit local PowerShell 7 producer tool without PATH or legacy fallback', () => {
