@@ -44,6 +44,7 @@ public sealed class UpdateInstallationTests
     [InlineData(@"\\?\C:\app.exe")]
     [InlineData(@"C:\app.exe:stream")]
     [InlineData(@"C:\folder\..\app.exe")]
+    [InlineData(@"C:\folder\.\app.exe")]
     [InlineData(@"C:\folder.\app.exe")]
     [InlineData(@"C:\folder \app.exe")]
     [InlineData(@"C:\folder\\app.exe")]
@@ -52,6 +53,26 @@ public sealed class UpdateInstallationTests
     public void RejectsAmbiguousNonlocalOrNoncanonicalPaths(string path)
     {
         Assert.False(UpdateInstallationVerifier.CanonicalPath(path));
+    }
+
+    [Theory]
+    [InlineData(@"C:\Valid path\app.exe")]
+    [InlineData(@"C:\Users\RUNNER~1\AppData\Local\Temp\Installed app\Windows AI Notes Preview.exe")]
+    public void AcceptsLexicallySafeLocalPathsWithoutRequiringOneLongNameSpelling(string path)
+    {
+        Assert.True(UpdateInstallationVerifier.CanonicalPath(path));
+    }
+
+    [Fact]
+    public void AcceptsTheExistingWindowsTemporaryDirectorySpellingIncludingItsShortNameAliases()
+    {
+        var temporary = Environment.GetEnvironmentVariable("TEMP");
+        Assert.NotNull(temporary);
+        var directory = Path.TrimEndingDirectorySeparator(temporary);
+        Assert.True(System.IO.Directory.Exists(directory));
+        Assert.True(UpdateInstallationVerifier.CanonicalPath(directory));
+        Assert.True(UpdateInstallationVerifier.CanonicalPath(
+            Path.Combine(directory, "Synthetic installed app", $"{Product}.exe")));
     }
 
     [Theory]

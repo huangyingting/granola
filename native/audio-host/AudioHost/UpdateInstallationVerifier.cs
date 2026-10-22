@@ -94,11 +94,11 @@ public static class UpdateInstallationVerifier
         actual[0] == '"' && actual.EndsWith($"\" {arguments}", StringComparison.Ordinal) &&
         string.Equals(actual.Substring(1, executable.Length), executable, StringComparison.OrdinalIgnoreCase);
 
+    // GetFullPath expands valid 8.3 aliases; physical identity is checked separately.
     internal static bool CanonicalPath(string path) =>
         path.Length is > 3 and <= 2048 && char.IsAsciiLetter(path[0]) && path[1] == ':' && path[2] == '\\' &&
         path.LastIndexOf(':') == 1 && !path.Any(char.IsControl) && !path.Any(c => c is '"' or '<' or '>' or '|' or '?' or '*' or '/') &&
-        path.Split('\\').Skip(1).All(part => part.Length > 0 && !part.EndsWith('.') && !part.EndsWith(' ')) &&
-        string.Equals(Path.GetFullPath(path), path, StringComparison.OrdinalIgnoreCase);
+        path.Split('\\').Skip(1).All(part => part.Length > 0 && !part.EndsWith('.') && !part.EndsWith(' '));
 
     internal static void RequireRegularPath(string path, bool directory)
     {
