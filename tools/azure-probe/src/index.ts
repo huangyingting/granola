@@ -25,7 +25,143 @@ import {
   QUESTION_RETRIEVAL_VERSION,
   questionEvidenceSchema,
   validateQuestionAnswer,
+  chatTurnSchema,
+  chatSourceSchema,
+  chatEventSchema,
+  QUESTION_CONTEXT_PROMPT_VERSION,
 } from '@windows-ai-notes/contracts/questions';
+import { SseDecoder } from '@windows-ai-notes/contracts/sse';
+
+async function probeChat(
+  db: Database,
+  providers: ReturnType<typeof createAzureProviders>,
+  base: string,
+  headers: Record<string, string>,
+  document: string,
+) {
+  let thread: string | undefined;
+  let inputTokens = 0,
+    outputTokens = 0,
+    previews = 0;
+  for (const language of ['en', 'zh'] as const) {
+    const key = randomUUID();
+    const body = {
+      note_revision: 1,
+      transcript_revision: 0,
+      language,
+      confirmed: true,
+      question:
+        language === 'en'
+          ? 'Who will send the launch checklist?'
+          : '什么时候需要发出？',
+      ...(thread ? { thread_id: thread } : {}),
+    };
+    const submit = () =>
+      fetch(`${base}/v1/documents/${document}/chat-turns`, {
+        method: 'POST',
+        redirect: 'error',
+        signal: AbortSignal.timeout(15_000),
+        headers: {
+          ...headers,
+          'content-type': 'application/json',
+          'idempotency-key': key,
+        },
+        body: JSON.stringify(body),
+      });
+    const accepted = await submit();
+    if (accepted.status !== 202)
+      throw new Error('Synthetic chat submission failed.');
+    const turn = chatTurnSchema.parse(await accepted.json());
+    thread = turn.thread_id;
+    await runOnce(db, providers);
+    const complete = chatTurnSchema.parse(
+      await (
+        await fetch(`${base}/v1/chat-turns/${turn.id}`, {
+          headers,
+          redirect: 'error',
+          signal: AbortSignal.timeout(15_000),
+        })
+      ).json(),
+    );
+    if (
+      complete.state !== 'succeeded' ||
+      complete.result?.answer.status !== 'answered' ||
+      (language === 'en'
+        ? !/\bMira\b/u.test(complete.result.answer.answer.text)
+        : complete.result.prompt_version !== QUESTION_CONTEXT_PROMPT_VERSION ||
+          !/(星期五|周五|礼拜五)/u.test(complete.result.answer.answer.text))
+    )
+      throw new Error(
+        'Synthetic durable chat did not produce the expected cited answer or contextual follow-up.',
+      );
+    inputTokens += complete.result.usage.input_tokens;
+    outputTokens += complete.result.usage.output_tokens;
+    const replay = chatTurnSchema.parse(await (await submit()).json());
+    if (
+      replay.id !== turn.id ||
+      replay.state !== 'succeeded' ||
+      replay.provider_requests !== 1
+    )
+      throw new Error(
+        'A repeated accepted chat receipt did not recover its original completed turn.',
+      );
+    const events = await fetch(`${base}/v1/chat-turns/${turn.id}/events`, {
+      headers,
+      redirect: 'error',
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!events.ok) throw new Error('Synthetic durable chat replay failed.');
+    const decoder = new SseDecoder();
+    const frames = [
+      ...decoder.push(new TextEncoder().encode(await events.text())),
+      ...decoder.finish(),
+    ];
+    const acceptedEvents = frames.map((frame) =>
+      chatEventSchema.parse(JSON.parse(frame.data)),
+    );
+    if (
+      acceptedEvents.at(-1)?.event_type !== 'answer.completed' ||
+      acceptedEvents.length !== complete.last_event_id
+    )
+      throw new Error('Synthetic durable chat replay lost an accepted event.');
+    previews += acceptedEvents.filter(
+      (event) =>
+        event.event_type === 'turn.progress' &&
+        typeof event.payload === 'object' &&
+        event.payload &&
+        'text' in event.payload,
+    ).length;
+    const source = await fetch(`${base}/v1/chat-turns/${turn.id}/citation`, {
+      method: 'POST',
+      headers: { ...headers, 'content-type': 'application/json' },
+      redirect: 'error',
+      signal: AbortSignal.timeout(15_000),
+      body: JSON.stringify(complete.result.answer.answer.citations[0]),
+    });
+    if (
+      !source.ok ||
+      chatSourceSchema.parse(await source.json()).document_id !== document
+    )
+      throw new Error('Synthetic durable chat citation inspection failed.');
+  }
+  if (await runOnce(db, providers))
+    throw new Error('Receipt replay unexpectedly created more AI work.');
+  console.log(
+    JSON.stringify({
+      durable_chat: 'passed',
+      provider_requests: 2,
+      contextual_chinese_followup: true,
+      durable_receipts_replayed: true,
+      complete_event_replay: true,
+      cited_sources_inspected: true,
+      preview_events: previews,
+      input_tokens: inputTokens,
+      output_tokens: outputTokens,
+      credentials_logged: false,
+      real_meeting_quality_evaluated: false,
+    }),
+  );
+}
 
 async function probeQuestions(
   providers: ReturnType<typeof createAzureProviders>,
@@ -202,11 +338,18 @@ async function main() {
       'env-file': { type: 'string' },
       'evidence-only': { type: 'boolean', default: false },
       'question-only': { type: 'boolean', default: false },
+      'chat-only': { type: 'boolean', default: false },
     },
   });
   if (process.env.NODE_ENV === 'production')
     throw new Error('Synthetic probe is disabled in production mode.');
-  if (values['question-only'] && values['evidence-only'])
+  if (
+    [
+      values['question-only'],
+      values['evidence-only'],
+      values['chat-only'],
+    ].filter(Boolean).length > 1
+  )
     throw new Error('Choose exactly one synthetic probe mode.');
   const config = loadAzureConfig({
     ...process.env,
@@ -253,6 +396,8 @@ async function main() {
     });
     if (!created.ok) throw new Error('Synthetic document creation failed.');
     const id = documentSchema.parse(await created.json()).id;
+    if (values['chat-only'])
+      return await probeChat(db, providers, base, headers, id);
     const synthesis = await fetch(
       `https://${config.AZURE_SPEECH_REGION}.tts.speech.microsoft.com/cognitiveservices/v1`,
       {

@@ -1,4 +1,3 @@
-import { setTimeout as delay } from 'node:timers/promises';
 import {
   summaryPromptVersion,
   SUMMARY_USAGE_RESERVATION,
@@ -21,6 +20,8 @@ import { transcribeRecording } from './recording.js';
 import { withUsage } from './usage.js';
 import { summarizeLongMeeting } from './summary.js';
 import { summaryPreview } from './preview.js';
+import { monitorLease } from './lease.js';
+import { answerQuestion } from './chat.js';
 
 export async function runOnce(
   db: Database,
@@ -28,30 +29,16 @@ export async function runOnce(
   shutdown = new AbortController().signal,
   storage: RecordingBlobs | null = null,
 ): Promise<boolean> {
+  const question = await db.chat.claim();
+  if (question) {
+    await answerQuestion(db, providers, question, shutdown);
+    return true;
+  }
   const job = await db.claim();
   if (!job) return false;
-  const providerAbort = new AbortController();
-  const monitorStop = new AbortController();
-  const monitor = (async () => {
-    try {
-      while (!monitorStop.signal.aborted) {
-        await delay(5000, undefined, { signal: monitorStop.signal });
-        if (!(await db.renew(job))) {
-          providerAbort.abort();
-          break;
-        }
-      }
-    } catch (error) {
-      if (!(error instanceof Error && error.name === 'AbortError')) {
-        console.error(
-          JSON.stringify({ code: 'lease_renewal_failed', job_id: job.id }),
-        );
-        providerAbort.abort();
-      }
-    }
-  })();
+  const lease = monitorLease(() => db.renew(job), { job_id: job.id }, shutdown);
   try {
-    const signal = AbortSignal.any([shutdown, providerAbort.signal]);
+    const signal = lease.signal;
     if (job.input.kind === 'recording_transcription') {
       if (!storage)
         throw new ServiceError(
@@ -180,8 +167,7 @@ export async function runOnce(
       retryable: job.input.kind !== 'summary' && failure.retryable,
     });
   } finally {
-    monitorStop.abort();
-    await monitor;
+    await lease.stop();
   }
   return true;
 }

@@ -17,6 +17,8 @@ import {
   questionSearchTerms,
   type QuestionEvidence,
   type QuestionRequest,
+  questionContextSchema,
+  type QuestionContext,
 } from '@windows-ai-notes/contracts/questions';
 import type { Database, Transaction } from './index.js';
 
@@ -53,11 +55,12 @@ export class MeetingQuestions {
     id: string,
     value: QuestionRequest,
     tx?: Transaction,
+    context?: QuestionContext,
   ): Promise<QuestionEvidence> {
     const request = questionRequestSchema.parse(value);
     if (!tx)
       return this.database.transaction((client) =>
-        this.evidence(user, id, request, client),
+        this.evidence(user, id, request, client, context),
       );
     const doc = await this.database.document(user, id, tx);
     if (
@@ -81,11 +84,12 @@ export class MeetingQuestions {
         'Questions require the canonical meeting transcript.',
         500,
       );
-    const context = {
+    const frozen = {
       ...request,
       document_id: id,
       version: QUESTION_VERSION,
       retrieval_version: QUESTION_RETRIEVAL_VERSION,
+      ...(context ? { context: questionContextSchema.parse(context) } : {}),
     };
     const note: SummaryEvidenceUnit | null = doc.notes.trim()
       ? {
@@ -109,7 +113,7 @@ export class MeetingQuestions {
         tx,
       );
       const full = questionEvidenceSchema.safeParse({
-        ...context,
+        ...frozen,
         mode: 'full',
         units: [
           ...(note ? [note] : []),
@@ -124,7 +128,21 @@ export class MeetingQuestions {
       }
     }
 
-    const terms = questionSearchTerms(request.question);
+    const currentTerms = questionSearchTerms(request.question);
+    const historyTerms = questionSearchTerms(
+      context?.turns
+        .toReversed()
+        .map((turn) => `${turn.question}\n${turn.answer}`)
+        .join('\n') ?? '',
+    );
+    const terms = context
+      ? [
+          ...new Set([
+            ...currentTerms.slice(0, 16),
+            ...historyTerms.slice(0, 16),
+          ]),
+        ]
+      : currentTerms;
     const rows = terms.length
       ? await tx.query<{ position: number; segment: unknown; score: number }>(
           `WITH ranked AS MATERIALIZED (
@@ -176,7 +194,7 @@ export class MeetingQuestions {
     const selected: SummaryEvidenceUnit[] = [];
     const add = (unit: SummaryEvidenceUnit) => {
       const proposed = {
-        ...context,
+        ...frozen,
         mode: 'retrieved',
         units: [...selected, unit],
       };
@@ -211,7 +229,7 @@ export class MeetingQuestions {
     }
     await this.database.document(user, id, tx);
     return questionEvidenceSchema.parse({
-      ...context,
+      ...frozen,
       mode: 'retrieved',
       units: selected,
     });

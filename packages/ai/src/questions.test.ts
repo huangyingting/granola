@@ -5,6 +5,8 @@ import { answerPreview, overviewPreview } from './stream.js';
 import {
   QUESTION_VERSION,
   QUESTION_RETRIEVAL_VERSION,
+  QUESTION_CONTEXT_PROMPT_VERSION,
+  questionPromptVersion,
   type QuestionEvidence,
 } from '@windows-ai-notes/contracts/questions';
 import type { AzureConfig } from './config.js';
@@ -92,6 +94,30 @@ function streamed(value: unknown) {
 const signal = () => new AbortController().signal;
 
 describe('read-only Azure current-meeting answers', () => {
+  it('versions bounded conversation context separately and never promotes previous answers to meeting evidence', async () => {
+    const input: QuestionEvidence = {
+      ...evidence,
+      context: {
+        version: 'meeting-question-context-v1',
+        turns: [
+          { question: 'Who owns it?', answer: 'An earlier, untrusted answer.' },
+        ],
+      },
+    };
+    const provider = createAzureProviders(config, async (_url, init) => {
+      const body = JSON.parse(String(init?.body)) as {
+        messages: { content: string }[];
+      };
+      expect(body.messages[0]!.content).toContain(
+        'never cite a previous answer',
+      );
+      expect(body.messages[0]!.content).toContain('older revisions');
+      expect(JSON.parse(body.messages[1]!.content)).toEqual(input);
+      return response(answer());
+    });
+    expect(questionPromptVersion(input)).toBe(QUESTION_CONTEXT_PROMPT_VERSION);
+    expect((await provider.answer!(input, signal())).answer).toEqual(answer());
+  });
   it('uses only configured deployment and immutable evidence with no model tools', async () => {
     let url = '',
       body: Record<string, unknown> = {};

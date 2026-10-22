@@ -31,11 +31,13 @@ import { UsageStore } from './usage.js';
 import { LiveSourceStore } from './live.js';
 import { SummaryStages } from './summaries.js';
 import { MeetingQuestions } from './questions.js';
+import { ChatStore } from './chat.js';
 import {
   summaryCitations,
   summarySourceSchema,
 } from '@windows-ai-notes/contracts/generation';
 export type { UsageReservation } from './usage.js';
+export type { ClaimedChat } from './chat.js';
 export type { LiveClaim, LiveStart, LiveCursor } from './live.js';
 export { LIVE_MEDIA_MS, LIVE_LEASE_MS } from './live.js';
 export { recordChange } from './sync.js';
@@ -49,6 +51,7 @@ const migrationFiles = [
   '006_ai_usage.sql',
   '007_live_sources.sql',
   '008_summary_stages.sql',
+  '009_chat.sql',
 ];
 
 export type Transaction = pg.PoolClient;
@@ -155,6 +158,7 @@ export class Database {
   readonly live: LiveSourceStore;
   readonly summaries: SummaryStages;
   readonly questions: MeetingQuestions;
+  readonly chat: ChatStore;
   constructor(url: string) {
     this.pool = new pg.Pool({
       connectionString: url,
@@ -170,6 +174,7 @@ export class Database {
     this.live = new LiveSourceStore(this);
     this.summaries = new SummaryStages(this);
     this.questions = new MeetingQuestions(this);
+    this.chat = new ChatStore(this);
     this.pool.on('error', () =>
       console.error(
         'database_connection_failed: idle PostgreSQL connection closed.',
@@ -204,6 +209,15 @@ export class Database {
     } finally {
       client.release();
     }
+  }
+  async pendingWork(user: string, tx: Transaction): Promise<number> {
+    return (
+      await tx.query<{ count: number }>(
+        `SELECT ((SELECT count(*) FROM jobs WHERE owner_id=$1 AND state IN ('queued','running','retry_wait'))+
+       (SELECT count(*) FROM chat_turns WHERE owner_id=$1 AND state IN ('queued','running')))::int count`,
+        [user],
+      )
+    ).rows[0]!.count;
   }
   async migrate(): Promise<void> {
     const migrations = await Promise.all(
@@ -730,6 +744,9 @@ export class Database {
   async retryRecordingTranscription(user: string, id: string) {
     const visible = await this.job(user, id);
     await this.transaction(async (tx) => {
+      await tx.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', [
+        `job-budget:${user}`,
+      ]);
       await this.document(user, visible.document_id, tx);
       const row = (
         await tx.query<{
@@ -770,15 +787,7 @@ export class Database {
           'Processing progress expired. Explicitly start a new transcription to send audio again.',
           410,
         );
-      await tx.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', [
-        `job-budget:${user}`,
-      ]);
-      const pending = (
-        await tx.query<{ count: number }>(
-          "SELECT count(*)::integer count FROM jobs WHERE owner_id=$1 AND state IN ('queued','running','retry_wait')",
-          [user],
-        )
-      ).rows[0]!.count;
+      const pending = await this.pendingWork(user, tx);
       if (pending >= 8)
         throw new ServiceError(
           'quota_exceeded',
@@ -807,6 +816,9 @@ export class Database {
     audio: Buffer | null = null,
   ): Promise<Job> {
     const jobId = await this.transaction(async (tx) => {
+      await tx.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', [
+        `job-budget:${userId}`,
+      ]);
       const doc = await this.document(userId, id, tx);
       const existing = await tx.query<{ id: string; request_hash: string }>(
         'SELECT id,request_hash FROM jobs WHERE document_id=$1 AND owner_id=$2 AND kind=$3 AND idempotency_key=$4',
@@ -821,14 +833,7 @@ export class Database {
           );
         return existing.rows[0].id;
       }
-      await tx.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', [
-        `job-budget:${userId}`,
-      ]);
-      const count = await tx.query<{ count: string }>(
-        "SELECT count(*) FROM jobs WHERE owner_id=$1 AND state IN ('queued','running','retry_wait')",
-        [userId],
-      );
-      if (Number(count.rows[0]!.count) >= 8)
+      if ((await this.pendingWork(userId, tx)) >= 8)
         throw new ServiceError(
           'quota_exceeded',
           'At most eight pending jobs are allowed per user.',
@@ -1092,6 +1097,8 @@ export class Database {
       await this.document(userId, id, tx);
       await this.recordings.removeDocument(tx, id);
       await tx.query('DELETE FROM live_sources WHERE document_id=$1', [id]);
+      await tx.query('DELETE FROM chat_threads WHERE document_id=$1', [id]);
+      await tx.query('DELETE FROM chat_requests WHERE document_id=$1', [id]);
       await tx.query(
         'DELETE FROM recording_transcription_runs WHERE job_id IN (SELECT id FROM jobs WHERE document_id=$1)',
         [id],
@@ -1376,6 +1383,7 @@ export class Database {
       );
       await this.sync.prune(tx);
       await this.live.prune(tx);
+      await this.chat.prune(tx);
     });
   }
 }

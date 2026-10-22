@@ -1,8 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { once } from 'node:events';
 import { jobEventStateSchema } from '@windows-ai-notes/contracts/generation';
 import { Readable } from 'node:stream';
-import { setTimeout as delay } from 'node:timers/promises';
 import Fastify from 'fastify';
 import rateLimit from '@fastify/rate-limit';
 import { z } from 'zod';
@@ -36,6 +34,8 @@ import { registerRecordingRoutes } from './recordings.js';
 import { parse } from './parse.js';
 import type { RealtimeProvider } from '@windows-ai-notes/ai/realtime';
 import { prepareRealtimeRoutes } from './realtime.js';
+import { registerChatRoutes } from './chat.js';
+import { streamEvents } from './events.js';
 
 const idParams = z.strictObject({ id: resourceId });
 const revisionQuery = z.strictObject({
@@ -132,6 +132,7 @@ export async function createServer(
   });
   registerRealtime();
   registerRecordingRoutes(app, db, storage);
+  registerChatRoutes(app, db, streams, shutdown.signal);
   app.get('/health', async () => {
     try {
       await db.pool.query('SELECT 1');
@@ -479,88 +480,9 @@ export async function createServer(
   });
   app.get('/v1/jobs/:id/events', async (request, reply) => {
     const { id } = parse(idParams, request.params);
-    const identity = principal(request);
-    const rawCursor = request.headers['last-event-id'];
-    let cursor =
-      rawCursor === undefined
-        ? 0
-        : Number(parse(z.string().regex(/^\d+$/).max(10), rawCursor));
-    if (!Number.isSafeInteger(cursor) || cursor > 2_147_483_647)
-      throw new ServiceError(
-        'invalid_event_cursor',
-        'Invalid event sequence.',
-        400,
-      );
-    await db.events(identity.userId, id, cursor);
-    if ((streams.get(identity.userId) ?? 0) >= 2)
-      throw new ServiceError(
-        'quota_exceeded',
-        'At most two event subscriptions are allowed per user.',
-        429,
-        true,
-      );
-    streams.set(identity.userId, (streams.get(identity.userId) ?? 0) + 1);
-    const closed = new AbortController();
-    const signal = AbortSignal.any([
-      closed.signal,
-      shutdown.signal,
-      AbortSignal.timeout(
-        Math.max(1, Math.min(60_000, identity.expiresAt - Date.now())),
-      ),
-    ]);
-    reply.raw.once('close', () => closed.abort());
-    reply.hijack();
-    reply.raw.writeHead(200, {
-      'content-type': 'text/event-stream',
-      'cache-control': 'no-store',
-      'x-content-type-options': 'nosniff',
-      'x-accel-buffering': 'no',
-    });
-    try {
-      let heartbeat = Date.now();
-      while (!signal.aborted && Date.now() < identity.expiresAt) {
-        const batch = await db.events(identity.userId, id, cursor);
-        for (const event of batch.events) {
-          if (signal.aborted || Date.now() >= identity.expiresAt) break;
-          if (
-            !reply.raw.write(
-              `id: ${event.seq}\nevent: ${event.event_type}\ndata: ${JSON.stringify(event)}\n\n`,
-            )
-          ) {
-            await once(reply.raw, 'drain', { signal });
-          }
-          cursor = event.seq;
-        }
-        if (batch.terminal && batch.events.length < 50) break;
-        if (Date.now() - heartbeat >= 5000) {
-          if (!reply.raw.write(': heartbeat\n\n'))
-            await once(reply.raw, 'drain', { signal });
-          heartbeat = Date.now();
-        }
-        if (batch.events.length === 50) continue;
-        await delay(500, undefined, { signal });
-      }
-    } catch (error) {
-      if (
-        !(
-          error instanceof ServiceError &&
-          [401, 403, 404].includes(error.status)
-        ) &&
-        !(error instanceof Error && error.name === 'AbortError')
-      ) {
-        console.error(
-          JSON.stringify({
-            code: 'event_stream_failed',
-            request_id: request.id,
-          }),
-        );
-      }
-    } finally {
-      const remaining = (streams.get(identity.userId) ?? 1) - 1;
-      if (remaining > 0) streams.set(identity.userId, remaining);
-      else streams.delete(identity.userId);
-      reply.raw.end();
-    }
+    return streamEvents(request, reply, streams, shutdown.signal, (cursor) =>
+      db.events(principal(request).userId, id, cursor),
+    );
   });
   return app;
 }

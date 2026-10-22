@@ -304,6 +304,44 @@ describe.skipIf(!databaseUrl)(
         ).units,
       ).toEqual([]);
     });
+    it('uses the newest bounded conversation terms for reference-only long-meeting retrieval', async () => {
+      const { document, segments, request } = await source(1101, '');
+      segments[1099]!.text = 'Checklist shipping is Friday.';
+      await replace(document.id, segments);
+      const result = await db.questions.evidence(
+        actor.user_id,
+        document.id,
+        {
+          ...request,
+          transcript_revision: 2,
+          question: 'When is it due?',
+        },
+        undefined,
+        {
+          version: 'meeting-question-context-v1',
+          turns: [
+            {
+              question: 'Which phrase?',
+              answer: Array.from(
+                { length: 100 },
+                (_, index) => `word${index}`,
+              ).join(' '),
+            },
+            {
+              question: 'Who owns the checklist?',
+              answer: 'Mira owns the checklist.',
+            },
+          ],
+        },
+      );
+      expect(result.mode).toBe('retrieved');
+      expect(
+        result.units.some((unit) => unit.citation.id === segments[1099]!.id),
+      ).toBe(true);
+      expect(result.units.every((unit) => unit.citation.revision === 2)).toBe(
+        true,
+      );
+    });
     it('rechecks authorization after the initial frozen-source read', async () => {
       const { document, request } = await source(1101);
       const header = db.transcripts.header.bind(db.transcripts);

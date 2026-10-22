@@ -650,12 +650,7 @@ export class SummaryStages {
       const input = jobInputSchema.parse(row.input);
       if (input.kind !== 'summary' || digest(input, true) !== run.input_hash)
         throw changed();
-      const pending = (
-        await tx.query<{ count: number }>(
-          "SELECT count(*)::integer count FROM jobs WHERE owner_id=$1 AND state IN ('queued','running','retry_wait')",
-          [user],
-        )
-      ).rows[0]!.count;
+      const pending = await this.database.pendingWork(user, tx);
       if (pending >= 8)
         throw new ServiceError(
           'quota_exceeded',

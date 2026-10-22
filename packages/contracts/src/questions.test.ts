@@ -9,6 +9,7 @@ import {
   questionRequestSchema,
   questionSearchTerms,
   insufficientQuestionEvidence,
+  questionContextSchema,
   validateQuestionAnswer,
   type QuestionEvidence,
 } from './questions.js';
@@ -44,6 +45,33 @@ const answered = () => ({
   status: 'answered',
 });
 describe('versioned current-meeting question evidence', () => {
+  it('bounds server-owned conversation context independently and rejects client-shaped extra source fields', () => {
+    const turn = { question: 'Who owns the checklist?', answer: 'Mira.' };
+    const context = { version: 'meeting-question-context-v1', turns: [turn] };
+    expect(questionContextSchema.parse(context)).toEqual(context);
+    expect(
+      questionContextSchema.safeParse({ ...context, turns: [turn, turn, turn] })
+        .success,
+    ).toBe(false);
+    expect(
+      questionContextSchema.safeParse({ ...context, turns: [] }).success,
+    ).toBe(false);
+    expect(
+      questionContextSchema.safeParse({
+        ...context,
+        turns: [{ ...turn, citation: evidence.units[0]!.citation }],
+      }).success,
+    ).toBe(false);
+    expect(
+      questionContextSchema.safeParse({
+        ...context,
+        turns: [{ ...turn, answer: '预算'.repeat(2000) }],
+      }).success,
+    ).toBe(false);
+    expect(
+      questionEvidenceSchema.parse({ ...evidence, context }).context,
+    ).toEqual(context);
+  });
   it('retains the exact question and requires a closed bounded evidence package', () => {
     expect(questionEvidenceSchema.parse(evidence)).toEqual(evidence);
     expect(

@@ -12,6 +12,7 @@ import {
 import { canonicalJson } from '@windows-ai-notes/contracts/content';
 import type { Database, Transaction, ClaimedJob } from './index.js';
 import { LIVE_MEDIA_MS, type LiveClaim } from './live.js';
+import type { ClaimedChat } from './chat.js';
 
 const units = ['input_tokens', 'output_tokens', 'audio_ms'] as const;
 type Totals = z.infer<typeof usageTotalsSchema>;
@@ -161,11 +162,22 @@ export class UsageStore {
       ? reserve(transaction)
       : this.database.transaction(reserve);
   }
+  async startChat(
+    claim: ClaimedChat,
+    request: UsageReservation,
+    tx: Transaction,
+  ): Promise<string> {
+    await this.database.chat.authorizeClaim(tx, claim);
+    return this.reserve(tx, claim.ownerId, request, { kind: 'chat', claim });
+  }
   private async reserve(
     tx: Transaction,
     owner: string,
     request: UsageReservation,
-    origin: { kind: 'job'; job: ClaimedJob } | { kind: 'live'; id: string },
+    origin:
+      | { kind: 'job'; job: ClaimedJob }
+      | { kind: 'live'; id: string }
+      | { kind: 'chat'; claim: ClaimedChat },
   ): Promise<string> {
     const budget = usageTotals(request.budget);
     if (
@@ -191,9 +203,14 @@ export class UsageStore {
               'SELECT id FROM ai_usage_calls WHERE job_id=$1 AND lease_token=$2 AND operation=$3',
               [origin.job.id, origin.job.leaseToken, request.operation],
             )
-          : tx.query('SELECT id FROM ai_usage_calls WHERE live_lease_id=$1', [
-              origin.id,
-            ]))
+          : origin.kind === 'live'
+            ? tx.query('SELECT id FROM ai_usage_calls WHERE live_lease_id=$1', [
+                origin.id,
+              ])
+            : tx.query(
+                'SELECT id FROM ai_usage_calls WHERE chat_turn_id=$1 AND lease_token=$2 AND operation=$3',
+                [origin.claim.id, origin.claim.leaseToken, request.operation],
+              ))
       ).rowCount
     )
       throw new ServiceError(
@@ -210,20 +227,25 @@ export class UsageStore {
       );
     const id = randomUUID();
     await tx.query(
-      `INSERT INTO ai_usage_calls(id,owner_id,period_start,job_id,lease_token,operation,provider,configuration_version,reserved,request_kind,live_lease_id)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+      `INSERT INTO ai_usage_calls(id,owner_id,period_start,job_id,lease_token,operation,provider,configuration_version,reserved,request_kind,live_lease_id,chat_turn_id)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
       [
         id,
         owner,
         start,
         origin.kind === 'job' ? origin.job.id : null,
-        origin.kind === 'job' ? origin.job.leaseToken : null,
+        origin.kind === 'job'
+          ? origin.job.leaseToken
+          : origin.kind === 'chat'
+            ? origin.claim.leaseToken
+            : null,
         request.operation,
         request.provider,
         request.configurationVersion,
         JSON.stringify(budget),
         origin.kind,
         origin.kind === 'live' ? origin.id : null,
+        origin.kind === 'chat' ? origin.claim.id : null,
       ],
     );
     await tx.query(

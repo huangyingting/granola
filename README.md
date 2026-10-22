@@ -360,10 +360,9 @@ therefore pause when their account allowance cannot reserve another stage.
 Original cited segments remain inspectable after a newer canonical transcript
 replaces the selected revision. These structural checks do not prove semantic
 support, complete decision/action recall or language quality; approved
-real-meeting evaluation remains a release gate. End-to-end current-meeting chat is
-not implemented yet.
+real-meeting evaluation remains a release gate. Desktop chat is not implemented yet.
 
-### Current-meeting question groundwork
+### Current-meeting questions and durable chat
 
 The server-side question evidence builder pins the current note and canonical
 transcript revisions. It uses the complete authorized context when its serialized
@@ -379,10 +378,53 @@ supplied source locators are accepted. No evidence means an explicit local
 insufficiency response without a paid request. Retrieval is deliberately lexical,
 not multilingual semantic search; a missing match is not proof that a fact is
 absent from the whole meeting. Citation validation is not semantic verification.
-This foundation is not exposed as a chat API or desktop workflow yet: durable
-threads, consent/idempotency, fenced paid dispatch, history, replay and citation
-inspection must be wired before that feature is available. Existing strict job
-and result schemas remain unchanged.
+
+The authenticated server now exposes document-owned threads and queued question
+turns, separate from legacy jobs and synchronization changes.
+`GET /v1/chat-capabilities` reports server support. Submit
+`POST /v1/documents/{id}/chat-turns` with an `Idempotency-Key` and
+`{note_revision,transcript_revision,language,question,confirmed:true,thread_id?}`.
+The server freezes the evidence and up to two recent completed same-thread
+question/answer pairs (at most 8,192 serialized bytes). History is untrusted
+reference-resolution context, may concern older revisions, and is never an
+additional citation source. Its prompt has a separate immutable version.
+Accepted receipt replay uses the original body/key before rebuilding sources.
+
+`GET /v1/documents/{id}/chat-threads` pages conversations;
+`GET /v1/chat-threads/{id}/turns?after=0` pages history in question order.
+`GET /v1/chat-turns/{id}` returns the authoritative turn and result;
+`GET /v1/chat-turns/{id}/event-state` supplies a coherent turn/cursor snapshot.
+`GET /v1/chat-turns/{id}/events` supports `Last-Event-ID`, bounded replay batches,
+heartbeats and token-lifetime deadlines. Chat and legacy streams share a two-read
+subscription limit; their event envelopes remain separate. Unverified answer
+previews are lease-fenced, monotonic and capped at 80 saved updates per attempt.
+Only validated answers with matching settled usage are published as results.
+
+The worker atomically commits each provider reservation and sending marker.
+An abandoned sending marker is never automatically resent. Failed turns expose
+a single-use recovery token for
+`POST /v1/chat-turns/{id}/resume` with `{confirmed:true,resume_token}`; lost replies
+replay the consumed receipt without another dispatch. There are at most three
+worker attempts per turn, one active turn per thread, and eight pending questions
+and legacy jobs per user. Oldest eligible work across the two queues gets
+priority. Known failed usage and uncertain earlier calls remain accounted for.
+A later question supersedes recovery of an earlier failed turn. Provider/prompt
+substitutions require a new request instead of silently changing a resumed call.
+
+`POST /v1/chat-turns/{id}/cancel` requires `{confirmed:true}`.
+`POST /v1/chat-turns/{id}/citation` accepts only a completed answer's citation and
+returns its authorized frozen original excerpts, even after note/transcript edits.
+`DELETE /v1/chat-threads/{id}` requires `{confirmed:true}` and removes its turns,
+events and frozen sources. Body-free request receipts prevent a lost original
+submission from recreating a deleted thread; document deletion also removes those
+receipts. Late usage receipts remain accountable without resurrecting content.
+Unfinished source caches expire after 24 hours, replay events after seven days;
+successful answer sources survive cache expiry until conversation/document deletion.
+
+Apply migration `009_chat.sql` through `pnpm db:migrate` before starting the
+updated API/worker. Existing strict job/result contracts are unchanged.
+Main-owned desktop chat intents, encrypted offline history/replay and the chat UI
+still need implementation; server support is not a finished desktop chat feature.
 
 ### Live generation and replay
 
@@ -681,7 +723,7 @@ cancelled/completed jobs cannot be resumed. Recording tracks remain bounded to f
 hours each (the desktop capture preview stops at one hour), with at most two tracks.
 
 This first slice uses PostgreSQL polling/leases as the durable scheduler rather
-than introducing unused Redis/BullMQ infrastructure. Current-meeting chat and
+than introducing unused Redis/BullMQ infrastructure. Desktop chat and
 the remaining production release gates are still implementation work.
 Durable usage reservations and receipts are implemented as described above;
 they do not provide exactly-once billing or reconcile Azure invoices.
@@ -960,6 +1002,19 @@ pnpm azure:probe --question-only --env-file ../ReadWise/.env
 
 It does not establish real-meeting answer quality or retrieval recall.
 
+The durable chat mode uses its own isolated PostgreSQL schema and makes exactly
+two streamed OpenAI requests, with no Speech requests. It exercises real
+authenticated API acceptance, worker dispatch/accounting, an English cited answer,
+a Chinese follow-up using the frozen conversation context, receipt replay, complete
+event replay and authorized citation inspection:
+
+```sh
+DATABASE_URL=postgresql://notes:notes-local-only@127.0.0.1:55432/notes \
+  pnpm azure:probe --chat-only --env-file ../ReadWise/.env
+```
+
+It does not establish desktop restart recovery or real-meeting semantic quality.
+
 The separate live probe makes paid Speech TTS and streaming STT calls, but needs
 neither PostgreSQL nor OpenAI requests:
 
@@ -975,8 +1030,10 @@ waits for worker cleanup. Audio stays in memory; credentials/provider bodies are
 not printed. An English synthetic live run passed with 3,200 ms of media; it is
 not acceptance evidence for uninterrupted meetings, Chinese, acoustic conditions
 or production reliability. These probes import only the six approved Azure fields
-from the specified file and are disabled in production mode. They are deployment
-diagnostics, not account-authorized application requests or invoice accounting.
+from the specified file and are disabled in production mode. Direct-provider
+diagnostics bypass account quotas; `--chat-only` exercises the authenticated API
+and application usage ledger with an isolated synthetic account. Neither provides
+production-user acceptance or Azure invoice reconciliation.
 
 ## Requirements and setup
 
