@@ -85,6 +85,19 @@ export const verifiedUpdateArtifactSchema = z.strictObject({
   ...identity,
   product_version: label,
 });
+const localWindowsPath = z
+  .string()
+  .min(4)
+  .max(2048)
+  .regex(/^[A-Za-z]:\\/u)
+  .refine((value) => !/[\u0000-\u001f\u007f]/u.test(value));
+export const updateInstallationSchema = z.strictObject({
+  directory: localWindowsPath,
+  executable: localWindowsPath,
+  application_version: updateVersionSchema,
+  product_name: label,
+  architecture: z.literal('x64'),
+});
 export const cachedUpdateSchema = z.strictObject({
   version: z.literal(1),
   feed: updateFeedSchema,

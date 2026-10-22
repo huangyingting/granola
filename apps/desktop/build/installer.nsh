@@ -2,6 +2,9 @@
   !if "${APP_ID}" != "io.github.windowsainotes.desktop"
     !error "The installer identity must match the existing application."
   !endif
+  !if "${APP_GUID}" != "dbdb543e-07bd-5ef6-99a5-00d80b9bdfb6"
+    !error "The installer registration must match the existing application."
+  !endif
   !ifndef APP_64
     !error "The update installer requires an embedded x64 package."
   !endif

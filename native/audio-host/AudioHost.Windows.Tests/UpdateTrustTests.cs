@@ -11,10 +11,10 @@ namespace WindowsAiNotes.AudioWindowsTests;
 
 public sealed class UpdateTrustTests
 {
-    private static string Reference => Path.Combine(
+    internal static string Reference => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "PowerShell", "7", "pwsh.exe");
 
-    private static UpdateTrustPolicy ReferencePolicy()
+    internal static UpdateTrustPolicy ReferencePolicy()
     {
 #pragma warning disable SYSLIB0057 // X509CertificateLoader cannot extract the independent reference signer from a PE file.
         using var certificate = X509Certificate.CreateFromSignedFile(Reference);

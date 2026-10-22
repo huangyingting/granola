@@ -296,7 +296,11 @@ describe('fail-closed signed candidate policy', () => {
       publish: null,
       artifactName: 'windows-ai-notes-${version}-${arch}-signed.${ext}',
       directories: { output: 'fresh-output' },
-      nsis: { perMachine: false, deleteAppDataOnUninstall: false },
+      nsis: {
+        guid: 'dbdb543e-07bd-5ef6-99a5-00d80b9bdfb6',
+        perMachine: false,
+        deleteAppDataOnUninstall: false,
+      },
       win: {
         signExecutable: true,
         signAndEditExecutable: true,
@@ -315,6 +319,7 @@ describe('fail-closed signed candidate policy', () => {
     for (const changed of [
       { ...base, appId: 'different.application' },
       { ...base, nsis: { ...base.nsis, script: 'custom-installer.nsi' } },
+      { ...base, nsis: { ...base.nsis, guid: 'different-installation' } },
     ])
       expect(() =>
         signedConfiguration(changed, 'output', 'native', policy),

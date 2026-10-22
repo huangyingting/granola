@@ -19,6 +19,16 @@ describe('compiled first-party NSIS identity policy', () => {
     const { getMakeNsisPath } = linked(
       'app-builder-lib/out/toolsets/windows.js',
     );
+    const { UUID } = linked('builder-util-runtime');
+    const config = JSON.parse(
+      await readFile(
+        new URL('./electron-builder.unsigned.json', import.meta.url),
+        'utf8',
+      ),
+    );
+    expect(config.nsis.guid).toBe(
+      UUID.v5(config.appId, UUID.parse('50e065bc-3134-11e6-9bab-38c9862bdaf3')),
+    );
     compiler = await getMakeNsisPath();
     directory = await mkdtemp(join(tmpdir(), 'notes-nsis-policy-'));
   }, 120_000);
@@ -28,6 +38,7 @@ describe('compiled first-party NSIS identity policy', () => {
   async function compile(name, changes = {}) {
     const defines = {
       APP_ID: 'io.github.windowsainotes.desktop',
+      APP_GUID: 'dbdb543e-07bd-5ef6-99a5-00d80b9bdfb6',
       APP_64: 'synthetic-embedded-x64-package',
       VERSION: '0.1.1',
       ...changes,
@@ -107,6 +118,8 @@ describe('compiled first-party NSIS identity policy', () => {
   }, 30_000);
   it.each([
     ['wrong-app', { APP_ID: 'different.application' }],
+    ['wrong-guid', { APP_GUID: '00000000-0000-0000-0000-000000000000' }],
+    ['missing-guid', { APP_GUID: undefined }],
     ['missing-x64', { APP_64: undefined }],
     ['x86-only', { APP_64: undefined, APP_32: 'synthetic-x86-package' }],
     ['mixed-x86', { APP_32: 'synthetic-x86-package' }],

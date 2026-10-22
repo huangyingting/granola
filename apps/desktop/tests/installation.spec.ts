@@ -23,7 +23,10 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { z } from 'zod';
 import { audioHostEnvironment } from '@windows-ai-notes/client/audio';
-import { verifyInstallerUpdateArtifact } from '../src/main/update-trust.js';
+import {
+  verifyInstallerUpdateArtifact,
+  verifyUpdateInstallation,
+} from '../src/main/update-trust.js';
 
 test.skip(
   process.platform !== 'win32' ||
@@ -206,6 +209,28 @@ test('preserves encrypted data and new edits through actual installation, compat
     expect(current.resources.toLowerCase()).toBe(
       join(installation, 'resources').toLowerCase(),
     );
+    expect(
+      await verifyUpdateInstallation(
+        join(current.resources, 'audio-host', 'AudioHost.exe'),
+        executable,
+        version,
+        base.productName!,
+      ),
+    ).toEqual({
+      directory: installation,
+      executable,
+      application_version: version,
+      product_name: base.productName,
+      architecture: 'x64',
+    });
+    await expect(
+      verifyUpdateInstallation(
+        join(current.resources, 'audio-host', 'AudioHost.exe'),
+        executable,
+        '0.0.0',
+        base.productName!,
+      ),
+    ).rejects.toMatchObject({ code: 'update_installation_mismatch' });
     const location = relative(installation, current.directory);
     expect(isAbsolute(location) || location.startsWith('..')).toBe(true);
     if (identity) expect(current).toMatchObject(identity);

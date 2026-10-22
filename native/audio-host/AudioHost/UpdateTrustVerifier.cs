@@ -20,21 +20,36 @@ public static class UpdateTrustVerifier
     public static bool HasInstallerIdentity(string? internalName, string? originalFilename, string version) =>
         internalName == InstallerInternalName && originalFilename == $"windows-ai-notes-{version}-x64-setup.exe";
 
-    public static UpdateTrustResult Verify(string file, UpdateTrustPolicy policy) => Verify(file, policy, false);
-    public static UpdateTrustResult VerifyInstaller(string file, UpdateTrustPolicy policy) => Verify(file, policy, true);
+    internal static bool IsStableVersion(string value) =>
+        System.Version.TryParse(value, out var version) && version.Major <= 65_535 && version.Minor <= 65_535 &&
+        version.Build is >= 0 and <= 65_535 && version.Revision == -1 &&
+        value == $"{version.Major}.{version.Minor}.{version.Build}";
 
-    private static UpdateTrustResult Verify(string file, UpdateTrustPolicy policy, bool installer)
+    public static UpdateTrustResult Verify(string file, UpdateTrustPolicy policy) => VerifyAndClose(file, policy, false);
+    public static UpdateTrustResult VerifyInstaller(string file, UpdateTrustPolicy policy) => VerifyAndClose(file, policy, true);
+
+    private static UpdateTrustResult VerifyAndClose(string file, UpdateTrustPolicy policy, bool installer)
     {
+        var result = OpenVerifiedArtifact(file, policy, installer, out var lease);
+        lease?.Dispose();
+        return result;
+    }
+
+    internal static UpdateTrustResult OpenVerifiedArtifact(string file, UpdateTrustPolicy policy, bool installer,
+        out FileStream? lease)
+    {
+        lease = null;
         if (policy.CertificateSha256.Length != 64 || !policy.CertificateSha256.All(char.IsAsciiHexDigit) ||
             !ValidText(policy.Publisher) || !ValidText(policy.ProductName) || !ValidText(policy.ProductVersion) ||
             file.Length < 4 || !char.IsAsciiLetter(file[0]) || file[1] != ':' || file[2] is not ('\\' or '/') ||
             file.Any(char.IsControl))
             return UpdateTrustResult.Rejected("update_verification_arguments");
+        FileStream? stream = null;
         try
         {
             if ((File.GetAttributes(file) & (FileAttributes.ReparsePoint | FileAttributes.Directory)) != 0)
                 return UpdateTrustResult.Rejected("update_artifact_invalid");
-            using var stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.Read);
+            stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.Read);
             if (stream.Length is <= 0 or > MaximumArtifactBytes)
                 return UpdateTrustResult.Rejected("update_artifact_invalid");
             var fileInfo = new TrustFile
@@ -102,9 +117,12 @@ public static class UpdateTrustVerifier
                     return UpdateTrustResult.Rejected("update_installer_mismatch");
                 stream.Position = 0;
                 var hash = Convert.ToBase64String(SHA512.HashData(stream));
+                var artifact = new VerifiedUpdateArtifact(stream.Length, hash, Convert.ToHexStringLower(certificateHash),
+                    publisher, version.ProductName!, version.ProductVersion!);
+                lease = stream;
+                stream = null;
                 return new UpdateTrustResult(1, true, installer ? "update_installer_verified" : "update_verified",
-                    new VerifiedUpdateArtifact(stream.Length, hash, Convert.ToHexStringLower(certificateHash),
-                        publisher, version.ProductName!, version.ProductVersion!));
+                    artifact);
             }
             finally
             {
@@ -117,6 +135,10 @@ public static class UpdateTrustVerifier
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or CryptographicException or ArgumentException)
         {
             return UpdateTrustResult.Rejected("update_artifact_unavailable");
+        }
+        finally
+        {
+            stream?.Dispose();
         }
     }
 

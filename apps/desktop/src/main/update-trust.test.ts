@@ -12,6 +12,7 @@ import {
   assertVerifiedUpdate,
   verifyInstallerUpdateArtifact,
   verifyUpdateArtifact,
+  verifyUpdateInstallation,
 } from './update-trust.js';
 import { UpdateDownloads } from './update-downloads.js';
 
@@ -73,6 +74,183 @@ const report = {
     product_version: policy.version,
   },
 };
+
+describe('native registered installation preflight', () => {
+  const helper = 'C:\\Installed app\\resources\\audio-host\\AudioHost.exe';
+  const executable = 'C:\\Installed app\\Windows AI Notes Preview.exe';
+  const installed = {
+    version: 1,
+    registered: true,
+    code: 'update_installation_verified',
+    installation: {
+      directory: 'C:\\Installed app',
+      executable,
+      application_version: '0.1.0',
+      product_name: policy.product_name,
+      architecture: 'x64',
+    },
+  };
+  it('uses a separate bounded mode and checks exact installation identity without an installation action', async () => {
+    vi.stubEnv('WIN_CSC_KEY_PASSWORD', 'synthetic-not-a-password');
+    execution.mockImplementation((_file, _args, _options, callback) =>
+      callback(null, JSON.stringify(installed), ''),
+    );
+    const signal = new AbortController().signal;
+    expect(
+      await verifyUpdateInstallation(
+        helper,
+        executable,
+        '0.1.0',
+        policy.product_name,
+        signal,
+      ),
+    ).toEqual(installed.installation);
+    expect(execution).toHaveBeenCalledExactlyOnceWith(
+      helper,
+      [
+        '--verify-update-installation',
+        executable,
+        '0.1.0',
+        policy.product_name,
+      ],
+      expect.objectContaining({
+        timeout: 60_000,
+        maxBuffer: 16_384,
+        windowsHide: true,
+        signal,
+      }),
+      expect.any(Function),
+    );
+    expect(execution.mock.calls[0]?.[2].env).not.toHaveProperty(
+      'WIN_CSC_KEY_PASSWORD',
+    );
+    expect(execution.mock.calls[0]?.[2].shell).not.toBe(true);
+  });
+  it.each([
+    { directory: 'C:\\Different' },
+    { executable: 'C:\\Different\\Windows AI Notes Preview.exe' },
+    { application_version: '0.1.1' },
+    { product_name: 'Different product' },
+    { architecture: 'arm64' },
+    { installer: 'C:\\Synthetic\\installer.exe' },
+  ])(
+    'rejects inconsistent or extra native installation metadata: %j',
+    async (change) => {
+      execution.mockImplementation((_file, _args, _options, callback) =>
+        callback(
+          null,
+          JSON.stringify({
+            ...installed,
+            installation: { ...installed.installation, ...change },
+          }),
+          '',
+        ),
+      );
+      await expect(
+        verifyUpdateInstallation(
+          helper,
+          executable,
+          '0.1.0',
+          policy.product_name,
+        ),
+      ).rejects.toMatchObject({
+        code:
+          'architecture' in change || 'installer' in change
+            ? 'update_verifier_protocol'
+            : 'update_installation_mismatch',
+      });
+    },
+  );
+  it.each([
+    'update_installation_location',
+    'update_installation_missing',
+    'update_installation_machine',
+    'update_installation_mismatch',
+  ])(
+    'surfaces a native rejection without accepting another success protocol: %s',
+    async (code) => {
+      execution.mockImplementation((_file, _args, _options, callback) =>
+        callback(
+          Object.assign(new Error('Synthetic native error.'), {
+            code: 2,
+            stdout: JSON.stringify({
+              version: 1,
+              registered: false,
+              code,
+              installation: null,
+            }),
+          }),
+          '',
+          '',
+        ),
+      );
+      await expect(
+        verifyUpdateInstallation(
+          helper,
+          executable,
+          '0.1.0',
+          policy.product_name,
+        ),
+      ).rejects.toMatchObject({ code });
+      execution.mockImplementation((_file, _args, _options, callback) =>
+        callback(null, JSON.stringify(report), ''),
+      );
+      await expect(
+        verifyUpdateInstallation(
+          helper,
+          executable,
+          '0.1.0',
+          policy.product_name,
+        ),
+      ).rejects.toMatchObject({ code: 'update_verifier_protocol' });
+    },
+  );
+  it.each(['0.1.0-preview', '01.1.0', '0.1.0\n'])(
+    'rejects an unsupported installed version before starting a process: %s',
+    async (version) => {
+      await expect(
+        verifyUpdateInstallation(
+          helper,
+          executable,
+          version,
+          policy.product_name,
+        ),
+      ).rejects.toMatchObject({ code: 'update_installation_arguments' });
+      expect(execution).not.toHaveBeenCalled();
+    },
+  );
+  it('does not accept success-shaped output from a rejected process', async () => {
+    execution.mockImplementation((_file, _args, _options, callback) =>
+      callback(
+        Object.assign(new Error('Synthetic failed process.'), {
+          code: 2,
+          stdout: JSON.stringify(installed),
+        }),
+        '',
+        '',
+      ),
+    );
+    await expect(
+      verifyUpdateInstallation(
+        helper,
+        executable,
+        '0.1.0',
+        policy.product_name,
+      ),
+    ).rejects.toMatchObject({ code: 'update_verifier_protocol' });
+  });
+  it('rejects noncanonical paths before invoking the helper', async () => {
+    await expect(
+      verifyUpdateInstallation(
+        helper,
+        'C:\\Installed app\\..\\app.exe',
+        '0.1.0',
+        policy.product_name,
+      ),
+    ).rejects.toMatchObject({ code: 'update_installation_arguments' });
+    expect(execution).not.toHaveBeenCalled();
+  });
+});
 
 describe('first-party installer-only update trust', () => {
   const installerReport = {

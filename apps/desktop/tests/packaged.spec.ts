@@ -1,6 +1,7 @@
 import { _electron as electron, expect, test } from '@playwright/test';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { verifyUpdateInstallation } from '../src/main/update-trust.js';
 
 const executable = process.env.DESKTOP_EXECUTABLE;
 test.skip(
@@ -20,6 +21,17 @@ test('opens the actual packaged sandboxed editor without workspace runtime depen
       page.getByRole('button', { name: '+ New meeting', exact: true }),
     ).toBeEnabled();
     const resources = await application.evaluate(() => process.resourcesPath);
+    const currentVersion = await application.evaluate(({ app }) =>
+      app.getVersion(),
+    );
+    await expect(
+      verifyUpdateInstallation(
+        join(resources, 'audio-host', 'AudioHost.exe'),
+        executable,
+        currentVersion,
+        'Windows AI Notes Preview',
+      ),
+    ).rejects.toMatchObject({ code: 'update_installation_missing' });
     expect(
       [
         'AudioHost.exe',

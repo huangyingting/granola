@@ -337,7 +337,12 @@ export function signedConfiguration(
   policy,
   updatePolicyFile,
 ) {
-  if (base.appId !== 'io.github.windowsainotes.desktop' || base.nsis?.script)
+  if (
+    base.appId !== 'io.github.windowsainotes.desktop' ||
+    base.nsis?.script ||
+    (base.nsis?.guid !== undefined &&
+      base.nsis.guid !== 'dbdb543e-07bd-5ef6-99a5-00d80b9bdfb6')
+  )
     throw new ReleaseError(
       'release_installer_identity',
       'The signed installer requires the existing application identity and the first-party NSIS template.',

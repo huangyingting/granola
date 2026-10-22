@@ -342,6 +342,26 @@ Rejected and incomplete cached downloads are reported without deleting them.
 or restart the app. No production update channel has been activated;
 safe installation/restart and failed-upgrade recovery remain unfinished.**
 
+The native installation preflight separately requires the existing current-user,
+64-bit NSIS registry identity, exact location/version/uninstall commands, bundled
+helper layout, matching application/uninstaller metadata and an x64 application.
+Machine-wide or ambiguous installations and reparse-point paths are rejected;
+preparation and installation locations must be on fixed local disks.
+Directory matching uses volume and 128-bit file identity, not case-folded strings
+or an assumption that short and long Windows path spellings are different.
+The existing builder-derived GUID is now explicit and enforced at installer
+compilation; it has not been changed. A packaged `win-unpacked` directory is not
+an installed application. This preflight is not signature acceptance or a durable
+authorization to install.
+
+Native `PreparedInstaller` additionally opens only a newer stable first-party
+installer with pinned trust, size and SHA-512, retaining its read-only file handle
+and non-delete-sharing handles for every ancestor until disposal. This supplies
+the locked preparation primitive for a future independent update worker; it does
+not execute an installer. Windows lock-mechanics tests use an explicitly internal
+generic signed-runtime fixture, not a production installer-signature bypass or
+positive first-party signing acceptance.
+
 ### Verified signed Windows candidates
 
 `pnpm desktop:package:signed` is a separate, Windows-only producer command.

@@ -7,6 +7,7 @@ import {
   desktopUpdateStateSchema,
   packagedUpdatePolicySchema,
   updateFeedSchema,
+  updateInstallationSchema,
 } from './updates.js';
 
 const policy = {
@@ -56,6 +57,7 @@ describe('packaged update and feed contracts', () => {
         expect(desktopUpdateCommandSchema.parse({ operation })).toEqual({
           operation,
         });
+
         for (const extra of [
           { feed_url: policy.feed_url },
           { installer: feed.installer },
@@ -94,6 +96,33 @@ describe('packaged update and feed contracts', () => {
       ])
         expect(
           desktopUpdateStateSchema.safeParse({ ...state, ...extra }).success,
+        ).toBe(false);
+    });
+  });
+  describe('Main-only registered update installation metadata', () => {
+    const installation = {
+      directory: 'C:\\Installed app',
+      executable: 'C:\\Installed app\\Windows AI Notes Preview.exe',
+      application_version: '0.1.0',
+      product_name: policy.product_name,
+      architecture: 'x64',
+    };
+    it('accepts bounded installation identity without granting it installer-signature authority', () => {
+      expect(updateInstallationSchema.parse(installation)).toEqual(
+        installation,
+      );
+      for (const change of [
+        { directory: '\\\\server\\share' },
+        { executable: 'relative.exe' },
+        { executable: 'C:\\app.exe\n' },
+        { application_version: '01.1.0' },
+        { architecture: 'arm64' },
+        { verified: true },
+        { certificate_sha256: policy.certificate_sha256 },
+      ])
+        expect(
+          updateInstallationSchema.safeParse({ ...installation, ...change })
+            .success,
         ).toBe(false);
     });
   });
