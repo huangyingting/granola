@@ -8,6 +8,7 @@
     "./server": "./dist/server.js",
     "./operations": "./dist/operations.js",
     "./audit": "./dist/audit.js",
+    "./deletion": "./dist/deletion.js",
     "./observability": "./dist/observability.js",
     "./content": "./dist/content.js",
     "./desktop": "./dist/desktop.js",

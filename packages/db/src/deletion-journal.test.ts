@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { readFile, readdir } from 'node:fs/promises';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { Database } from './index.js';
+import { deletionIntentSchema } from '@windows-ai-notes/contracts/deletion';
 
 const url = process.env.TEST_DATABASE_URL;
 const privateText = 'private-deletion-recovery-meeting-and-identity';
@@ -128,7 +129,7 @@ describe.skipIf(!url)('transactional deletion recovery intent capture', () => {
     }
   });
   async function intents(ids: string[], source = db) {
-    return (
+    const rows = (
       await source.pool.query<Intent>(
         `SELECT id,transaction_id::text,recorded_at,event,resource_id,workspace_id,
       expires_at,retention_days,processing_days,reason FROM deletion_journal WHERE resource_id=ANY($1::uuid[])
@@ -136,6 +137,15 @@ describe.skipIf(!url)('transactional deletion recovery intent capture', () => {
         [ids],
       )
     ).rows;
+    for (const row of rows) {
+      const encoded = {
+        ...row,
+        recorded_at: row.recorded_at.toISOString(),
+        expires_at: row.expires_at?.toISOString() ?? null,
+      };
+      expect(deletionIntentSchema.parse(encoded)).toEqual(encoded);
+    }
+    return rows;
   }
 
   it('captures document/audio/chat cascades and staged-audio removal in the source deletion transaction without retaining content', async () => {

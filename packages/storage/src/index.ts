@@ -4,13 +4,15 @@ import {
   PutObjectCommand,
   DeleteObjectCommand,
   HeadBucketCommand,
-  GetBucketAclCommand,
-  GetBucketPolicyCommand,
   GetBucketVersioningCommand,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { addAbortSignal, Readable } from 'node:stream';
 import { resourceId, ServiceError } from '@windows-ai-notes/contracts/server';
+import {
+  assertPrivateBucketAccess,
+  objectStoreStatus as status,
+} from './private-bucket.js';
 
 export interface StorageConfig {
   endpoint: string;
@@ -96,18 +98,6 @@ export function objectKey(object: ObjectIdentity) {
     throw new Error('Unsupported recording object kind.');
   return `recordings/v1/${object.kind}/${object.id}`;
 }
-function status(error: unknown): number | undefined {
-  if (error && typeof error === 'object' && '$metadata' in error) {
-    const metadata = error.$metadata;
-    if (
-      metadata &&
-      typeof metadata === 'object' &&
-      'httpStatusCode' in metadata &&
-      typeof metadata.httpStatusCode === 'number'
-    )
-      return metadata.httpStatusCode;
-  }
-}
 function unavailable(error: unknown): never {
   if (error instanceof ServiceError) throw error;
   console.error(
@@ -163,58 +153,7 @@ export class RecordingBlobs {
       throw new Error(
         'Recording storage currently requires an unversioned bucket so deletion does not retain old object versions.',
       );
-    const acl = await this.client.send(new GetBucketAclCommand(input), {
-      abortSignal: signal,
-    });
-    if (acl.Grants?.some((grant) => grant.Grantee?.Type === 'Group'))
-      throw new Error(
-        'Recording storage must not grant public or authenticated-group bucket access.',
-      );
-    try {
-      const policy = await this.client.send(new GetBucketPolicyCommand(input), {
-        abortSignal: signal,
-      });
-      if (policy.Policy) {
-        const parsed: unknown = JSON.parse(policy.Policy);
-        if (
-          !parsed ||
-          typeof parsed !== 'object' ||
-          !('Statement' in parsed) ||
-          !Array.isArray(parsed.Statement)
-        )
-          throw new Error(
-            'The recording bucket policy could not be validated.',
-          );
-        for (const statement of parsed.Statement) {
-          if (
-            statement &&
-            typeof statement === 'object' &&
-            statement.Effect === 'Allow'
-          ) {
-            const principal: unknown = statement.Principal;
-            const wildcard = (value: unknown): boolean =>
-              typeof value === 'string'
-                ? value.includes('*')
-                : Array.isArray(value) &&
-                  value.some(
-                    (item) => typeof item === 'string' && item.includes('*'),
-                  );
-            if (
-              statement.NotPrincipal !== undefined ||
-              wildcard(principal) ||
-              (principal &&
-                typeof principal === 'object' &&
-                Object.values(principal).some(wildcard))
-            )
-              throw new Error(
-                'Recording storage must not have a public allow policy.',
-              );
-          }
-        }
-      }
-    } catch (error) {
-      if (status(error) !== 404) throw error;
-    }
+    await assertPrivateBucketAccess(this.client, this.config.bucket, signal);
   }
   async authorize(
     object: ObjectIdentity,

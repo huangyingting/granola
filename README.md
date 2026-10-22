@@ -748,6 +748,40 @@ verified archival and a fail-closed replay/startup gate remain required before
 backup recovery or production readiness can be claimed. No HTTP administration
 endpoint or new end-user setting is introduced.
 
+### Independent deletion archive protocol (not yet connected)
+
+`@windows-ai-notes/storage/deletion` implements a separate, versioned private
+S3 archive protocol. Production requires Object Lock **COMPLIANCE** retention
+covering the longest backup plus recovery window (at least 37 days), explicit
+encryption and no enabled object/version expiration lifecycle. Development uses
+GOVERNANCE only so synthetic fixtures can be removed. Writes request one additional
+UTC day of protection, and reads verify coverage against the server's modification
+time. Recording media still requires an **unversioned** bucket; those deletion
+semantics have not been relaxed.
+
+Explicit initialization creates a protected genesis and head. Existing versions
+or delete markers prevent silently resetting missing/incomplete history.
+Strict body-free batches contain 1-100 intents; immutable batch IDs bind exact
+canonical metadata. Content-addressed links and conditional head replacement
+preserve concurrent writers. Verification checks lineage, hashes, counts and
+every reachable batch through genesis, with bounded bodies, abortable reads and
+scan limits. Full verification never skips cached history. An in-process witness
+rejects observed rollback/forks across failed scans and readiness rechecks; it is
+not a durable recovery receipt. No archive objects are deleted by this library.
+
+Replay callbacks run newest-first and may observe a valid prefix before a later
+integrity failure. **Keep restored services quarantined until full verification
+returns.** Publication is at least once; `entry_references` counts manifest
+references, not unique deletions or lifetime rates. Consumers must apply intent
+IDs idempotently and reject conflicting metadata for an existing intent ID.
+
+The protocol trusts an independently retained private bucket as its authority;
+it does not make a privileged archive administrator or an archive rollback
+tamper-proof. Exclude it from application/database/media restore operations.
+Application transaction publication, deployment configuration/initialization,
+receipt-aware replay and the enforced startup quarantine are **not yet wired**.
+This library alone does not complete backup recovery or production readiness.
+
 ### AI allowances
 
 Each provisioned account defaults to **8 hours of audio, 2,000,000 input tokens
