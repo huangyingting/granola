@@ -69,6 +69,7 @@ export async function createServer(
   const authenticate = createAuthenticator(config, db);
   const streams = new Map<string, number>();
   const shutdown = new AbortController();
+  app.addHook('onReady', async () => db.assertReady(shutdown.signal));
   app.addHook('preClose', async () => shutdown.abort());
   // Track upgrades before authentication so rejected requests close their raw sockets.
   const registerRealtime = await prepareRealtimeRoutes(app, db, realtime);

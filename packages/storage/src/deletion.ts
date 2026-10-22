@@ -36,6 +36,77 @@ export interface DeletionArchiveConfig extends StorageConfig {
   mode: 'development' | 'production';
   retentionDays: number;
 }
+export function loadDeletionArchiveConfig(
+  environment: NodeJS.ProcessEnv = process.env,
+  required = environment.NODE_ENV === 'production',
+): DeletionArchiveConfig | null {
+  const names = [
+    'ENDPOINT',
+    'REGION',
+    'BUCKET',
+    'ENCRYPTION',
+    'KMS_KEY_ID',
+    'ACCESS_KEY_ID',
+    'SECRET_ACCESS_KEY',
+    'RETENTION_DAYS',
+  ];
+  if (
+    !names.some((name) => environment[`DELETION_ARCHIVE_${name}`] !== undefined)
+  ) {
+    if (required)
+      throw new Error(
+        'Configure independent DELETION_ARCHIVE storage before production startup.',
+      );
+    return null;
+  }
+  const days = environment.DELETION_ARCHIVE_RETENTION_DAYS;
+  if (
+    !days ||
+    days !== days.trim() ||
+    !/^[0-9]{2,4}$/.test(days) ||
+    Number(days) < 37 ||
+    Number(days) > 3650
+  )
+    throw new Error(
+      'DELETION_ARCHIVE_RETENTION_DAYS must cover backup and recovery retention (37-3650 days).',
+    );
+  const storage = loadStorageConfig({
+    NODE_ENV: environment.NODE_ENV,
+    S3_ENDPOINT: environment.DELETION_ARCHIVE_ENDPOINT,
+    S3_REGION: environment.DELETION_ARCHIVE_REGION,
+    S3_BUCKET: environment.DELETION_ARCHIVE_BUCKET,
+    S3_ENCRYPTION: environment.DELETION_ARCHIVE_ENCRYPTION,
+    S3_KMS_KEY_ID: environment.DELETION_ARCHIVE_KMS_KEY_ID,
+    S3_ACCESS_KEY_ID: environment.DELETION_ARCHIVE_ACCESS_KEY_ID,
+    S3_SECRET_ACCESS_KEY: environment.DELETION_ARCHIVE_SECRET_ACCESS_KEY,
+  });
+  if (!storage)
+    throw new Error('Configure independent deletion archive storage.');
+  if (
+    storage.bucket === environment.S3_BUCKET &&
+    storage.endpoint ===
+      (environment.S3_ENDPOINT
+        ? new URL(environment.S3_ENDPOINT).origin
+        : undefined)
+  )
+    throw new Error(
+      'Deletion archives must not share the recording media bucket.',
+    );
+  if (
+    environment.NODE_ENV === 'production' &&
+    storage.credentials &&
+    storage.credentials.accessKeyId === environment.S3_ACCESS_KEY_ID &&
+    storage.credentials.secretAccessKey === environment.S3_SECRET_ACCESS_KEY
+  )
+    throw new Error(
+      'Use independently scoped deletion archive credentials, not recording media credentials.',
+    );
+  return {
+    ...storage,
+    mode: environment.NODE_ENV === 'production' ? 'production' : 'development',
+    retentionDays: Number(days),
+  };
+}
 const digest = (bytes: Buffer) =>
   createHash('sha256').update(bytes).digest('hex');
 const encode = (value: unknown) => Buffer.from(canonicalJson(value));
@@ -97,6 +168,7 @@ class VisitorFailure extends Error {
 }
 
 export class DeletionArchive {
+  readonly identity: string;
   private readonly client: S3Client;
   private readonly config: DeletionArchiveConfig;
   private ready = false;
@@ -133,6 +205,14 @@ export class DeletionArchive {
       mode: value.mode,
       retentionDays: value.retentionDays,
     };
+    this.identity = digest(
+      encode({
+        version: 1,
+        endpoint: storage.endpoint,
+        region: storage.region,
+        bucket: storage.bucket,
+      }),
+    );
     this.client = new S3Client({
       ...storage,
       forcePathStyle: true,
@@ -395,21 +475,31 @@ export class DeletionArchive {
   async initialize(
     input: DeletionOrigin,
     signal: AbortSignal,
+    fresh = false,
   ): Promise<DeletionArchiveHead> {
     this.checkReady();
     const value = origin(input);
     return this.protect('initialize', signal, async () => {
       const bounded = AbortSignal.any([signal, AbortSignal.timeout(15_000)]);
+      const existing = () => {
+        if (fresh)
+          throw new ServiceError(
+            'deletion_archive_exists',
+            'Fresh deployment initialization requires an unused archive namespace. Do not reinitialize a restored or partially initialized deployment.',
+            503,
+          );
+        return this.verify(value, async () => {}, bounded);
+      };
       const namespace = await this.client.send(
         new ListObjectVersionsCommand({
           Bucket: this.config.bucket,
-          Prefix: this.key(value, ''),
+          Prefix: fresh ? 'deletion/v1/' : this.key(value, ''),
           MaxKeys: 1,
         }),
         { abortSignal: bounded },
       );
       if (namespace.Versions?.length || namespace.DeleteMarkers?.length)
-        return this.verify(value, async () => {}, bounded);
+        return existing();
       if (namespace.IsTruncated !== false) invalid('namespace listing');
       const bytes = encode(genesis(value));
       try {
@@ -418,7 +508,7 @@ export class DeletionArchive {
           bytes,
           bounded,
         );
-        if (!created) return this.verify(value, async () => {}, bounded);
+        if (!created) return existing();
         const tip = digest(bytes);
         await this.immutable(
           this.key(value, `links/${tip}.json`),
@@ -544,6 +634,7 @@ export class DeletionArchive {
     visit: (batch: DeletionBatch, signal: AbortSignal) => Promise<void>,
     signal: AbortSignal,
     maxLinks = 10_000,
+    required?: DeletionArchiveHead,
   ): Promise<DeletionArchiveHead> {
     this.checkReady();
     const value = origin(input);
@@ -551,9 +642,26 @@ export class DeletionArchive {
       invalid('scan limit');
     return this.protect('verify', signal, async () => {
       const trusted = this.prefix(value);
+      let witness: DeletionArchiveHead | undefined;
+      if (required) {
+        const parsed = deletionArchiveHeadSchema.safeParse(required);
+        if (!parsed.success) invalid('required witness');
+        sameOrigin(value, parsed.data.origin);
+        witness = parsed.data;
+      }
       const root = await this.checkGenesis(value, signal);
       const { head } = await this.head(value, signal);
-      await this.walk(value, head, root, visit, signal, maxLinks, trusted);
+      await this.walk(
+        value,
+        head,
+        root,
+        visit,
+        signal,
+        maxLinks,
+        trusted,
+        false,
+        witness,
+      );
       this.remember(head);
       return head;
     });
@@ -589,12 +697,22 @@ export class DeletionArchive {
     maxLinks: number,
     trusted?: DeletionArchiveHead,
     shortcut = false,
+    required?: DeletionArchiveHead,
   ): Promise<void> {
     let tip = head.tip,
       generation = BigInt(head.generation),
       count = BigInt(head.entry_references);
     for (let position = 0; position < maxLinks; position++) {
       signal.throwIfAborted();
+      if (required && generation <= BigInt(required.generation)) {
+        if (
+          tip !== required.tip ||
+          generation !== BigInt(required.generation) ||
+          count !== BigInt(required.entry_references)
+        )
+          invalid('required history');
+        required = undefined;
+      }
       if (trusted && generation <= BigInt(trusted.generation)) {
         if (
           tip !== trusted.tip ||

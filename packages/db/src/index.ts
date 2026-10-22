@@ -36,10 +36,15 @@ import { operationsSnapshot } from './operations.js';
 import { AuditStore } from './audit.js';
 import { auditTransactionContext } from './audit-context.js';
 import {
+  DeletionPublications,
+  type DeletionArchivePublisher,
+} from './deletion-publication.js';
+import {
   summaryCitations,
   summarySourceSchema,
 } from '@windows-ai-notes/contracts/generation';
 export type { UsageReservation } from './usage.js';
+export type { DeletionArchivePublisher } from './deletion-publication.js';
 export type { ClaimedChat } from './chat.js';
 export type { LiveClaim, LiveStart, LiveCursor } from './live.js';
 export { LIVE_MEDIA_MS, LIVE_LEASE_MS } from './live.js';
@@ -65,6 +70,8 @@ const migrationFiles = [
   '011_audit.sql',
   '012_provider_origin.sql',
   '013_deletion_journal.sql',
+  '014_deletion_publication.sql',
+  '015_deletion_recovery.sql',
 ];
 
 export type Transaction = pg.PoolClient;
@@ -181,7 +188,8 @@ export class Database {
   readonly questions: MeetingQuestions;
   readonly chat: ChatStore;
   readonly audit: AuditStore;
-  constructor(url: string) {
+  readonly deletions: DeletionPublications;
+  constructor(url: string, publisher?: DeletionArchivePublisher) {
     this.pool = new pg.Pool({
       connectionString: url,
       max: 10,
@@ -198,6 +206,7 @@ export class Database {
     this.questions = new MeetingQuestions(this);
     this.chat = new ChatStore(this);
     this.audit = new AuditStore(this);
+    this.deletions = new DeletionPublications(this, publisher);
     this.pool.on('error', () =>
       console.error(
         'database_connection_failed: idle PostgreSQL connection closed.',
@@ -205,12 +214,13 @@ export class Database {
     );
   }
   async close() {
+    this.deletions.close();
     await this.pool.end();
   }
   async operations() {
     return operationsSnapshot(this);
   }
-  async assertReady(): Promise<void> {
+  async assertSchemaReady(): Promise<void> {
     const applied = await this.pool.query<{ version: number }>(
       'SELECT version FROM schema_migrations ORDER BY version',
     );
@@ -220,19 +230,37 @@ export class Database {
     )
       throw new Error('Apply database migrations before starting the service.');
   }
+  async assertReady(signal?: AbortSignal): Promise<void> {
+    await this.assertSchemaReady();
+    await this.deletions.assertExposureReady(signal);
+  }
   async transaction<T>(
     operation: (client: Transaction) => Promise<T>,
   ): Promise<T> {
+    return this.transact(operation);
+  }
+  private async transact<T>(
+    operation: (client: Transaction) => Promise<T>,
+    publish = true,
+  ): Promise<T> {
+    const scope = randomUUID();
     const client = await this.pool.connect();
     try {
       await client.query(
-        `BEGIN; SET LOCAL notes.audit_context TO ${pg.escapeLiteral(JSON.stringify(auditTransactionContext()))}`,
+        `BEGIN; SET LOCAL notes.audit_context TO ${pg.escapeLiteral(JSON.stringify(auditTransactionContext()))}; SET LOCAL notes.deletion_scope TO ${pg.escapeLiteral(scope)}`,
       );
       const result = await operation(client);
+      if (publish) await this.deletions.beforeCommit(client, scope);
       await client.query('COMMIT');
       return result;
     } catch (error) {
       await client.query('ROLLBACK');
+      if (error instanceof Error && 'code' in error && error.code === 'PDR01')
+        throw new ServiceError(
+          'resource_gone',
+          'This resource was permanently removed.',
+          410,
+        );
       throw error;
     } finally {
       client.release();
@@ -257,7 +285,7 @@ export class Database {
         ),
       })),
     );
-    await this.transaction(async (tx) => {
+    await this.transact(async (tx) => {
       await tx.query(
         "SELECT pg_advisory_xact_lock(hashtextextended('windows-ai-notes-migrations',0))",
       );
@@ -290,7 +318,7 @@ export class Database {
           checksum,
         ]);
       }
-    });
+    }, false);
   }
   async provision(
     issuer: string,
@@ -1123,38 +1151,50 @@ export class Database {
     await this.transaction(async (tx) => {
       await tx.query('SELECT id FROM documents WHERE id=$1 FOR UPDATE', [id]);
       await this.document(userId, id, tx);
-      await this.recordings.removeDocument(tx, id);
-      await tx.query('DELETE FROM live_sources WHERE document_id=$1', [id]);
-      await tx.query('DELETE FROM chat_threads WHERE document_id=$1', [id]);
-      await tx.query('DELETE FROM chat_requests WHERE document_id=$1', [id]);
-      await tx.query(
-        'DELETE FROM recording_transcription_runs WHERE job_id IN (SELECT id FROM jobs WHERE document_id=$1)',
-        [id],
-      );
-      await tx.query(
-        "UPDATE documents SET deleted_at=now(),title='[deleted]',updated_at=now() WHERE id=$1",
-        [id],
-      );
-      await tx.query(
-        `UPDATE jobs SET state=CASE WHEN state IN ('queued','running','retry_wait') THEN 'cancelled' ELSE state END,
-        input='{}'::jsonb,result=NULL,error=NULL,audio=NULL,lease_token=lease_token+1,lease_until=NULL WHERE document_id=$1`,
-        [id],
-      );
-      await tx.query(
-        'DELETE FROM summary_runs WHERE job_id IN (SELECT id FROM jobs WHERE document_id=$1)',
-        [id],
-      );
-      await tx.query(
-        'DELETE FROM job_events WHERE job_id IN (SELECT id FROM jobs WHERE document_id=$1)',
-        [id],
-      );
-      await tx.query('DELETE FROM note_versions WHERE document_id=$1', [id]);
-      await tx.query('DELETE FROM note_mutations WHERE document_id=$1', [id]);
-      await tx.query('DELETE FROM transcript_revisions WHERE document_id=$1', [
-        id,
-      ]);
-      await recordChange(tx, id, 'deleted');
+      await this.eraseDocument(tx, id);
     });
+  }
+  async eraseDocument(tx: Transaction, id: string) {
+    if (
+      !(
+        await tx.query(
+          'SELECT 1 FROM documents WHERE id=$1 AND deleted_at IS NULL FOR UPDATE',
+          [id],
+        )
+      ).rowCount
+    )
+      return;
+    await this.recordings.removeDocument(tx, id);
+    await tx.query('DELETE FROM live_sources WHERE document_id=$1', [id]);
+    await tx.query('DELETE FROM chat_threads WHERE document_id=$1', [id]);
+    await tx.query('DELETE FROM chat_requests WHERE document_id=$1', [id]);
+    await tx.query(
+      'DELETE FROM recording_transcription_runs WHERE job_id IN (SELECT id FROM jobs WHERE document_id=$1)',
+      [id],
+    );
+    await tx.query(
+      "UPDATE documents SET deleted_at=now(),title='[deleted]',updated_at=now() WHERE id=$1",
+      [id],
+    );
+    await tx.query(
+      `UPDATE jobs SET state=CASE WHEN state IN ('queued','running','retry_wait') THEN 'cancelled' ELSE state END,
+        input='{}'::jsonb,result=NULL,error=NULL,audio=NULL,lease_token=lease_token+1,lease_until=NULL WHERE document_id=$1`,
+      [id],
+    );
+    await tx.query(
+      'DELETE FROM summary_runs WHERE job_id IN (SELECT id FROM jobs WHERE document_id=$1)',
+      [id],
+    );
+    await tx.query(
+      'DELETE FROM job_events WHERE job_id IN (SELECT id FROM jobs WHERE document_id=$1)',
+      [id],
+    );
+    await tx.query('DELETE FROM note_versions WHERE document_id=$1', [id]);
+    await tx.query('DELETE FROM note_mutations WHERE document_id=$1', [id]);
+    await tx.query('DELETE FROM transcript_revisions WHERE document_id=$1', [
+      id,
+    ]);
+    await recordChange(tx, id, 'deleted');
   }
   async claim(leaseMs = 120_000): Promise<ClaimedJob | null> {
     return this.transaction(async (tx) => {

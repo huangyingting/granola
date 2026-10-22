@@ -495,7 +495,7 @@ describe.skipIf(!url)('transactional deletion recovery intent capture', () => {
     'TRUNCATE deletion_journal',
     'UPDATE deletion_recovery_origin SET deployment_id=gen_random_uuid()',
     'DELETE FROM deletion_recovery_origin',
-    'TRUNCATE deletion_recovery_origin',
+    'TRUNCATE deletion_recovery_origin CASCADE',
   ])('rejects destructive journal/origin mutation: %s', async (sql) => {
     const source = await fixture(db);
     const origin = (
@@ -587,6 +587,13 @@ describe.skipIf(!url)('transactional deletion recovery intent capture', () => {
         [erased.owner.user_id],
       );
       await previous.migrate();
+      expect(
+        (
+          await previous.pool.query(
+            'SELECT 1 FROM deletion_journal WHERE publication_scope IS NOT NULL',
+          )
+        ).rows,
+      ).toHaveLength(0);
       const rows = await intents(
         [
           erased.document.id,

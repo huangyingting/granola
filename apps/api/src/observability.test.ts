@@ -135,6 +135,7 @@ it('the real API cannot leak custom error names, request headers or meeting bodi
   const log = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
   const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
   const db = new Database('postgresql://unused:unused@127.0.0.1:1/unused');
+  vi.spyOn(db, 'assertReady').mockResolvedValue(undefined);
   vi.spyOn(db, 'identify').mockResolvedValue(randomUUID());
   vi.spyOn(db.usage, 'snapshot').mockRejectedValue(
     Object.assign(new Error('private-error-message-marker'), {

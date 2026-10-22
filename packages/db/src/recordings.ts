@@ -176,15 +176,23 @@ export class RecordingStore {
       const digest = hash(input);
       const existing = (
         await tx.query<Row>(
-          'SELECT *,retention_expires_at<=now() retention_expired FROM recordings WHERE document_id=$1 AND create_key=$2',
-          [document, key],
+          'SELECT *,retention_expires_at<=now() retention_expired FROM recordings WHERE (document_id=$1 AND create_key=$2) OR id=$3',
+          [document, key, input.id],
         )
-      ).rows[0];
-      if (existing) {
-        if (existing.create_hash !== digest) throw conflict();
-        if (existing.deleted_at) throw unavailable();
-        if (existing.retention_expired) throw expired();
-        return this.snapshot(existing, tx);
+      ).rows;
+      if (existing.length) {
+        const row = existing[0]!;
+        if (
+          existing.length !== 1 ||
+          row.id !== input.id ||
+          row.document_id !== document ||
+          row.create_key !== key ||
+          row.create_hash !== digest
+        )
+          throw conflict();
+        if (row.deleted_at) throw unavailable();
+        if (row.retention_expired) throw expired();
+        return this.snapshot(row, tx);
       }
       await tx.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', [
         `recording-budget:${user}`,
@@ -585,8 +593,9 @@ export class RecordingStore {
           id: string;
           protected_until: Date;
           deleted_at: Date | null;
+          cleanup_token: number;
         }>(
-          `SELECT id,protected_until,deleted_at FROM recording_objects
+          `SELECT id,protected_until,deleted_at,cleanup_token FROM recording_objects
          WHERE id=$1 AND chunk_id=$2 AND recording_id=$3 AND kind='staging'`,
           [uploadId, id, recording.id],
         )
@@ -616,7 +625,11 @@ export class RecordingStore {
         );
       }
       if (chunk.state === 'verified') return null;
-      if (staging.deleted_at || staging.protected_until.getTime() <= Date.now())
+      if (
+        staging.deleted_at ||
+        staging.cleanup_token > 0 ||
+        staging.protected_until.getTime() <= Date.now()
+      )
         throw new ServiceError(
           'upload_expired',
           'This upload is unavailable. Request fresh authorization and retry.',
@@ -770,7 +783,7 @@ export class RecordingStore {
       deletion: row.deleted_at ? deletionState(row) : null,
     });
   }
-  private async erase(
+  async erase(
     tx: Transaction,
     id: string,
     reason: NonNullable<Row['deletion_reason']> = 'user',

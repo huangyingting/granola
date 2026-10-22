@@ -10,11 +10,18 @@ import {
 import { runOnce } from './worker.js';
 import { loadStorageConfig, RecordingBlobs } from '@windows-ai-notes/storage';
 import { workerObservability } from './observability.js';
+import { ServiceError } from '@windows-ai-notes/contracts/server';
+import {
+  DeletionArchive,
+  loadDeletionArchiveConfig,
+} from '@windows-ai-notes/storage/deletion';
 
 async function main() {
   const providers = createAzureProviders(loadAzureConfig());
-  const db = new Database(requireDatabaseUrl());
   const config = loadStorageConfig();
+  const archiveConfig = loadDeletionArchiveConfig();
+  const archive = archiveConfig ? new DeletionArchive(archiveConfig) : null;
+  const db = new Database(requireDatabaseUrl(), archive ?? undefined);
   const storage = config ? new RecordingBlobs(config) : null;
   const shutdown = new AbortController();
   process.once('SIGTERM', () => shutdown.abort());
@@ -23,7 +30,7 @@ async function main() {
   const closeTelemetry = registerProviderTelemetry();
   const observations = workerObservability();
   try {
-    await db.assertReady();
+    await db.assertReady(shutdown.signal);
     await storage?.assertReady();
     console.log(
       JSON.stringify({ code: 'worker_ready', provider: providers.provider }),
@@ -59,12 +66,18 @@ async function main() {
     observations.close();
     closeTelemetry();
     storage?.close();
-    await db.close();
+    try {
+      await db.close();
+    } finally {
+      archive?.close();
+    }
   }
 }
-withAuditContext({ source: 'worker' }, main).catch(() => {
+withAuditContext({ source: 'worker' }, main).catch((error: unknown) => {
   console.error(
-    'worker_start_failed: check Azure/storage configuration and database migrations. Secrets were not logged.',
+    error instanceof ServiceError && error.code.startsWith('deletion_')
+      ? `${error.code}: ${error.message}`
+      : 'worker_start_failed: check Azure/storage, independent deletion archive and database migrations. Secrets were not logged.',
   );
   process.exitCode = 1;
 });

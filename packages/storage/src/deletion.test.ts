@@ -29,7 +29,7 @@ import {
   type DeletionBatch,
 } from '@windows-ai-notes/contracts/deletion';
 import { RecordingBlobs, type StorageConfig } from './index.js';
-import { DeletionArchive } from './deletion.js';
+import { DeletionArchive, loadDeletionArchiveConfig } from './deletion.js';
 
 const endpoint = process.env.TEST_S3_ENDPOINT;
 const DAY = 86_400_000;
@@ -37,6 +37,54 @@ const credentials = {
   accessKeyId: 'storage-test-only',
   secretAccessKey: 'storage-test-only-secret',
 };
+it('requires complete production archive configuration, independent storage/credentials and bounded retention', () => {
+  expect(loadDeletionArchiveConfig({ NODE_ENV: 'development' })).toBeNull();
+  expect(() => loadDeletionArchiveConfig({ NODE_ENV: 'production' })).toThrow(
+    'DELETION_ARCHIVE',
+  );
+  const base = {
+    NODE_ENV: 'development',
+    DELETION_ARCHIVE_ENDPOINT: 'http://127.0.0.1:59000',
+    DELETION_ARCHIVE_REGION: 'us-east-1',
+    DELETION_ARCHIVE_BUCKET: 'independent-archive',
+    DELETION_ARCHIVE_ENCRYPTION: 'none',
+    DELETION_ARCHIVE_RETENTION_DAYS: '37',
+    DELETION_ARCHIVE_ACCESS_KEY_ID: credentials.accessKeyId,
+    DELETION_ARCHIVE_SECRET_ACCESS_KEY: credentials.secretAccessKey,
+  };
+  expect(loadDeletionArchiveConfig(base)).toMatchObject({
+    mode: 'development',
+    retentionDays: 37,
+    bucket: 'independent-archive',
+  });
+  for (const value of ['36', '37\n', '37.5', '3651', ''])
+    expect(() =>
+      loadDeletionArchiveConfig({
+        ...base,
+        DELETION_ARCHIVE_RETENTION_DAYS: value,
+      }),
+    ).toThrow('RETENTION_DAYS');
+  expect(() =>
+    loadDeletionArchiveConfig({ ...base, DELETION_ARCHIVE_REGION: undefined }),
+  ).toThrow('together');
+  expect(() =>
+    loadDeletionArchiveConfig({
+      ...base,
+      S3_ENDPOINT: base.DELETION_ARCHIVE_ENDPOINT,
+      S3_BUCKET: base.DELETION_ARCHIVE_BUCKET,
+    }),
+  ).toThrow('media bucket');
+  expect(() =>
+    loadDeletionArchiveConfig({
+      ...base,
+      NODE_ENV: 'production',
+      DELETION_ARCHIVE_ENDPOINT: 'https://archive.example.test',
+      DELETION_ARCHIVE_ENCRYPTION: 'AES256',
+      S3_ACCESS_KEY_ID: credentials.accessKeyId,
+      S3_SECRET_ACCESS_KEY: credentials.secretAccessKey,
+    }),
+  ).toThrow('credentials');
+});
 const signal = () => AbortSignal.timeout(30_000);
 const origin = (): DeletionOrigin => ({
   deployment_id: randomUUID(),
@@ -75,6 +123,19 @@ it('requires explicit bounded retention and production TLS/encryption without re
     retentionDays: 37,
   };
   const archive = new DeletionArchive(config);
+  const rotated = new DeletionArchive({
+    ...config,
+    credentials: { accessKeyId: 'rotated-fixture', secretAccessKey: 'rotated' },
+    retentionDays: 38,
+  });
+  const different = new DeletionArchive({
+    ...config,
+    bucket: 'different-synthetic-archive',
+  });
+  expect(rotated.identity).toBe(archive.identity);
+  expect(different.identity).not.toBe(archive.identity);
+  rotated.close();
+  different.close();
   archive.close();
   for (const retentionDays of [0, 36, 37.5, 3651, NaN, Infinity])
     expect(() => new DeletionArchive({ ...config, retentionDays })).toThrow(

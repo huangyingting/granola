@@ -51,7 +51,7 @@ function oldestAge(column: 'created_at' | 'eligible_at', filter: string) {
 }
 
 export async function operationsSnapshot(database: Database) {
-  await database.assertReady();
+  await database.assertSchemaReady();
   return database.transaction(async (tx) => {
     await tx.query(
       'SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY',

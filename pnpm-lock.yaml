@@ -298,6 +298,9 @@ importers:
       '@windows-ai-notes/contracts':
         specifier: workspace:*
         version: link:../contracts
+      '@windows-ai-notes/storage':
+        specifier: workspace:*
+        version: link:../storage
       pg:
         specifier: ^8.16.0
         version: 8.23.1

@@ -202,6 +202,7 @@ export class UsageStore {
       | { kind: 'live'; id: string }
       | { kind: 'chat'; claim: ClaimedChat },
   ): Promise<string> {
+    await this.database.deletions.assertUsageReady(tx);
     const budget = usageTotals(request.budget);
     if (
       units.every((unit) => budget[unit] === '0') ||

@@ -14,7 +14,7 @@ export class AuditStore {
 
   async page(query: z.input<typeof auditQuerySchema> = {}) {
     const input = auditQuerySchema.parse(query);
-    await this.database.assertReady();
+    await this.database.assertSchemaReady();
     return this.database.transaction(async (tx) => {
       await tx.query(
         'SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY',

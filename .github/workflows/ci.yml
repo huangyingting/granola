@@ -48,6 +48,7 @@ jobs:
       - name: PostgreSQL, S3 integrity, private AI and client regressions
         env:
           TEST_S3_ENDPOINT: http://127.0.0.1:59000
+          TEST_POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
         run: pnpm test
       - run: pnpm format:check
       - name: Build the unprivileged server image without credentials

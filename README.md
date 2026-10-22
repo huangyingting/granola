@@ -742,13 +742,12 @@ Events are not a commit-ordered incremental export cursor. Privileged source-tab
 truncation or trigger/schema changes are outside row capture and are not safe
 application deletion operations.
 
-**This journal is not yet an independent deletion ledger or restore safeguard.**
-Restoring its database also rolls it back. Independently retained, completeness-
-verified archival and a fail-closed replay/startup gate remain required before
-backup recovery or production readiness can be claimed. No HTTP administration
-endpoint or new end-user setting is introduced.
+The primary journal alone is not independently durable. Migrations **014-015**,
+configured independent archival and startup recovery supply the publication and
+restore protocol described below. No HTTP administration endpoint or new end-user
+setting is introduced.
 
-### Independent deletion archive protocol (not yet connected)
+### Independent deletion archive
 
 `@windows-ai-notes/storage/deletion` implements a separate, versioned private
 S3 archive protocol. Production requires Object Lock **COMPLIANCE** retention
@@ -778,9 +777,101 @@ IDs idempotently and reject conflicting metadata for an existing intent ID.
 The protocol trusts an independently retained private bucket as its authority;
 it does not make a privileged archive administrator or an archive rollback
 tamper-proof. Exclude it from application/database/media restore operations.
-Application transaction publication, deployment configuration/initialization,
-receipt-aware replay and the enforced startup quarantine are **not yet wired**.
-This library alone does not complete backup recovery or production readiness.
+Production API and worker entrypoints require `DELETION_ARCHIVE_*` configuration
+and verify the bound archive before listening or claiming work. Development can
+omit it for explicitly primary-only operation. An already-bound database cannot
+start without its archive, even in development.
+
+### Transactional deletion publication and restore quarantine
+
+Migration **014** adds a fresh transaction-scoped capture marker, immutable archive
+target binding, acknowledged publication metadata and per-intent canonical-digest
+receipts. With an explicitly injected publisher and initialized binding,
+`Database.transaction()` archives only its own newly captured intents **before
+COMMIT**, then commits matching receipts with the source mutation. Historical
+`xid8` values are not an export scope: they can coincide after a database restore.
+Deferred SQL guards reject unreceipted ordinary raw/unconfigured mutations, including
+destructive changes first introduced by another deferred COMMIT trigger.
+
+Programmatic baseline initialization locks the journal while publishing its fixed
+inventory in bounded batches and requires a **fresh, unused namespace**. Existing
+archives, including valid empty genesis or interrupted initialization, cannot
+silently bind a restored database. The target fingerprint excludes credentials so
+rotation does not change storage identity. No HTTP administration endpoint is added.
+Initialization requires all application writers to be stopped; the journal lock
+does not make online activation safe for pre-existing MVCC snapshots.
+
+Independent publication can succeed while the subsequent primary COMMIT fails:
+the source request fails and its primary receipts roll back, but the independently
+accepted restriction remains conservative recovery intent. Known provider-usage
+settlement and body-free repeatable-read diagnostics do not require an archive
+write. Binding/publications/receipts are not pruned by audit retention.
+
+Startup stages a complete verified archive snapshot in a private PostgreSQL
+temporary table, rejects conflicting intent IDs/digests or missing acknowledged
+history, and applies missing restrictions with atomic receipts before exposure.
+Matching receipts prevent old revocations from being reapplied after a legitimate
+later grant. Imported and derived restrictions are independently acknowledged
+before their replay transactions commit. Interrupted replay remains offline and
+resumes idempotently. Permanent fences prevent late recreation of erased resource
+IDs; preserved deadlines/policies constrain resources absent from a restored
+snapshot. Verified-object recovery detaches stale references while preserving
+protected-object deadlines; physical media disposal uses the existing retry and
+tombstone-recheck path. Local unique audio is never removed by this protocol.
+
+Recovery never treats the highest acknowledged generation as proof that every
+earlier source transaction committed: it scans every intent and compares individual
+receipts. The newest acknowledged or fully verified head is retained as an
+ancestry/rollback witness across process restarts, including duplicate-only archive
+suffixes; it is not a replay cursor.
+
+**Fresh deployment:** provision a separate private, versioned Object-Lock bucket
+for this deployment, with independent permissions and sufficient default retention.
+Disable object/version expiry lifecycle and deny application credentials deletion
+and version deletion. Configure the independent variables in `.env.example`, stop
+all application writers, then run:
+
+```sh
+pnpm db:migrate
+pnpm deletion:init
+```
+
+Initialization refuses any existing `deletion/v1/` history in the bucket, including
+another deployment's origin or interrupted initialization. Never rerun it to
+repair a restore or point a restore at an empty replacement archive. Only backups
+containing the completed binding and receipts are eligible for this protocol;
+pre-origin/pre-binding backups require a separately verified recovery inventory.
+
+**Restore:** stop every old API/worker instance and keep the replacement offline.
+Restore the complete primary database and private unversioned media from an
+eligible backup, **never the independent archive**. Configure its original archive,
+apply current migrations, and run:
+
+```sh
+pnpm deletion:recover --restored-backup
+```
+
+This explicitly quarantines provider usage. After full deletion verification and
+replay, it exits with `deletion_usage_review_required` until the operator restores
+or reconciles known/uncertain provider usage against authoritative records. Missing
+charges are not inferred to be zero, quotas are not reset, and new reservations
+remain blocked; late known settlements and body-free diagnostics still work.
+After actually completing that reconciliation, attest the SHA-256 of the retained
+reconciliation evidence and reverify recovery:
+
+```sh
+pnpm deletion:usage-reviewed --proof-sha256 YOUR_64_CHARACTER_LOWERCASE_SHA256
+```
+
+The digest is an operator attestation, **not automatic billing reconciliation**.
+Re-verification must succeed before quarantine is cleared; if verified history
+advances after review, reconcile the new state and submit a renewed attestation.
+Do not resume service before this completes. Every restore must use this explicit
+procedure even if the archive has no newer deletion intents: database rollback
+alone cannot prove that newer provider charges are absent. Normal startup also
+quarantines newly discovered unapplied archival intent until usage is reviewed.
+Deployment access/TLS, approved reconciliation evidence and full operational restore
+drills are production release gates; the application remains a developer preview.
 
 ### AI allowances
 

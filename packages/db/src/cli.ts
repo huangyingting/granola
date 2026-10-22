@@ -8,6 +8,10 @@ import {
 import { Database, requireDatabaseUrl, withAuditContext } from './index.js';
 import { audioRetentionPolicySchema } from '@windows-ai-notes/contracts/uploads';
 import { auditQuerySchema } from '@windows-ai-notes/contracts/audit';
+import {
+  DeletionArchive,
+  loadDeletionArchiveConfig,
+} from '@windows-ai-notes/storage/deletion';
 
 async function main() {
   const { values, positionals, tokens } = parseArgs({
@@ -27,17 +31,62 @@ async function main() {
       'processing-days': { type: 'string' },
       before: { type: 'string' },
       limit: { type: 'string' },
+      'restored-backup': { type: 'boolean' },
+      'proof-sha256': { type: 'string' },
     },
   });
-  const database = new Database(requireDatabaseUrl());
+  const archiveConfig = loadDeletionArchiveConfig(process.env, false);
+  const archive = archiveConfig ? new DeletionArchive(archiveConfig) : null;
+  const database = new Database(requireDatabaseUrl(), archive ?? undefined);
   try {
     if (positionals.length !== 1)
       throw new Error(
-        'Choose migrate, provision, usage-limits, audio-retention, operations or audit.',
+        'Choose migrate, provision, usage-limits, audio-retention, operations, audit, deletion-init, deletion-recover or deletion-usage-reviewed.',
       );
     if (positionals[0] === 'migrate') {
       await database.migrate();
       console.log('Database migrations applied.');
+    } else if (positionals[0] === 'deletion-init') {
+      if (tokens.some((token) => token.kind === 'option'))
+        throw new Error('Deletion initialization does not accept options.');
+      await database.assertSchemaReady();
+      console.log(
+        JSON.stringify(
+          await database.deletions.initialize(AbortSignal.timeout(300_000)),
+        ),
+      );
+    } else if (positionals[0] === 'deletion-recover') {
+      if (
+        !values['restored-backup'] ||
+        tokens.some(
+          (token) =>
+            token.kind === 'option' && token.name !== 'restored-backup',
+        )
+      )
+        throw new Error(
+          'Explicit restore recovery requires --restored-backup, stopped writers and subsequent provider-usage reconciliation.',
+        );
+      await database.assertSchemaReady();
+      await database.deletions.recover(AbortSignal.timeout(300_000), true);
+      console.log('Verified deletion recovery completed.');
+    } else if (positionals[0] === 'deletion-usage-reviewed') {
+      if (
+        !values['proof-sha256'] ||
+        tokens.some(
+          (token) => token.kind === 'option' && token.name !== 'proof-sha256',
+        )
+      )
+        throw new Error(
+          'Usage review requires only --proof-sha256 from completed authoritative provider-usage reconciliation.',
+        );
+      await database.assertSchemaReady();
+      await database.deletions.reviewUsage(
+        values['proof-sha256'],
+        AbortSignal.timeout(300_000),
+      );
+      console.log(
+        'Usage reconciliation attested and independent recovery reverified.',
+      );
     } else if (positionals[0] === 'operations') {
       if (tokens.some((token) => token.kind === 'option'))
         throw new ServiceError(
@@ -65,6 +114,7 @@ async function main() {
       });
       console.log(JSON.stringify(await database.audit.page(query)));
     } else if (positionals[0] === 'provision') {
+      await database.assertReady();
       if (values.dev && process.env.NODE_ENV === 'production')
         throw new Error(
           'Development identity provisioning is disabled in production.',
@@ -91,6 +141,7 @@ async function main() {
         }),
       );
     } else if (positionals[0] === 'usage-limits') {
+      await database.assertReady();
       const user = resourceId.parse(values['user-id']);
       const fields = ['audio-ms', 'input-tokens', 'output-tokens'] as const;
       if (fields.some((field) => !/^[0-9]{1,13}$/.test(values[field] ?? '')))
@@ -106,6 +157,7 @@ async function main() {
       });
       console.log(JSON.stringify(await database.usage.setLimits(user, limits)));
     } else if (positionals[0] === 'audio-retention') {
+      await database.assertReady();
       const workspace = resourceId.parse(values['workspace-id']);
       const fields = ['retention-days', 'processing-days'] as const;
       if (fields.some((field) => !/^[0-9]{1,2}$/.test(values[field] ?? '')))
@@ -125,10 +177,14 @@ async function main() {
       );
     } else
       throw new Error(
-        'Choose migrate, provision, usage-limits, audio-retention, operations or audit.',
+        'Choose migrate, provision, usage-limits, audio-retention, operations, audit, deletion-init, deletion-recover or deletion-usage-reviewed.',
       );
   } finally {
-    await database.close();
+    try {
+      await database.close();
+    } finally {
+      archive?.close();
+    }
   }
 }
 withAuditContext({ source: 'deployment' }, main).catch((error: unknown) => {
