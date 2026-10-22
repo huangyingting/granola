@@ -27,15 +27,20 @@ import { summarizeLongMeeting } from './summary.js';
 import { summaryPreview } from './preview.js';
 import { monitorLease } from './lease.js';
 import { answerQuestion } from './chat.js';
+import {
+  observeCompletion,
+  type WorkerObservability,
+} from './observability.js';
 
 export async function runOnce(
   db: Database,
   providers: AiProviders,
   shutdown = new AbortController().signal,
   storage: RecordingBlobs | null = null,
+  observations?: WorkerObservability,
 ): Promise<boolean> {
   return withAuditContext({ source: 'worker' }, () =>
-    runNext(db, providers, shutdown, storage),
+    runNext(db, providers, shutdown, storage, observations),
   );
 }
 
@@ -44,17 +49,33 @@ async function runNext(
   providers: AiProviders,
   shutdown: AbortSignal,
   storage: RecordingBlobs | null,
+  observations?: WorkerObservability,
 ): Promise<boolean> {
   const question = await db.chat.claim();
   if (question) {
     setAuditTask('chat', question.id);
-    await answerQuestion(db, providers, question, shutdown);
+    await answerQuestion(
+      db,
+      providers,
+      question,
+      shutdown,
+      observations?.chat(question, shutdown),
+    );
     return true;
   }
   const job = await db.claim();
   if (!job) return false;
   setAuditTask('job', job.id);
-  const lease = monitorLease(() => db.renew(job), { job_id: job.id }, shutdown);
+  const measured = observations?.job(job, shutdown);
+  const lease = monitorLease(
+    () => db.renew(job),
+    { job_id: job.id },
+    shutdown,
+    (value) => {
+      measured?.lease(value);
+      return undefined;
+    },
+  );
   try {
     const signal = lease.signal;
     if (job.input.kind === 'recording_transcription') {
@@ -65,7 +86,7 @@ async function runNext(
           503,
         );
       await transcribeRecording(db, job, providers, storage, signal);
-      await db.finishRecording(job);
+      await observeCompletion(measured, () => db.finishRecordingOutcome(job));
     } else {
       let result: JobResult;
       let transcript: Segment[] | undefined;
@@ -161,7 +182,9 @@ async function runNext(
           usage: generated.usage,
         };
       }
-      await db.finish(job, resultSchema.parse(result), null, transcript);
+      await observeCompletion(measured, () =>
+        db.finishOutcome(job, resultSchema.parse(result), null, transcript),
+      );
     }
   } catch (error) {
     const failure = shutdown.aborted
@@ -179,13 +202,19 @@ async function runNext(
             500,
           );
     console.error(JSON.stringify({ code: failure.code, job_id: job.id }));
-    await db.finish(job, null, {
-      code: failure.code,
-      message: failure.message,
-      retryable: job.input.kind !== 'summary' && failure.retryable,
-    });
+    await observeCompletion(measured, () =>
+      db.finishOutcome(job, null, {
+        code: failure.code,
+        message: failure.message,
+        retryable: job.input.kind !== 'summary' && failure.retryable,
+      }),
+    );
   } finally {
-    await lease.stop();
+    try {
+      measured?.close();
+    } finally {
+      await lease.stop();
+    }
   }
   return true;
 }

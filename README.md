@@ -808,8 +808,8 @@ Completion duration covers the full response, not first-token latency or
 live-frame backlog; disconnected/incomplete responses may have no completion
 record. Restrict log access and configure the deployment's
 log sink for at most **30 days**; this command does not manage external log storage.
-End-to-end capture/canonical/client-delivery timing, measured lease-loss/lifetime
-outcome rates and independent deletion-ledger
+End-to-end capture/canonical/client-delivery timing, durable deployment-wide
+lifetime outcome accounting and independent deletion-ledger
 restore remain unfinished production-release requirements.
 
 ### Measured live gateway telemetry
@@ -888,6 +888,49 @@ headers/bodies, storage configuration or exception details are recorded.
 The shared bounded writer reports `upload_verification_telemetry_dropped` and
 `upload_verification_telemetry_unavailable` without changing verification or
 recovery behavior. Restrict log access and retain externally for at most 30 days.
+
+### Worker attempts and lease observations
+
+Worker main explicitly owns a bounded telemetry writer and closes it on shutdown;
+importing or calling the worker library does not install a global logger.
+Each successful job/chat claim produces a `worker_attempt_started` record and,
+if execution returns or unwinds, one `worker_attempt_completed` record. Generated
+worker-instance and attempt UUIDs correlate the controlled task kind, job or turn,
+original acceptance request, attempt count and observed expired-lease reclamation.
+Historical origins remain `null`; fencing tokens and frozen inputs are excluded.
+
+Completion is the **acknowledged database decision**, not provider return:
+`succeeded`, `failed`, `retry_wait`, `cancelled` or `fenced`. A transcript revision
+conflict is a failed completion even when recognition returned successfully.
+`fenced` means that finalization did not own a current running lease; it does not
+establish another worker's result or the reason authority changed.
+Finalization errors are counted, and failure to observe any acknowledged decision
+is `unobserved`, not a fabricated persisted failure. Success can save a candidate
+without applying it and establishes neither semantic quality nor final billing.
+
+`processing_ms` uses a worker-local monotonic clock from claim handling through
+observed finalization or error unwinding, before lease-monitor cleanup.
+`acceptance_to_claim_ms` is an exact decimal-string PostgreSQL wall-clock age at
+claim selection, including retries, recovery, scheduling and unavailable-authority
+time; it is **not pure ready-queue wait**. Invalid/future acceptance times are
+`null`, not zero, and worker timing must not be subtracted from database ages.
+
+`worker_lease_observed` distinguishes authoritative `renewal_refused` from
+`renewal_unavailable`; either immediately aborts the provider before observation.
+A refusal can reflect cancellation, permission/retention changes, expiry,
+replacement or an overlapping terminal transition, not necessarily a crashed
+worker. Expected monitor stop is not lease loss; an unexpected renewal
+`AbortError` is still an unavailable renewal. Observations after completion are
+ignored, and observer failures cannot suppress provider abort.
+
+These best-effort per-claim records are not durable lifetime success rates or a
+count of every accepted task: claim-time guards, process crashes, abrupt shutdown
+and dropped records may lack completion observations. No account/document/source
+IDs, audio, notes, answers, configuration, credentials, raw errors or fencing
+tokens are recorded. `worker_telemetry_dropped` and
+`worker_telemetry_unavailable` report bounded-output loss explicitly. Restrict
+access and configure external retention for at most 30 days; usage recovery and
+transactional audit remain separate.
 
 ### Azure HTTP request correlation and timing
 

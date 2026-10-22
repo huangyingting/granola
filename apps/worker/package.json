@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./dist/worker.js"
+    ".": "./dist/worker.js",
+    "./observability": "./dist/observability.js"
   },
   "dependencies": {
     "@windows-ai-notes/contracts": "workspace:*",

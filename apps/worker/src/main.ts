@@ -9,6 +9,7 @@ import {
 } from '@windows-ai-notes/db';
 import { runOnce } from './worker.js';
 import { loadStorageConfig, RecordingBlobs } from '@windows-ai-notes/storage';
+import { workerObservability } from './observability.js';
 
 async function main() {
   const providers = createAzureProviders(loadAzureConfig());
@@ -20,6 +21,7 @@ async function main() {
   process.once('SIGINT', () => shutdown.abort());
   let nextCleanup = 0;
   const closeTelemetry = registerProviderTelemetry();
+  const observations = workerObservability();
   try {
     await db.assertReady();
     await storage?.assertReady();
@@ -32,7 +34,15 @@ async function main() {
           await db.cleanup();
           nextCleanup = Date.now() + 60_000;
         }
-        if (!(await runOnce(db, providers, shutdown.signal, storage)))
+        if (
+          !(await runOnce(
+            db,
+            providers,
+            shutdown.signal,
+            storage,
+            observations,
+          ))
+        )
           await delay(500, undefined, { signal: shutdown.signal });
       } catch (error) {
         if (shutdown.signal.aborted) break;
@@ -46,6 +56,7 @@ async function main() {
       }
     }
   } finally {
+    observations.close();
     closeTelemetry();
     storage?.close();
     await db.close();

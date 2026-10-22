@@ -83,6 +83,7 @@ export interface Document {
 }
 interface JobRow {
   id: string;
+  origin_request_id: string | null;
   document_id: string;
   owner_id: string;
   kind: Job['kind'];
@@ -124,6 +125,9 @@ const jobStatusQuery = `
  JOIN users u ON u.id=j.owner_id AND u.active`;
 export interface ClaimedJob {
   id: string;
+  originRequestId: string | null;
+  acceptedToClaimMs: string | null;
+  reclaimedLease: boolean;
   documentId: string;
   ownerId: string;
   input: JobInput;
@@ -131,6 +135,10 @@ export interface ClaimedJob {
   leaseToken: number;
   attempt: number;
 }
+export type TaskCompletion =
+  'succeeded' | 'failed' | 'retry_wait' | 'cancelled' | 'fenced';
+const completionAccepted = (outcome: TaskCompletion) =>
+  outcome !== 'fenced' && outcome !== 'cancelled';
 const terminal = new Set(['succeeded', 'failed', 'cancelled']);
 const documentAccess = `
  JOIN memberships m ON m.workspace_id=d.workspace_id AND m.user_id=d.owner_id AND m.active
@@ -1150,8 +1158,10 @@ export class Database {
   async claim(leaseMs = 120_000): Promise<ClaimedJob | null> {
     return this.transaction(async (tx) => {
       const row = (
-        await tx.query<JobRow>(`
-        SELECT j.* FROM jobs j JOIN documents d ON d.id=j.document_id
+        await tx.query<JobRow & { accepted_to_claim_ms: string | null }>(`
+        SELECT j.*,CASE WHEN isfinite(j.created_at) AND j.created_at<=now()
+          THEN floor(extract(epoch FROM now()-j.created_at)*1000)::text END accepted_to_claim_ms
+        FROM jobs j JOIN documents d ON d.id=j.document_id
         JOIN memberships m ON m.workspace_id=d.workspace_id AND m.user_id=j.owner_id AND m.active
         JOIN users u ON u.id=j.owner_id AND u.active
         WHERE d.deleted_at IS NULL AND ((j.state IN ('queued','retry_wait') AND j.available_at<=now())
@@ -1186,6 +1196,9 @@ export class Database {
       });
       return {
         id: row.id,
+        originRequestId: row.origin_request_id,
+        acceptedToClaimMs: row.accepted_to_claim_ms,
+        reclaimedLease: row.state === 'running',
         documentId: row.document_id,
         ownerId: row.owner_id,
         input: jobInputSchema.parse(row.input),
@@ -1212,9 +1225,12 @@ export class Database {
     );
   }
   async finishRecording(job: ClaimedJob) {
+    return completionAccepted(await this.finishRecordingOutcome(job));
+  }
+  async finishRecordingOutcome(job: ClaimedJob): Promise<TaskCompletion> {
     if (job.input.kind !== 'recording_transcription')
       throw new Error('Expected a recording transcription job.');
-    return this.finish(job, null, null, undefined, true);
+    return this.finishOutcome(job, null, null, undefined, true);
   }
   async finish(
     job: ClaimedJob,
@@ -1223,6 +1239,23 @@ export class Database {
     transcript?: Segment[],
     recordingComplete = false,
   ): Promise<boolean> {
+    return completionAccepted(
+      await this.finishOutcome(
+        job,
+        result,
+        failure,
+        transcript,
+        recordingComplete,
+      ),
+    );
+  }
+  async finishOutcome(
+    job: ClaimedJob,
+    result: JobResult | null,
+    failure: Failure | null,
+    transcript?: Segment[],
+    recordingComplete = false,
+  ): Promise<TaskCompletion> {
     if (job.input.kind === 'recording_transcription' && (result || transcript))
       throw new Error(
         'Complete recording jobs through their durable source coordinator.',
@@ -1234,7 +1267,7 @@ export class Database {
       throw new Error(
         'Durable recording completion cannot publish a failure or another job kind.',
       );
-    return this.transaction(async (tx) => {
+    return this.transaction<TaskCompletion>(async (tx) => {
       await tx.query('SELECT id FROM documents WHERE id=$1 FOR UPDATE', [
         job.documentId,
       ]);
@@ -1253,7 +1286,7 @@ export class Database {
           [job.id, job.leaseToken],
         )
       ).rows[0];
-      if (!row?.valid) return false;
+      if (!row?.valid) return 'fenced';
       if (!doc?.allowed) {
         await tx.query(
           'DELETE FROM recording_transcription_runs WHERE job_id=$1',
@@ -1267,7 +1300,7 @@ export class Database {
         await this.event(tx, job.id, 'job.cancelled', {
           code: 'permission_revoked',
         });
-        return false;
+        return 'cancelled';
       }
       if (result && job.input.kind === 'transcription') {
         if (doc.transcript_revision !== job.input.base_transcript_revision) {
@@ -1335,6 +1368,7 @@ export class Database {
           [job.id, JSON.stringify(result)],
         );
         await this.event(tx, job.id, 'output.completed', result);
+        return 'succeeded';
       } else {
         if (!failure)
           throw new Error('Failed completion requires a structured failure.');
@@ -1357,8 +1391,8 @@ export class Database {
           ...failure,
           retry_scheduled: retry,
         });
+        return retry ? 'retry_wait' : 'failed';
       }
-      return true;
     });
   }
   async cleanup(): Promise<void> {

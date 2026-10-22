@@ -12,17 +12,26 @@ import type { Database, ClaimedChat } from '@windows-ai-notes/db';
 import { monitorLease } from './lease.js';
 import { generationPreview } from './preview.js';
 import { withUsage } from './usage.js';
+import {
+  observeCompletion,
+  type AttemptMeasurements,
+} from './observability.js';
 
 export async function answerQuestion(
   db: Database,
   providers: AiProviders,
   claim: ClaimedChat,
   shutdown: AbortSignal,
+  measured?: AttemptMeasurements,
 ) {
   const lease = monitorLease(
     () => db.chat.renew(claim),
     { turn_id: claim.id },
     shutdown,
+    (value) => {
+      measured?.lease(value);
+      return undefined;
+    },
   );
   try {
     lease.signal.throwIfAborted();
@@ -55,11 +64,14 @@ export async function answerQuestion(
         ),
       );
     }
-    await db.chat.complete(claim, {
-      ...generated,
-      provider: providers.provider,
-      configuration_version: providers.configurationVersion,
-      prompt_version: questionPromptVersion(claim.evidence),
+    await observeCompletion(measured, async () => {
+      await db.chat.complete(claim, {
+        ...generated,
+        provider: providers.provider,
+        configuration_version: providers.configurationVersion,
+        prompt_version: questionPromptVersion(claim.evidence),
+      });
+      return 'succeeded';
     });
   } catch (error) {
     const failure = shutdown.aborted
@@ -76,12 +88,18 @@ export async function answerQuestion(
             500,
           );
     console.error(JSON.stringify({ code: failure.code, turn_id: claim.id }));
-    await db.chat.fail(claim, {
-      code: failure.code,
-      message: failure.message,
-      retryable: false,
-    });
+    await observeCompletion(measured, () =>
+      db.chat.failOutcome(claim, {
+        code: failure.code,
+        message: failure.message,
+        retryable: false,
+      }),
+    );
   } finally {
-    await lease.stop();
+    try {
+      measured?.close();
+    } finally {
+      await lease.stop();
+    }
   }
 }

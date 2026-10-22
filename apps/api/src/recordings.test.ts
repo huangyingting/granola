@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
+import { Writable } from 'node:stream';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import {
@@ -41,6 +42,7 @@ import {
   transcriptTimelinePageSchema,
 } from '@windows-ai-notes/contracts/server';
 import { runOnce } from '@windows-ai-notes/worker';
+import { workerObservability } from '@windows-ai-notes/worker/observability';
 import {
   remoteRecordingSchema,
   remoteChunkSchema,
@@ -1379,7 +1381,32 @@ describe.skipIf(!databaseUrl || !endpoint)(
             text: 'Manual text must remain.',
           },
         ]);
-        await runOnce(db, provider(), undefined, blobs);
+        const observations: Record<string, unknown>[] = [];
+        const telemetry = workerObservability(
+          new Writable({
+            write(chunk, _encoding, done) {
+              observations.push(JSON.parse(String(chunk)));
+              done();
+            },
+          }),
+        );
+        try {
+          await runOnce(db, provider(), undefined, blobs, telemetry);
+          expect(
+            observations.filter(
+              (row) => row.code === 'worker_attempt_completed',
+            ),
+          ).toMatchObject([
+            {
+              job_id: job.id,
+              task_kind: 'recording_transcription',
+              completion: 'succeeded',
+            },
+          ]);
+          expect(JSON.stringify(observations)).not.toContain(c.input.id);
+        } finally {
+          telemetry.close();
+        }
         expect(await retention(c)).toEqual(retained);
         const done = await db.job(c.user_id, job.id);
         expect(done).toMatchObject({

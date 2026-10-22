@@ -25,11 +25,20 @@ import {
   type QuestionContext,
   type QuestionEvidence,
 } from '@windows-ai-notes/contracts/questions';
-import { digest, type Database, type Transaction } from './index.js';
+import {
+  digest,
+  type Database,
+  type Transaction,
+  type TaskCompletion,
+} from './index.js';
 import { usageTotals, type UsageReservation } from './usage.js';
 
 export interface ClaimedChat {
   id: string;
+  originRequestId: string | null;
+  acceptedToClaimMs: string | null;
+  reclaimedLease: boolean;
+  attempt: number;
   ownerId: string;
   documentId: string;
   leaseToken: number;
@@ -37,6 +46,8 @@ export interface ClaimedChat {
 }
 interface Row {
   id: string;
+  origin_request_id: string | null;
+  accepted_to_claim_ms: string | null;
   thread_id: string;
   document_id: string;
   owner_id: string;
@@ -77,6 +88,8 @@ const access = `
  JOIN memberships m ON m.workspace_id=d.workspace_id AND m.user_id=t.owner_id AND m.active
  JOIN users u ON u.id=t.owner_id AND u.active`;
 const query = `SELECT t.*,h.last_position,
+ CASE WHEN isfinite(t.created_at) AND t.created_at<=now()
+   THEN floor(extract(epoch FROM now()-t.created_at)*1000)::text END accepted_to_claim_ms,
  d.revision current_note_revision,d.transcript_revision current_transcript_revision,
  t.expires_at>now() fresh,t.lease_until>now() leased,
  (SELECT count(*)::int FROM ai_usage_calls c WHERE c.chat_turn_id=t.id) provider_requests,
@@ -512,9 +525,9 @@ export class ChatStore {
         return null;
       }
       const updated = (
-        await tx.query<{ lease_token: number }>(
+        await tx.query<{ lease_token: number; attempt: number }>(
           `UPDATE chat_turns SET state='running',attempt=attempt+1,lease_token=lease_token+1,
-         lease_until=now()+interval '120 seconds',resume_token=NULL WHERE id=$1 RETURNING lease_token`,
+         lease_until=now()+interval '120 seconds',resume_token=NULL WHERE id=$1 RETURNING lease_token,attempt`,
           [row.id],
         )
       ).rows[0]!;
@@ -524,6 +537,10 @@ export class ChatStore {
       });
       return {
         id: row.id,
+        originRequestId: row.origin_request_id,
+        acceptedToClaimMs: row.accepted_to_claim_ms,
+        reclaimedLease: row.state === 'running',
+        attempt: updated.attempt,
         ownerId: row.owner_id,
         documentId: row.document_id,
         leaseToken: updated.lease_token,
@@ -684,7 +701,13 @@ export class ChatStore {
     });
   }
   async fail(claim: ClaimedChat, error: Failure) {
-    await this.database.transaction(async (tx) => {
+    await this.failOutcome(claim, error);
+  }
+  async failOutcome(
+    claim: ClaimedChat,
+    error: Failure,
+  ): Promise<TaskCompletion> {
+    return this.database.transaction<TaskCompletion>(async (tx) => {
       const row = (
         await tx.query<{ allowed: boolean; valid: boolean }>(
           `SELECT (d.deleted_at IS NULL AND m.active AND u.active) allowed,
@@ -695,7 +718,7 @@ export class ChatStore {
           [claim.id, claim.leaseToken, claim.ownerId, claim.documentId],
         )
       ).rows[0];
-      if (!row?.valid) return;
+      if (!row?.valid) return 'fenced';
       if (!row.allowed) {
         await tx.query(
           "UPDATE chat_turns SET state='cancelled',evidence=NULL,lease_until=NULL,preview_text=NULL,resume_token=NULL WHERE id=$1",
@@ -705,6 +728,7 @@ export class ChatStore {
         await this.event(tx, claim.id, 'turn.cancelled', {
           code: 'permission_revoked',
         });
+        return 'cancelled';
       } else {
         await tx.query(
           "UPDATE chat_turns SET state='failed',error=$2,lease_until=NULL,preview_text=NULL,resume_token=$3 WHERE id=$1",
@@ -718,6 +742,7 @@ export class ChatStore {
           ...error,
           retryable: false,
         });
+        return 'failed';
       }
     });
   }

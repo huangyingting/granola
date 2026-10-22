@@ -10,6 +10,7 @@ import {
   type ProviderEvent,
 } from '@windows-ai-notes/contracts/observability';
 import { runOnce } from '@windows-ai-notes/worker';
+import { workerObservability } from '@windows-ai-notes/worker/observability';
 import { chatTurnSchema } from '@windows-ai-notes/contracts/questions';
 import { createServer } from './server.js';
 
@@ -273,7 +274,16 @@ describe.skipIf(!databaseUrl)('reserved Azure call correlation', () => {
       );
     });
     const captured = collect();
-    const running = runOnce(db, providers);
+    const workerRows: Record<string, unknown>[] = [];
+    const workerTelemetry = workerObservability(
+      new Writable({
+        write(chunk, _encoding, done) {
+          workerRows.push(JSON.parse(String(chunk)));
+          done();
+        },
+      }),
+    );
+    const running = runOnce(db, providers, undefined, null, workerTelemetry);
     try {
       await receipt;
       expect(
@@ -314,10 +324,24 @@ describe.skipIf(!databaseUrl)('reserved Azure call correlation', () => {
         db.document(job.owner.user_id, job.document),
       ).rejects.toThrow();
       expect(JSON.stringify(captured.rows)).not.toContain(secret);
+      expect(
+        workerRows.filter((row) => row.code === 'worker_attempt_completed'),
+      ).toMatchObject([
+        {
+          job_id: job.job,
+          origin_request_id: job.request,
+          completion: 'fenced',
+        },
+      ]);
+      expect(JSON.stringify(workerRows)).not.toContain(secret);
     } finally {
       resume();
-      await running;
-      captured.close();
+      try {
+        await running;
+      } finally {
+        captured.close();
+        workerTelemetry.close();
+      }
     }
   });
 

@@ -2,7 +2,12 @@ import type { Writable } from 'node:stream';
 
 export function boundedTelemetry(
   output: Writable,
-  prefix: 'http_request' | 'live_gateway' | 'provider' | 'upload_verification',
+  prefix:
+    | 'http_request'
+    | 'live_gateway'
+    | 'provider'
+    | 'upload_verification'
+    | 'worker',
 ) {
   let dropped = 0n;
   let waiting = false;

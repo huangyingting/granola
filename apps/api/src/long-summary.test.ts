@@ -370,13 +370,13 @@ describe.skipIf(!databaseUrl)(
     it('publishes a saved final stage with its complete usage under a new configuration without repeating any model calls', async () => {
       const { job } = await queued(101);
       const finish = vi
-        .spyOn(db, 'finish')
+        .spyOn(db, 'finishOutcome')
         .mockImplementationOnce(async (claimed) => {
           await db.pool.query(
             "UPDATE jobs SET lease_until=now()-interval '1 second' WHERE id=$1",
             [claimed.id],
           );
-          return false;
+          return 'fenced';
         });
       await runOnce(db, fixture);
       finish.mockRestore();
