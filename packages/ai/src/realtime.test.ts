@@ -6,6 +6,7 @@ import {
   createAzureRealtimeProvider,
   type RealtimeSession,
   type RealtimeProgress,
+  type RealtimeIdentity,
 } from '@windows-ai-notes/ai/realtime';
 import type { LivePcmFrame } from '@windows-ai-notes/contracts';
 import type {
@@ -53,6 +54,8 @@ async function open(
   results: Record<number, unknown[]> = {},
   emit?: (event: LiveRecognitionEvent) => undefined,
   progress?: (value: RealtimeProgress) => undefined,
+  identity?: (value: RealtimeIdentity) => undefined,
+  identities: unknown[] = [],
 ) {
   const selected = source();
   const events: LiveRecognitionEvent[] = [];
@@ -61,7 +64,7 @@ async function open(
     worker = new Worker(
       new URL('../fixtures/live-worker.mjs', import.meta.url),
       {
-        workerData: { mode, results },
+        workerData: { mode, results, identities },
         env: {},
         execArgv: [],
         stdout: true,
@@ -81,12 +84,144 @@ async function open(
         return undefined;
       }),
     progress,
+    identity,
   );
   owned.push(session);
   return { session, worker, selected, events, controller };
 }
 
 describe('bounded isolated streaming speech sessions', () => {
+  it('admits session metadata before readiness without consuming recognition sequence numbers or receipts', async () => {
+    const observe = vi.fn((_value: RealtimeIdentity): undefined => undefined);
+    const live = await open(
+      'identity-before-ready',
+      { 0: [{}] },
+      undefined,
+      undefined,
+      observe,
+      [
+        {
+          kind: 'session',
+          status: 'accepted',
+          session_id: randomUUID().replaceAll('-', ''),
+        },
+      ],
+    );
+    expect(observe).toHaveBeenCalledOnce();
+    live.session.write(frame(live.selected));
+    expect((await live.session.finish()).usage.audio_ms).toBe(50);
+    expect(live.events).toHaveLength(1);
+  });
+  it('never mistakes SDK identity metadata for provider readiness', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    let observe!: (value: RealtimeIdentity) => void;
+    const observed = new Promise<RealtimeIdentity>((resolve) => {
+      observe = resolve;
+    });
+    let ready = false;
+    const opening = open(
+      'never-start',
+      {},
+      undefined,
+      undefined,
+      (value) => {
+        observe(value);
+        return undefined;
+      },
+      [{ kind: 'session', status: 'rejected', session_id: null }],
+    ).then((live) => {
+      ready = true;
+      return live;
+    });
+    const rejected = expect(opening).rejects.toMatchObject({
+      code: 'live_start_timeout',
+    });
+    expect(await observed).toMatchObject({
+      status: 'rejected',
+      session_id: null,
+    });
+    expect(ready).toBe(false);
+    await vi.advanceTimersByTimeAsync(10_001);
+    await rejected;
+  });
+  it.each(['accepted', 'rejected'] as const)(
+    'bridges only the first %s SDK identity without changing audio or usage',
+    async (status) => {
+      const identity = {
+        kind: 'session',
+        status,
+        session_id:
+          status === 'accepted' ? randomUUID().replaceAll('-', '') : null,
+      };
+      const observe = vi.fn((_value: RealtimeIdentity): undefined => undefined);
+      const live = await open('normal', {}, undefined, undefined, observe, [
+        identity,
+        {
+          kind: 'session',
+          status: 'accepted',
+          session_id: randomUUID().replaceAll('-', ''),
+        },
+      ]);
+      live.session.write(frame(live.selected));
+      expect((await live.session.finish()).usage.audio_ms).toBe(50);
+      expect(observe).toHaveBeenCalledExactlyOnceWith({
+        provider_epoch: live.session.providerEpoch,
+        status,
+        session_id: identity.session_id,
+      });
+      expect(live.events).toHaveLength(1);
+    },
+  );
+  it.each([
+    {
+      kind: 'session',
+      status: 'accepted',
+      session_id: 'private-sdk-header-value',
+    },
+    { kind: 'session', status: 'accepted', session_id: null },
+    { kind: 'session', status: 'accepted', session_id: 'a'.repeat(32) + '\n' },
+    {
+      kind: 'session',
+      status: 'rejected',
+      session_id: null,
+      text: 'private-sdk-body',
+    },
+  ])(
+    'rejects malformed identity IPC rather than accepting arbitrary worker metadata: %j',
+    async (identity) => {
+      const observe = vi.fn((_value: RealtimeIdentity): undefined => undefined);
+      const live = await open('normal', {}, undefined, undefined, observe, [
+        identity,
+      ]);
+      await expect(live.session.completion).rejects.toMatchObject({
+        code: 'live_worker_protocol',
+      });
+      expect(observe).not.toHaveBeenCalled();
+    },
+  );
+  it('fences a throwing identity consumer without an uncaught worker event error', async () => {
+    const observe = (): undefined => {
+      throw new Error('private-identity-consumer');
+    };
+    const live = await open('normal', {}, undefined, undefined, observe, [
+      { kind: 'session', status: 'rejected', session_id: null },
+    ]);
+    await expect(live.session.completion).rejects.toMatchObject({
+      code: 'live_consumer_failed',
+    });
+  });
+  it('fences an asynchronous identity consumer without an unhandled rejection', async () => {
+    const observe = async () => {
+      throw new Error('private-identity-consumer');
+    };
+    // @ts-expect-error Deliberately exercise a JavaScript caller bypassing the synchronous contract.
+    const live = await open('normal', {}, undefined, undefined, observe, [
+      { kind: 'session', status: 'rejected', session_id: null },
+    ]);
+    await expect(live.session.completion).rejects.toMatchObject({
+      code: 'live_consumer_failed',
+    });
+  });
   it('publishes stable partial/final revisions with immutable source sample identity and a known completion receipt', async () => {
     const { session, selected, events, worker } = await open('scripted', {
       0: [{ result_type: 'partial', duration_ticks: 500_000, text: 'Orion' }],

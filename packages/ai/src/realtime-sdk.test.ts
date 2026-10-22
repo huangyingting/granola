@@ -3,7 +3,10 @@ import { once } from 'node:events';
 import { Worker } from 'node:worker_threads';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { describe, expect, it } from 'vitest';
-import { createAzureRealtimeProvider } from '@windows-ai-notes/ai/realtime';
+import {
+  createAzureRealtimeProvider,
+  type RealtimeIdentity,
+} from '@windows-ai-notes/ai/realtime';
 import type { LivePcmFrame } from '@windows-ai-notes/contracts';
 import type { LiveRecognitionEvent } from '@windows-ai-notes/contracts/realtime';
 import type { AzureConfig } from './config.js';
@@ -36,6 +39,8 @@ async function fixture(
   let mediaBytes = 0;
   let pcmValid = true;
   let eof = false;
+  const connectionIds = new Set<string>();
+  const identities: RealtimeIdentity[] = [];
   function send(
     socket: WebSocket,
     path: string,
@@ -46,8 +51,13 @@ async function fixture(
       `Path:${path}\r\nX-RequestId:${request}\r\nContent-Type:application/json\r\n\r\n${JSON.stringify(body)}`,
     );
   }
-  server.on('connection', (socket) => {
+  server.on('connection', (socket, request) => {
     connections++;
+    const connectionId = new URL(
+      request.url!,
+      'http://127.0.0.1',
+    ).searchParams.get('X-ConnectionId');
+    if (connectionId) connectionIds.add(connectionId.toLowerCase());
     let started = false;
     socket.on('message', (data, binary) => {
       const bytes = Buffer.isBuffer(data)
@@ -147,10 +157,20 @@ async function fixture(
     );
   };
   const session = await provider
-    .open(selected, 'en-US', new AbortController().signal, (event) => {
-      events.push(event);
-      return undefined;
-    })
+    .open(
+      selected,
+      'en-US',
+      new AbortController().signal,
+      (event) => {
+        events.push(event);
+        return undefined;
+      },
+      undefined,
+      (identity) => {
+        identities.push(identity);
+        return undefined;
+      },
+    )
     .catch(async (error: unknown) => {
       await shutdown();
       throw error;
@@ -174,6 +194,8 @@ async function fixture(
   return {
     session,
     events,
+    identities,
+    connectionIds,
     write,
     nextResult: () => once(worker, 'message'),
     stats: () => ({
@@ -223,6 +245,14 @@ describe('actual pinned Azure Speech SDK with an isolated synthetic service', ()
       });
       expect(live.events[0]!.segment_id).toBe(live.events[1]!.segment_id);
       expect(live.events[1]!.version).toBe(2);
+      expect(live.identities).toEqual([
+        {
+          provider_epoch: live.session.providerEpoch,
+          status: 'accepted',
+          session_id: expect.stringMatching(/^[0-9a-f]{32}$/),
+        },
+      ]);
+      expect([...live.connectionIds]).toContain(live.identities[0]!.session_id);
     } finally {
       await live.close();
     }

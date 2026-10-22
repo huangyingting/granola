@@ -40,6 +40,11 @@ export interface RealtimeProgress {
   provider_epoch: string;
   finalized_samples: number;
 }
+export interface RealtimeIdentity {
+  provider_epoch: string;
+  session_id: string | null;
+  status: 'accepted' | 'rejected';
+}
 export interface RealtimeProvider {
   readonly provider: 'azure' | 'fixture';
   readonly configurationVersion: string;
@@ -49,6 +54,7 @@ export interface RealtimeProvider {
     signal: AbortSignal,
     emit: (event: LiveRecognitionEvent) => undefined,
     progress?: (value: RealtimeProgress) => undefined,
+    identity?: (value: RealtimeIdentity) => undefined,
   ): Promise<RealtimeSession>;
 }
 export type SpeechWorkerFactory = (locale: 'en-US' | 'zh-CN') => Worker;
@@ -100,6 +106,7 @@ export function createAzureRealtimeProvider(
       signal: AbortSignal,
       emit: (event: LiveRecognitionEvent) => undefined,
       progress?: (value: RealtimeProgress) => undefined,
+      identity?: (value: RealtimeIdentity) => undefined,
     ): Promise<RealtimeSession> {
       const selected = liveSourceSchema.safeParse(source);
       if (
@@ -134,6 +141,7 @@ export function createAzureRealtimeProvider(
         emit,
         worker,
         progress,
+        identity,
       );
       try {
         await session.ready;
@@ -164,6 +172,7 @@ class SpeechSession implements RealtimeSession {
   private base: number | undefined;
   private nextSequence: number | undefined;
   private resultSequence = 0;
+  private identitySeen = false;
   private readonly pending: { end: number; at: number }[] = [];
   private readonly finals = new Map<
     number,
@@ -185,6 +194,7 @@ class SpeechSession implements RealtimeSession {
     private readonly emit: (event: LiveRecognitionEvent) => undefined,
     private readonly worker: Worker,
     private readonly progress?: (value: RealtimeProgress) => undefined,
+    private readonly identity?: (value: RealtimeIdentity) => undefined,
   ) {
     this.completion = new Promise((resolve, reject) => {
       this.resolve = resolve;
@@ -351,7 +361,23 @@ class SpeechSession implements RealtimeSession {
       return;
     }
     const event = parsed.data;
-    if (event.kind === 'ready') {
+    if (event.kind === 'session') {
+      if (this.identitySeen) return;
+      this.identitySeen = true;
+      try {
+        const value: unknown = this.identity?.({
+          provider_epoch: this.providerEpoch,
+          session_id: event.session_id,
+          status: event.status,
+        });
+        if (value !== undefined) {
+          if (value instanceof Promise) value.catch(() => undefined);
+          throw new Error('Live identity consumers must be synchronous.');
+        }
+      } catch {
+        this.fail('live_consumer_failed');
+      }
+    } else if (event.kind === 'ready') {
       if (this.started) {
         this.fail('live_worker_protocol');
         return;

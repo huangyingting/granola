@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { normalizeProviderId } from './provider-id.js';
 
 export const MAX_PENDING_SAMPLES = 80_000;
 export const MAX_SESSION_SAMPLES = 16_000 * 60 * 10;
@@ -25,6 +26,19 @@ export const speechResultSchema = z
   );
 export const speechWorkerEventSchema = z.discriminatedUnion('kind', [
   z.strictObject({ kind: z.literal('ready') }),
+  z
+    .strictObject({
+      kind: z.literal('session'),
+      session_id: z
+        .string()
+        .length(32)
+        .regex(/^[0-9a-f]{32}$/)
+        .nullable(),
+      status: z.enum(['accepted', 'rejected']),
+    })
+    .refine(
+      (value) => (value.status === 'accepted') === (value.session_id !== null),
+    ),
   speechResultSchema,
   z.strictObject({
     kind: z.literal('stopped'),
@@ -62,3 +76,13 @@ export const speechWorkerCommandSchema = z.discriminatedUnion('kind', [
 ]);
 export type SpeechWorkerResult = z.infer<typeof speechResultSchema>;
 export type SpeechWorkerEvent = z.infer<typeof speechWorkerEventSchema>;
+export function speechSessionIdentity(
+  value: unknown,
+): Extract<SpeechWorkerEvent, { kind: 'session' }> {
+  const session_id = normalizeProviderId(value);
+  return {
+    kind: 'session',
+    session_id,
+    status: session_id === null ? 'rejected' : 'accepted',
+  };
+}

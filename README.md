@@ -808,8 +808,8 @@ Completion duration covers the full response, not first-token latency or
 live-frame backlog; disconnected/incomplete responses may have no completion
 record. Restrict log access and configure the deployment's
 log sink for at most **30 days**; this command does not manage external log storage.
-Speech SDK request bridging, end-to-end capture/canonical/client-delivery
-timing, measured lease-loss/lifetime outcome rates and independent deletion-ledger
+End-to-end capture/canonical/client-delivery timing, measured lease-loss/lifetime
+outcome rates and independent deletion-ledger
 restore remain unfinished production-release requirements.
 
 ### Measured live gateway telemetry
@@ -847,6 +847,23 @@ intentional omissions and periodic snapshots refresh current socket counts.
 `live_gateway_telemetry_unavailable` reports output failure. Apply the same
 restricted-access, at-most-30-day external log retention as request telemetry;
 these best-effort records are neither durable audit nor a deletion ledger.
+
+The isolated Speech worker forwards at most **one first SDK session identity**
+using the supported `sessionStarted` callback, not debugging-only protocol
+message inspection. A strict, content-free IPC event links the parent-generated
+provider epoch to the generated handshake request, committed usage call and live
+lease in a `live_provider_session` record. Only a GUID-shaped ID is admitted,
+normalized to lowercase 32-hex; unsupported SDK values report `rejected` with
+no raw value. Socket close reports `provider_session_status` as `accepted`,
+`rejected` or `unobserved`. Missing observations and dropped telemetry are not
+proof that no provider session existed.
+
+This identifies the **first SDK session**, not every recognition turn, wire
+request or charge. The pinned SDK's synthetic-service test verifies the public
+session ID against its initial connection ID; production code does not parse
+wire headers or URLs. Session metadata neither signals readiness nor advances
+recognition sequencing, audio finalization, acknowledgements or usage receipts.
+Duplicate observations and observations after transport close are ignored.
 
 ### Azure HTTP request correlation and timing
 

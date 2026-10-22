@@ -317,6 +317,7 @@ class LiveConnection {
       this.claim = reserved.claim;
       this.reservation = reserved.call;
       if (this.isTerminal()) return;
+      this.measured.reserved(this.reservation, this.claim.id);
       this.renew();
       this.measured.providerOpening();
       const session = await this.provider.open(
@@ -329,6 +330,10 @@ class LiveConnection {
         },
         (progress) => {
           this.progress(progress);
+          return undefined;
+        },
+        (identity) => {
+          this.measured.providerSession(identity);
           return undefined;
         },
       );

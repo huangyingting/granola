@@ -1217,6 +1217,10 @@ describe.skipIf(!url)(
       );
     });
     it('runs the actual isolated Speech SDK through authenticated WebSocket, source cursors and known usage settlement', async () => {
+      const telemetry = vi
+        .spyOn(process.stdout, 'write')
+        .mockImplementation(() => true);
+      const connectionIds = new Set<string>();
       const speech = new WebSocketServer({
         host: '127.0.0.1',
         port: 0,
@@ -1228,7 +1232,12 @@ describe.skipIf(!url)(
         throw new Error('No loopback Speech endpoint.');
       let mediaBytes = 0;
       let pcmValid = true;
-      speech.on('connection', (socket) => {
+      speech.on('connection', (socket, request) => {
+        const connectionId = new URL(
+          request.url!,
+          'http://127.0.0.1',
+        ).searchParams.get('X-ConnectionId');
+        if (connectionId) connectionIds.add(connectionId.toLowerCase());
         let began = false;
         const send = (path: string, request: string, body: unknown) =>
           socket.send(
@@ -1327,7 +1336,8 @@ describe.skipIf(!url)(
         expect(await socket.next('live.progress')).toMatchObject({
           finalized_samples: 1600,
         });
-        expect(await socket.next('transcript.final')).toMatchObject({
+        const recognized = await socket.next('transcript.final');
+        expect(recognized).toMatchObject({
           source: selected,
           sample_start: 4000,
           sample_end: 5600,
@@ -1342,6 +1352,42 @@ describe.skipIf(!url)(
           uncertain_requests: '0',
           settled_requests: '1',
         });
+        const calls = await db.pool.query<{
+          id: string;
+          live_lease_id: string;
+          origin_request_id: string;
+        }>(
+          `SELECT c.id,c.live_lease_id,l.origin_request_id
+           FROM ai_usage_calls c JOIN live_leases l ON l.id=c.live_lease_id WHERE c.owner_id=$1`,
+          [user.user_id],
+        );
+        const call = calls.rows[0]!;
+        await vi.waitFor(() => {
+          const rows = telemetry.mock.calls.map(([line]) =>
+            JSON.parse(String(line)),
+          );
+          const metadata = rows.filter(
+            (row) => row.code === 'live_provider_session',
+          );
+          expect(metadata).toHaveLength(1);
+          expect(metadata[0]).toMatchObject({
+            request_id: call.origin_request_id,
+            usage_call_id: call.id,
+            live_lease_id: call.live_lease_id,
+            provider_epoch: recognized.provider_epoch,
+            provider_session_status: 'accepted',
+          });
+          expect([...connectionIds]).toContain(metadata[0].provider_session_id);
+        });
+        const logs = JSON.stringify(telemetry.mock.calls);
+        expect(logs).not.toContain('Synthetic Orion evidence.');
+        expect(logs).not.toContain('synthetic-loopback-speech-key');
+        for (const privateId of [
+          ...Object.values(selected),
+          user.user_id,
+          user.doc,
+        ])
+          expect(logs).not.toContain(privateId);
       } finally {
         socket?.socket.terminate();
         await server.close();

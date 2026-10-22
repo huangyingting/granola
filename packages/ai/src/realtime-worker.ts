@@ -6,6 +6,7 @@ import {
   MAX_SESSION_SAMPLES,
   speechResultSchema,
   speechWorkerCommandSchema,
+  speechSessionIdentity,
   type SpeechWorkerEvent,
 } from './realtime-protocol.js';
 
@@ -17,6 +18,7 @@ let finishing = false;
 let samples = 0;
 let processed = 0;
 let resultSequence = 0;
+let identitySent = false;
 const pendingResults = new Set<number>();
 function fail(code: Extract<SpeechWorkerEvent, { kind: 'error' }>['code']) {
   if (terminal) return;
@@ -53,6 +55,11 @@ else {
   const recognizer = new sdk.SpeechRecognizer(speech, audio);
   const connection = sdk.Connection.fromRecognizer(recognizer);
   connection.disconnected = () => fail('live_provider_closed');
+  recognizer.sessionStarted = (_, event) => {
+    if (terminal || identitySent) return;
+    identitySent = true;
+    port.postMessage(speechSessionIdentity(event.sessionId));
+  };
   function result(
     result: sdk.SpeechRecognitionResult,
     type: 'partial' | 'final' | 'no_match',

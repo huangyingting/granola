@@ -68,7 +68,7 @@ it('measures actual upgraded sockets until close, isolates gateway instances and
 it('reports exact observed frame/gap/pressure peaks and monotonic gateway timings without content fields', () => {
   vi.useFakeTimers();
   const rows: object[] = [];
-  const measured = new LiveMeasurements((row) => rows.push(row));
+  const measured = new LiveMeasurements((row) => rows.push(row), vi.fn());
   measured.providerOpening();
   vi.advanceTimersByTime(25);
   measured.providerReady();
@@ -115,13 +115,14 @@ it('reports exact observed frame/gap/pressure peaks and monotonic gateway timing
       output_backpressure_failures: 1,
       provider_startup_ms: 25,
       first_recognition_after_forward_ms: 40,
+      provider_session_status: 'unobserved',
     },
   ]);
 });
 
 it('does not turn absent startup/recognition or a failed provider write into zero latency or forwarded media', () => {
   const rows: object[] = [];
-  const measured = new LiveMeasurements((row) => rows.push(row));
+  const measured = new LiveMeasurements((row) => rows.push(row), vi.fn());
   measured.providerOpening();
   measured.forwarding();
   measured.close();
@@ -132,6 +133,80 @@ it('does not turn absent startup/recognition or a failed provider write into zer
       forwarded_audio_frames: 0,
     }),
   ]);
+});
+
+it.each(['accepted', 'rejected'] as const)(
+  'correlates only the first %s SDK session observation to its reserved live call without affecting socket gauges',
+  async (status) => {
+    const captured = collector();
+    const app = Fastify();
+    const gateway = liveObservability(app, captured.output);
+    const request = randomUUID(),
+      call = randomUUID(),
+      lease = randomUUID();
+    const identity = {
+      provider_epoch: randomUUID(),
+      session_id:
+        status === 'accepted' ? randomUUID().replaceAll('-', '') : null,
+      status,
+    };
+    try {
+      const measured = gateway.open(request);
+      measured.reserved(call, lease);
+      measured.providerSession(identity);
+      measured.providerSession({
+        ...identity,
+        status: 'accepted',
+        session_id: randomUUID().replaceAll('-', ''),
+      });
+      measured.close();
+      measured.providerSession(identity);
+      const rows = captured.rows.filter(
+        (row) => row.code === 'live_provider_session',
+      );
+      expect(rows).toEqual([
+        {
+          code: 'live_provider_session',
+          finished_at: expect.any(String),
+          gateway_instance_id: captured.rows[0]!.gateway_instance_id,
+          request_id: request,
+          usage_call_id: call,
+          live_lease_id: lease,
+          provider_epoch: identity.provider_epoch,
+          provider_session_id: identity.session_id,
+          provider_session_status: status,
+        },
+      ]);
+      expect(captured.rows.at(-1)).toMatchObject({
+        code: 'live_socket_closed',
+        open_sockets: 0,
+        provider_session_status: status,
+      });
+    } finally {
+      await app.close();
+    }
+  },
+);
+
+it('rejects identity without a reservation and ignores first observations after transport close', () => {
+  const report = vi.fn(),
+    reportIdentity = vi.fn();
+  const measured = new LiveMeasurements(report, reportIdentity);
+  const identity = {
+    provider_epoch: randomUUID(),
+    session_id: null,
+    status: 'rejected' as const,
+  };
+  expect(() => measured.providerSession(identity)).toThrow(
+    'Speech identity has no reserved live operation.',
+  );
+  measured.reserved(randomUUID(), randomUUID());
+  measured.close();
+  measured.providerSession(identity);
+  expect(reportIdentity).not.toHaveBeenCalled();
+  expect(report).toHaveBeenCalledWith(
+    expect.objectContaining({ provider_session_status: 'unobserved' }),
+  );
 });
 
 it('bounds a blocked live sink, reports dropped records and recovers with a fresh exact gauge', async () => {

@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { Writable } from 'node:stream';
 import type { FastifyInstance } from 'fastify';
 import { boundedTelemetry } from '@windows-ai-notes/ai/telemetry';
+import type { RealtimeIdentity } from '@windows-ai-notes/ai/realtime';
 
 export function liveObservability(
   app: FastifyInstance,
@@ -13,7 +14,11 @@ export function liveObservability(
   let opened = 0n;
   let closed = 0n;
   const record = (
-    code: 'live_gateway_snapshot' | 'live_socket_opened' | 'live_socket_closed',
+    code:
+      | 'live_gateway_snapshot'
+      | 'live_socket_opened'
+      | 'live_socket_closed'
+      | 'live_provider_session',
     fields: object,
   ) =>
     telemetry.emit({
@@ -43,15 +48,19 @@ export function liveObservability(
         request_id: requestId,
         open_sockets: active,
       });
-      return new LiveMeasurements((fields) => {
-        active--;
-        closed++;
-        record('live_socket_closed', {
-          request_id: requestId,
-          open_sockets: active,
-          ...fields,
-        });
-      });
+      return new LiveMeasurements(
+        (fields) => {
+          active--;
+          closed++;
+          record('live_socket_closed', {
+            request_id: requestId,
+            open_sockets: active,
+            ...fields,
+          });
+        },
+        (fields) =>
+          record('live_provider_session', { request_id: requestId, ...fields }),
+      );
     },
   };
 }
@@ -79,8 +88,32 @@ export class LiveMeasurements {
   private providerStartupMs: number | null = null;
   private firstForwardAt: number | null = null;
   private firstRecognitionMs: number | null = null;
+  private usageCall: string | undefined;
+  private liveLease: string | undefined;
+  private identityStatus: 'unobserved' | 'accepted' | 'rejected' = 'unobserved';
 
-  constructor(private readonly report: (fields: object) => void) {}
+  constructor(
+    private readonly report: (fields: object) => void,
+    private readonly reportIdentity: (fields: object) => void,
+  ) {}
+
+  reserved(call: string, lease: string) {
+    this.usageCall = call;
+    this.liveLease = lease;
+  }
+  providerSession(identity: RealtimeIdentity) {
+    if (this.closed || this.identityStatus !== 'unobserved') return;
+    if (!this.usageCall || !this.liveLease)
+      throw new Error('Speech identity has no reserved live operation.');
+    this.identityStatus = identity.status;
+    this.reportIdentity({
+      usage_call_id: this.usageCall,
+      live_lease_id: this.liveLease,
+      provider_epoch: identity.provider_epoch,
+      provider_session_id: identity.session_id,
+      provider_session_status: identity.status,
+    });
+  }
 
   received(frames: number) {
     this.receivedFrames += frames;
@@ -163,6 +196,7 @@ export class LiveMeasurements {
       output_backpressure_failures: this.outputPressure,
       provider_startup_ms: this.providerStartupMs,
       first_recognition_after_forward_ms: this.firstRecognitionMs,
+      provider_session_status: this.identityStatus,
     });
   }
 }

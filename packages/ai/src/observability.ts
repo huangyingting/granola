@@ -10,6 +10,7 @@ import {
   type ProviderEvent,
 } from '@windows-ai-notes/contracts/observability';
 import { boundedTelemetry } from './telemetry.js';
+import { normalizeProviderId } from './provider-id.js';
 
 const events = channel('windows-ai-notes.provider-calls');
 const contexts = new AsyncLocalStorage<ProviderContext>();
@@ -89,14 +90,8 @@ export class ProviderCall {
       response.headers.get('x-request-id') ??
       response.headers.get('x-ms-request-id');
     if (raw !== null) {
-      const normalized = /^[0-9a-f]{32}$/i.test(raw)
-        ? raw
-        : /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
-              raw,
-            )
-          ? raw.replaceAll('-', '')
-          : null;
-      this.responseId = normalized?.toLowerCase() ?? null;
+      const normalized = normalizeProviderId(raw);
+      this.responseId = normalized;
       this.responseIdStatus = normalized === null ? 'rejected' : 'accepted';
     }
   }

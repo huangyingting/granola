@@ -1,6 +1,6 @@
 import { parentPort, workerData } from 'node:worker_threads';
 
-const { mode = 'normal', results = {} } = workerData;
+const { mode = 'normal', results = {}, identities = [] } = workerData;
 let samples = 0;
 let outputSequence = 0;
 function send(result) {
@@ -52,4 +52,7 @@ parentPort.on('message', (message) => {
     });
   }
 });
-if (mode !== 'never-start') parentPort.postMessage({ kind: 'ready' });
+if (mode !== 'never-start' && mode !== 'identity-before-ready')
+  parentPort.postMessage({ kind: 'ready' });
+for (const identity of identities) parentPort.postMessage(identity);
+if (mode === 'identity-before-ready') parentPort.postMessage({ kind: 'ready' });
