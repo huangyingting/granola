@@ -52,6 +52,7 @@ const migrationFiles = [
   '007_live_sources.sql',
   '008_summary_stages.sql',
   '009_chat.sql',
+  '010_audio_retention.sql',
 ];
 
 export type Transaction = pg.PoolClient;
@@ -1186,7 +1187,7 @@ export class Database {
       AND u.id=j.owner_id AND u.active
       AND (j.kind<>'recording_transcription' OR EXISTS
         (SELECT 1 FROM recordings r WHERE r.id::text=j.input->>'recording_id' AND r.document_id=j.document_id
-         AND r.deleted_at IS NULL AND r.seal_hash=j.input->>'seal_sha256'))`,
+         AND r.deleted_at IS NULL AND r.retention_expires_at>now() AND r.seal_hash=j.input->>'seal_sha256'))`,
           [job.id, job.leaseToken],
         )
       ).rowCount === 1

@@ -1,4 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import {
   afterAll,
   afterEach,
@@ -42,6 +45,7 @@ import {
   remoteRecordingSchema,
   remoteChunkSchema,
   uploadAuthorizationSchema,
+  recordingRetentionSchema,
   type CreateRecording,
   type RecordingSeal,
 } from '@windows-ai-notes/contracts/uploads';
@@ -51,6 +55,7 @@ import { cleanupRecordingObjects } from './recordings.js';
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const endpoint = process.env.TEST_S3_ENDPOINT;
+const execute = promisify(execFile);
 describe.skipIf(!databaseUrl || !endpoint)(
   'real PostgreSQL, private S3 uploads and immutable recording verification',
   () => {
@@ -289,6 +294,20 @@ describe.skipIf(!databaseUrl || !endpoint)(
       );
     });
     type Context = Awaited<ReturnType<typeof context>>;
+    async function retention(c: Context) {
+      const response = await app.inject({
+        url: `/v1/recordings/${c.input.id}/retention`,
+        headers: c.headers,
+      });
+      expect(response.statusCode).toBe(200);
+      return recordingRetentionSchema.parse(response.json());
+    }
+    async function expireRetention(c: Context) {
+      await db.pool.query(
+        "UPDATE recordings SET retention_expires_at=now()-interval '1 second' WHERE id=$1",
+        [c.input.id],
+      );
+    }
     async function register(
       c: Context,
       upload = c.chunk(),
@@ -359,6 +378,187 @@ describe.skipIf(!databaseUrl || !endpoint)(
         gaps: [],
       };
     }
+    it('starts bounded retention on the server clock and scopes body-free status to an active owner', async () => {
+      const c = await context(),
+        other = await context();
+      const input = {
+        ...c.input,
+        id: randomUUID(),
+        created_at: '2099-01-01T00:00:00.000Z',
+      };
+      await db.recordings.create(c.user_id, c.doc.id, input, randomUUID());
+      const current = await db.recordings.retention(c.user_id, input.id);
+      expect(current).toMatchObject({
+        state: 'retained',
+        canonical_at: null,
+        retention_days: 7,
+        deletion: null,
+      });
+      expect(Date.parse(current.expires_at) - Date.now()).toBeGreaterThan(
+        29.99 * 86_400_000,
+      );
+      expect(Date.parse(current.expires_at) - Date.now()).toBeLessThanOrEqual(
+        30 * 86_400_000,
+      );
+      const route = `/v1/recordings/${input.id}/retention`;
+      expect(
+        (await app.inject({ url: route, headers: other.headers })).statusCode,
+      ).toBe(404);
+      expect(JSON.stringify(current)).not.toMatch(
+        /synthetic-microphone|tracks|seal_sha256|subject|notes/,
+      );
+      await db.pool.query(
+        'UPDATE memberships SET active=false WHERE workspace_id=$1 AND user_id=$2',
+        [c.workspace_id, c.user_id],
+      );
+      expect(
+        (await app.inject({ url: route, headers: c.headers })).statusCode,
+      ).toBe(404);
+    });
+    it('upgrades retained v9 audio with bounded grace instead of deleting it from client-supplied historical dates', async () => {
+      const legacySchema = `${schema}_retention`;
+      await admin.pool.query(`CREATE SCHEMA "${legacySchema}"`);
+      const url = new URL(databaseUrl!);
+      url.searchParams.set('options', `-c search_path=${legacySchema}`);
+      const legacy = new Database(url.href);
+      try {
+        await legacy.pool.query(
+          'CREATE TABLE schema_migrations(version integer PRIMARY KEY,checksum text NOT NULL)',
+        );
+        const files = [
+          '001_initial.sql',
+          '002_editing_sync.sql',
+          '003_recordings.sql',
+          '004_transcript_pages.sql',
+          '005_recording_transcription.sql',
+          '006_ai_usage.sql',
+          '007_live_sources.sql',
+          '008_summary_stages.sql',
+          '009_chat.sql',
+        ];
+        for (const [index, file] of files.entries()) {
+          const sql = await readFile(
+            new URL(`../../../packages/db/migrations/${file}`, import.meta.url),
+            'utf8',
+          );
+          await legacy.pool.query(sql);
+          await legacy.pool.query(
+            'INSERT INTO schema_migrations VALUES ($1,$2)',
+            [index + 1, createHash('sha256').update(sql).digest('hex')],
+          );
+        }
+        const actor = await legacy.provision(
+          'urn:windows-ai-notes:development',
+          randomUUID(),
+        );
+        const doc = await legacy.createDocument(
+          actor.user_id,
+          {
+            workspace_id: actor.workspace_id,
+            title: 'Legacy retention fixture',
+            notes: 'Preserve this text.',
+          },
+          randomUUID(),
+        );
+        const recording = randomUUID(),
+          unconfirmed = randomUUID(),
+          track = randomUUID();
+        const tracks = [
+          {
+            spec: {
+              track_id: track,
+              kind: 'microphone',
+              capture_scope: 'endpoint',
+              device_selection_policy: 'explicit',
+              device_id: 'legacy-synthetic',
+            },
+            actual_device_id: 'legacy-synthetic',
+          },
+        ];
+        for (const id of [recording, unconfirmed])
+          await legacy.pool.query(
+            `INSERT INTO recordings(id,document_id,workspace_id,owner_id,source_created_at,tracks,create_key,create_hash,created_at)
+             VALUES ($1,$2,$3,$4,'2000-01-01',$5,$6,'legacy','2000-01-01')`,
+            [
+              id,
+              doc.id,
+              actor.workspace_id,
+              actor.user_id,
+              JSON.stringify(tracks),
+              randomUUID(),
+            ],
+          );
+        const frozen = {
+          native_state: 'sealed',
+          accept_incomplete: false,
+          tracks: [{ track_id: track, end_sample: 0, chunk_ids: [] }],
+          events: [],
+          gaps: [],
+        };
+        const sealHash = 'a'.repeat(64);
+        await legacy.pool.query(
+          'UPDATE recordings SET seal=$2,seal_hash=$3,seal_key=$4 WHERE id=$1',
+          [recording, JSON.stringify(frozen), sealHash, randomUUID()],
+        );
+        await legacy.pool.query(
+          `INSERT INTO transcript_revisions(document_id,revision,source,segment_count,text_bytes,candidate,recording_metadata,timeline_count)
+           VALUES ($1,1,'azure_speech_fast',0,0,false,$2,0)`,
+          [
+            doc.id,
+            JSON.stringify({
+              id: recording,
+              seal_sha256: sealHash,
+              partial: false,
+              tracks: [{ track_id: track, kind: 'microphone' }],
+              timeline_count: 0,
+            }),
+          ],
+        );
+        await legacy.pool.query(
+          'UPDATE documents SET transcript_revision=1 WHERE id=$1',
+          [doc.id],
+        );
+        await legacy.migrate();
+        await legacy.assertReady();
+        const confirmed = await legacy.recordings.retention(
+          actor.user_id,
+          recording,
+        );
+        expect(confirmed).toMatchObject({
+          state: 'retained',
+          retention_days: 7,
+        });
+        expect(confirmed.canonical_at).not.toBeNull();
+        expect(Date.parse(confirmed.expires_at) - Date.now()).toBeGreaterThan(
+          6.99 * 86_400_000,
+        );
+        const pending = await legacy.recordings.retention(
+          actor.user_id,
+          unconfirmed,
+        );
+        expect(pending.canonical_at).toBeNull();
+        expect(Date.parse(pending.expires_at) - Date.now()).toBeGreaterThan(
+          29.99 * 86_400_000,
+        );
+        expect((await legacy.document(actor.user_id, doc.id)).notes).toBe(
+          'Preserve this text.',
+        );
+        expect(
+          (await legacy.recordings.get(actor.user_id, recording)).tracks,
+        ).toEqual(tracks);
+        const before = await legacy.recordings.retention(
+          actor.user_id,
+          recording,
+        );
+        await legacy.migrate();
+        expect(
+          await legacy.recordings.retention(actor.user_id, recording),
+        ).toEqual(before);
+      } finally {
+        await legacy.close();
+        await admin.pool.query(`DROP SCHEMA "${legacySchema}" CASCADE`);
+      }
+    });
     describe('complete-recording transcription with the real private store', () => {
       afterEach(async () => {
         vi.restoreAllMocks();
@@ -470,6 +670,321 @@ describe.skipIf(!databaseUrl || !endpoint)(
         expect(response.statusCode).toBe(202);
         return jobSchema.parse(response.json());
       }
+      it('starts the seven-day clock only on canonical publication and never extends it on reapplication', async () => {
+        const c = await context();
+        await ready(c, 1);
+        const initial = await retention(c);
+        const job = await enqueue(c);
+        expect(await retention(c)).toEqual(initial);
+        await runOnce(db, provider(), undefined, blobs);
+        expect((await db.job(c.user_id, job.id)).state).toBe('succeeded');
+        const finalized = await retention(c);
+        expect(finalized.canonical_at).not.toBeNull();
+        expect(
+          Date.parse(finalized.expires_at) -
+            Date.parse(finalized.canonical_at!),
+        ).toBe(7 * 86_400_000);
+        await db.transcripts.apply(c.user_id, c.doc.id, 1, 1, randomUUID());
+        expect(await retention(c)).toEqual(finalized);
+        await db.recordings.remove(c.user_id, c.input.id);
+        await db.transcripts.apply(c.user_id, c.doc.id, 2, 1, randomUUID());
+        expect(await retention(c)).toMatchObject({
+          state: 'deleted',
+          expires_at: finalized.expires_at,
+          canonical_at: finalized.canonical_at,
+        });
+        expect(
+          (await db.transcript(c.user_id, c.doc.id)).segments[0]!.text,
+        ).toBe('Synthetic recognized speech.');
+      });
+      it('applies shorter workspace policy to existing and new audio without extending previous deadlines', async () => {
+        const c = await context();
+        await ready(c, 1);
+        await enqueue(c);
+        await runOnce(db, provider(), undefined, blobs);
+        const pending = { ...c.input, id: randomUUID() };
+        await db.recordings.create(c.user_id, c.doc.id, pending, randomUUID());
+        const connection = new URL(databaseUrl!);
+        connection.searchParams.set('options', `-c search_path=${schema}`);
+        const command = [
+          'packages/db/dist/cli.js',
+          'audio-retention',
+          '--workspace-id',
+          c.workspace_id,
+        ];
+        const options = {
+          env: { ...process.env, DATABASE_URL: connection.href },
+          timeout: 10_000,
+        };
+        const configured = await execute(
+          process.execPath,
+          [...command, '--retention-days', '2', '--processing-days', '3'],
+          options,
+        );
+        expect(JSON.parse(configured.stdout)).toMatchObject({
+          workspace_id: c.workspace_id,
+          retention_days: 2,
+          processing_days: 3,
+          affected_recordings: 2,
+        });
+        await expect(
+          execute(
+            process.execPath,
+            [...command, '--retention-days', '8', '--processing-days', '30'],
+            options,
+          ),
+        ).rejects.toMatchObject({ code: 1 });
+        await expect(
+          execute(
+            process.execPath,
+            [...command, '--retention-days', 'no', '--processing-days', '30'],
+            options,
+          ),
+        ).rejects.toMatchObject({
+          code: 1,
+          stderr: expect.stringContaining('invalid_retention'),
+        });
+        const shorter = await retention(c);
+        expect(
+          Date.parse(shorter.expires_at) - Date.parse(shorter.canonical_at!),
+        ).toBe(2 * 86_400_000);
+        const unconfirmed = await db.recordings.retention(
+          c.user_id,
+          pending.id,
+        );
+        expect(Date.parse(unconfirmed.expires_at) - Date.now()).toBeGreaterThan(
+          2.99 * 86_400_000,
+        );
+        expect(
+          Date.parse(unconfirmed.expires_at) - Date.now(),
+        ).toBeLessThanOrEqual(3 * 86_400_000);
+        await db.recordings.setRetentionPolicy(c.workspace_id, {
+          retention_days: 7,
+          processing_days: 30,
+        });
+        expect(await retention(c)).toEqual(shorter);
+        expect(await db.recordings.retention(c.user_id, pending.id)).toEqual(
+          unconfirmed,
+        );
+        const future = { ...c.input, id: randomUUID() };
+        await db.recordings.create(c.user_id, c.doc.id, future, randomUUID());
+        const futureState = await db.recordings.retention(c.user_id, future.id);
+        expect(futureState.retention_days).toBe(7);
+        expect(Date.parse(futureState.expires_at) - Date.now()).toBeGreaterThan(
+          29.99 * 86_400_000,
+        );
+        await expect(
+          db.recordings.setRetentionPolicy(randomUUID(), {
+            retention_days: 2,
+            processing_days: 3,
+          }),
+        ).rejects.toMatchObject({ code: 'workspace_not_found' });
+        await expect(
+          db.recordings.setRetentionPolicy(c.workspace_id, {
+            retention_days: 8,
+            processing_days: 30,
+          }),
+        ).rejects.toBeDefined();
+      });
+      it('denies expired raw input before cleanup, fails processing without a provider call, and preserves protected deletion windows and text', async () => {
+        const c = await context();
+        const source = await ready(c, 1);
+        const job = await enqueue(c);
+        await db.editTranscript(c.user_id, c.doc.id, 0, [
+          {
+            id: randomUUID(),
+            start_ms: 0,
+            end_ms: 1,
+            text: 'Keep the written transcript.',
+          },
+        ]);
+        const object = (
+          await db.pool.query<{ id: string }>(
+            'SELECT verified_object id FROM recording_chunks WHERE recording_id=$1',
+            [c.input.id],
+          )
+        ).rows[0]!;
+        await expireRetention(c);
+        expect(await retention(c)).toMatchObject({
+          state: 'expired',
+          deletion: null,
+        });
+        const headers = { ...c.headers, 'idempotency-key': randomUUID() };
+        const chunk = source.uploads[0]!.chunk.chunk_id;
+        const requests = [
+          { method: 'GET' as const, url: `/v1/recordings/${c.input.id}` },
+          {
+            method: 'GET' as const,
+            url: `/v1/recordings/${c.input.id}/chunks`,
+          },
+          { method: 'GET' as const, url: `/v1/audio-chunks/${chunk}` },
+          {
+            method: 'POST' as const,
+            url: `/v1/audio-chunks/${chunk}/upload`,
+            payload: {},
+          },
+          {
+            method: 'POST' as const,
+            url: `/v1/audio-chunks/${chunk}/complete`,
+            payload: { upload_id: randomUUID() },
+          },
+          {
+            method: 'POST' as const,
+            url: `/v1/recordings/${c.input.id}/chunks`,
+            payload: c.chunk(1),
+          },
+          {
+            method: 'POST' as const,
+            url: `/v1/recordings/${c.input.id}/seal`,
+            payload: source.frozen,
+          },
+          {
+            method: 'POST' as const,
+            url: `/v1/recordings/${c.input.id}/finalize-transcript`,
+            payload: {
+              base_revision: 1,
+              locale: 'en-US',
+              seal_sha256: c.recording.seal_sha256 ?? 'a'.repeat(64),
+              accept_incomplete: false,
+            },
+          },
+          {
+            method: 'POST' as const,
+            url: `/v1/documents/${c.doc.id}/recordings`,
+            payload: c.input,
+            headers: { ...c.headers, 'idempotency-key': c.key },
+          },
+        ];
+        for (const request of requests) {
+          const response = await app.inject({ headers, ...request });
+          expect(response.statusCode).toBe(410);
+          expect(response.json()).toMatchObject({
+            code: 'recording_retention_expired',
+          });
+        }
+        expect(
+          (await db.recordings.list(c.user_id, c.doc.id, 0)).recordings,
+        ).toEqual([]);
+        const transcribe = vi.fn<AiProviders['transcribe']>();
+        const read = vi.spyOn(blobs, 'read');
+        await runOnce(db, provider(transcribe), undefined, blobs);
+        expect(transcribe).not.toHaveBeenCalled();
+        expect(read).not.toHaveBeenCalled();
+        expect(await db.job(c.user_id, job.id)).toMatchObject({
+          state: 'failed',
+          error: { code: 'recording_retention_expired', retryable: false },
+        });
+        await expect(
+          db.retryRecordingTranscription(c.user_id, job.id),
+        ).rejects.toMatchObject({ code: 'recording_retention_expired' });
+        await cleanupRecordingObjects(db, blobs, AbortSignal.timeout(10_000));
+        expect(await retention(c)).toMatchObject({
+          state: 'expired',
+          deletion: { state: 'cleanup_pending' },
+        });
+        await s3.send(
+          new HeadObjectCommand({
+            Bucket: bucket,
+            Key: objectKey({ id: object.id, kind: 'verified' }),
+          }),
+        );
+        await expire(c.input.id);
+        await cleanupRecordingObjects(db, blobs, AbortSignal.timeout(10_000));
+        expect(await retention(c)).toMatchObject({
+          state: 'expired',
+          deletion: { state: 'cleanup_confirmed', pending_objects: 0 },
+        });
+        await expect(
+          s3.send(
+            new HeadObjectCommand({
+              Bucket: bucket,
+              Key: objectKey({ id: object.id, kind: 'verified' }),
+            }),
+          ),
+        ).rejects.toBeDefined();
+        expect(
+          (await db.transcript(c.user_id, c.doc.id)).segments[0]!.text,
+        ).toBe('Keep the written transcript.');
+        expect((await db.document(c.user_id, c.doc.id)).title).toBe(
+          c.doc.title,
+        );
+      });
+      it('permits explicit audio-only deletion after expiry without reviving the source', async () => {
+        const c = await context();
+        await expireRetention(c);
+        const response = await app.inject({
+          method: 'DELETE',
+          url: `/v1/recordings/${c.input.id}`,
+          headers: c.headers,
+        });
+        expect(response.statusCode).toBe(202);
+        expect(await retention(c)).toMatchObject({
+          state: 'deleted',
+          deletion: { state: 'cleanup_confirmed' },
+        });
+        await expect(
+          db.recordings.create(c.user_id, c.doc.id, c.input, c.key),
+        ).rejects.toMatchObject({ code: 'recording_not_found' });
+      });
+      it('supports immediate post-canonical removal under a zero-day workspace policy', async () => {
+        const c = await context();
+        await db.recordings.setRetentionPolicy(c.workspace_id, {
+          retention_days: 0,
+          processing_days: 1,
+        });
+        await ready(c, 1);
+        const job = await enqueue(c);
+        await runOnce(db, provider(), undefined, blobs);
+        expect((await db.job(c.user_id, job.id)).state).toBe('succeeded');
+        expect(await retention(c)).toMatchObject({
+          state: 'expired',
+          retention_days: 0,
+        });
+        await cleanupRecordingObjects(db, blobs, AbortSignal.timeout(10_000));
+        expect(await retention(c)).toMatchObject({
+          state: 'expired',
+          deletion: { state: 'cleanup_pending' },
+        });
+        expect(
+          (await db.transcript(c.user_id, c.doc.id)).segments[0]!.text,
+        ).toBe('Synthetic recognized speech.');
+      });
+      it('serializes stricter workspace policy with canonical publication without extending or deadlocking', async () => {
+        for (let attempt = 0; attempt < 3; attempt++) {
+          const c = await context();
+          await ready(c, 1);
+          const job = await enqueue(c);
+          await Promise.all([
+            runOnce(db, provider(), undefined, blobs),
+            db.recordings.setRetentionPolicy(c.workspace_id, {
+              retention_days: 0,
+              processing_days: 1,
+            }),
+          ]);
+          expect((await db.job(c.user_id, job.id)).state).toBe('succeeded');
+          expect(await retention(c)).toMatchObject({
+            state: 'expired',
+            retention_days: 0,
+          });
+          expect((await db.transcript(c.user_id, c.doc.id)).revision).toBe(1);
+        }
+      });
+      it('refuses a live worker lease renewal immediately at the raw-audio deadline', async () => {
+        const c = await context();
+        await ready(c, 1);
+        const job = await enqueue(c);
+        const lease = await db.claim();
+        expect(lease?.id).toBe(job.id);
+        expect(await db.renew(lease!)).toBe(true);
+        await expireRetention(c);
+        expect(await db.renew(lease!)).toBe(false);
+        await cleanupRecordingObjects(db, blobs, AbortSignal.timeout(10_000));
+        expect(await db.job(c.user_id, job.id)).toMatchObject({
+          state: 'failed',
+          error: { code: 'recording_retention_expired', retryable: false },
+        });
+        expect(await db.finishRecording(lease!)).toBe(false);
+      });
       it('processes audio beyond the short-clip window and publishes every long transcript segment with immutable provenance', async () => {
         const c = await context();
         const source = await ready(c, 3, 30_000);
@@ -798,6 +1313,7 @@ describe.skipIf(!databaseUrl || !endpoint)(
       it('keeps a generated candidate when manual edits win, and only applies it through an explicit idempotent revision decision', async () => {
         const c = await context();
         await ready(c, 1);
+        const retained = await retention(c);
         const job = await enqueue(c);
         await db.editTranscript(c.user_id, c.doc.id, 0, [
           {
@@ -808,6 +1324,7 @@ describe.skipIf(!databaseUrl || !endpoint)(
           },
         ]);
         await runOnce(db, provider(), undefined, blobs);
+        expect(await retention(c)).toEqual(retained);
         const done = await db.job(c.user_id, job.id);
         expect(done).toMatchObject({
           state: 'succeeded',
@@ -846,6 +1363,11 @@ describe.skipIf(!databaseUrl || !endpoint)(
             recording: { id: c.input.id },
           });
         }
+        const accepted = await retention(c);
+        expect(accepted.canonical_at).not.toBeNull();
+        expect(
+          Date.parse(accepted.expires_at) - Date.parse(accepted.canonical_at!),
+        ).toBe(7 * 86_400_000);
         expect(
           (await db.transcript(c.user_id, c.doc.id, 1)).segments[0]!.text,
         ).toBe('Manual text must remain.');
@@ -853,7 +1375,14 @@ describe.skipIf(!databaseUrl || !endpoint)(
           (await db.document(c.user_id, c.doc.id)).transcript_revision,
         ).toBe(4);
       });
-      it.each(['cancel', 'audio-delete', 'document-delete', 'revoke'] as const)(
+      it.each([
+        'cancel',
+        'audio-delete',
+        'document-delete',
+        'revoke',
+        'retention',
+        'retention-before-cleanup',
+      ] as const)(
         'fences late provider results after %s and erases staged speech',
         async (action) => {
           const c = await context();
@@ -880,6 +1409,41 @@ describe.skipIf(!databaseUrl || !endpoint)(
               'UPDATE memberships SET active=false WHERE workspace_id=$1 AND user_id=$2',
               [c.workspace_id, c.user_id],
             );
+          if (action === 'retention' || action === 'retention-before-cleanup') {
+            await expireRetention(c);
+            if (action === 'retention') {
+              const tx = await db.pool.connect();
+              try {
+                await tx.query('BEGIN');
+                await tx.query(
+                  'SELECT id FROM documents WHERE id=$1 FOR UPDATE',
+                  [c.doc.id],
+                );
+                await cleanupRecordingObjects(
+                  db,
+                  blobs,
+                  AbortSignal.timeout(10_000),
+                );
+                expect(await retention(c)).toMatchObject({
+                  state: 'expired',
+                  deletion: null,
+                });
+                expect((await db.job(c.user_id, job.id)).state).toBe('running');
+              } finally {
+                await tx.query('ROLLBACK');
+                tx.release();
+              }
+              await cleanupRecordingObjects(
+                db,
+                blobs,
+                AbortSignal.timeout(10_000),
+              );
+              expect(await db.job(c.user_id, job.id)).toMatchObject({
+                state: 'failed',
+                error: { code: 'recording_retention_expired' },
+              });
+            }
+          }
           finish({
             segments: [
               {
@@ -892,6 +1456,18 @@ describe.skipIf(!databaseUrl || !endpoint)(
             usage: { input_tokens: 0, output_tokens: 0, audio_ms: 1000 },
           });
           await running;
+          if (action === 'retention' || action === 'retention-before-cleanup') {
+            expect(await db.job(c.user_id, job.id)).toMatchObject({
+              state: 'failed',
+              error: { code: 'recording_retention_expired' },
+            });
+            expect((await retention(c)).canonical_at).toBeNull();
+            await cleanupRecordingObjects(
+              db,
+              blobs,
+              AbortSignal.timeout(10_000),
+            );
+          }
           expect(
             (
               await db.pool.query(

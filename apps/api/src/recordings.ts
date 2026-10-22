@@ -124,6 +124,10 @@ export function registerRecordingRoutes(
     const { id } = parse(idParams, request.params);
     return db.recordings.get(principal(request).userId, id);
   });
+  app.get('/v1/recordings/:id/retention', async (request) => {
+    const { id } = parse(idParams, request.params);
+    return db.recordings.retention(principal(request).userId, id);
+  });
   app.get('/v1/recordings/:id/chunks', async (request) => {
     const { id } = parse(idParams, request.params);
     const { offset } = parse(pageQuery, request.query);

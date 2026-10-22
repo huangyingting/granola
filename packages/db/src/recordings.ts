@@ -8,6 +8,9 @@ import {
   remoteChunkSchema,
   remoteRecordingSchema,
   MAX_RECORDING_CHUNKS,
+  audioRetentionPolicySchema,
+  recordingDeletionSchema,
+  recordingRetentionSchema,
   type CreateRecording,
   type RecordingSeal,
   type RemoteRecording,
@@ -15,6 +18,7 @@ import {
 } from '@windows-ai-notes/contracts/uploads';
 import type { UploadChunk } from '@windows-ai-notes/contracts';
 import type { Database, Transaction } from './index.js';
+import type { z } from 'zod';
 
 export const UPLOAD_LIFETIME_MS = 300_000;
 export interface RecordingObject {
@@ -33,6 +37,11 @@ interface Row {
   seal_hash: string | null;
   seal_key: string | null;
   deleted_at: Date | null;
+  retention_expires_at: Date;
+  retention_days: number;
+  canonical_transcript_at: Date | null;
+  deletion_reason: 'user' | 'document' | 'revoked' | 'retention' | null;
+  retention_expired: boolean;
 }
 interface ChunkRow {
   id: string;
@@ -72,6 +81,19 @@ const conflict = () =>
     'This key or immutable identifier is bound to different input.',
     409,
   );
+const expired = () =>
+  new ServiceError(
+    'recording_retention_expired',
+    'The raw audio retention deadline has passed. Notes and saved transcripts remain available; this audio cannot be processed again.',
+    410,
+  );
+const deletionState = (row: { pending: number; errors: number }) =>
+  recordingDeletionSchema.parse({
+    state: row.pending || row.errors ? 'cleanup_pending' : 'cleanup_confirmed',
+    pending_objects: row.pending,
+    cleanup_errors: row.errors,
+    repeated_cleanup: true,
+  });
 
 export class RecordingStore {
   constructor(private readonly database: Database) {}
@@ -91,11 +113,12 @@ export class RecordingStore {
     await this.database.document(user, source.document_id, tx);
     const row = (
       await tx.query<Row>(
-        'SELECT * FROM recordings WHERE id=$1 AND owner_id=$2 AND deleted_at IS NULL FOR UPDATE',
+        'SELECT *,retention_expires_at<=now() retention_expired FROM recordings WHERE id=$1 AND owner_id=$2 AND deleted_at IS NULL FOR UPDATE',
         [id, user],
       )
     ).rows[0];
     if (!row) throw unavailable();
+    if (row.retention_expired) throw expired();
     return row;
   }
   private async chunkAccess(user: string, id: string, tx: Transaction) {
@@ -153,13 +176,14 @@ export class RecordingStore {
       const digest = hash(input);
       const existing = (
         await tx.query<Row>(
-          'SELECT * FROM recordings WHERE document_id=$1 AND create_key=$2',
+          'SELECT *,retention_expires_at<=now() retention_expired FROM recordings WHERE document_id=$1 AND create_key=$2',
           [document, key],
         )
       ).rows[0];
       if (existing) {
         if (existing.create_hash !== digest) throw conflict();
         if (existing.deleted_at) throw unavailable();
+        if (existing.retention_expired) throw expired();
         return this.snapshot(existing, tx);
       }
       await tx.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', [
@@ -177,10 +201,19 @@ export class RecordingStore {
           'At most 100 retained remote recordings are allowed per user.',
           429,
         );
+      const policy = (
+        await tx.query<{
+          audio_retention_days: number;
+          audio_processing_days: number;
+        }>(
+          'SELECT audio_retention_days,audio_processing_days FROM workspaces WHERE id=$1 FOR SHARE',
+          [doc.workspace_id],
+        )
+      ).rows[0]!;
       const inserted = (
         await tx.query<Row>(
-          `INSERT INTO recordings(id,document_id,workspace_id,owner_id,source_created_at,tracks,create_key,create_hash)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT DO NOTHING RETURNING *`,
+          `INSERT INTO recordings(id,document_id,workspace_id,owner_id,source_created_at,tracks,create_key,create_hash,retention_days,retention_expires_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,now()+$10*interval '24 hours') ON CONFLICT DO NOTHING RETURNING *`,
           [
             input.id,
             document,
@@ -190,6 +223,8 @@ export class RecordingStore {
             JSON.stringify(input.tracks),
             key,
             digest,
+            policy.audio_retention_days,
+            policy.audio_processing_days,
           ],
         )
       ).rows[0];
@@ -207,7 +242,7 @@ export class RecordingStore {
       await this.database.document(user, document, tx);
       const rows = (
         await tx.query<Row>(
-          'SELECT * FROM recordings WHERE document_id=$1 AND deleted_at IS NULL ORDER BY created_at,id LIMIT 51 OFFSET $2',
+          'SELECT * FROM recordings WHERE document_id=$1 AND deleted_at IS NULL AND retention_expires_at>now() ORDER BY created_at,id LIMIT 51 OFFSET $2',
           [document, offset],
         )
       ).rows;
@@ -658,11 +693,96 @@ export class RecordingStore {
       [lease.chunkId, lease.token],
     );
   }
-  private async erase(tx: Transaction, id: string) {
-    await this.database.recordingTranscriptions.eraseRecording(tx, id);
+  async confirmTranscript(
+    tx: Transaction,
+    user: string,
+    document: string,
+    recording: { id: string; seal_sha256: string },
+  ) {
+    // Text can outlive its audio. Never recreate deleted input or extend its first deadline.
     await tx.query(
-      "UPDATE recordings SET deleted_at=coalesce(deleted_at,now()),tracks='[]'::jsonb,seal=NULL,seal_hash=NULL,seal_key=NULL WHERE id=$1",
-      [id],
+      `UPDATE recordings SET canonical_transcript_at=coalesce(canonical_transcript_at,now()),
+       retention_expires_at=least(retention_expires_at,coalesce(canonical_transcript_at,now())+retention_days*interval '24 hours')
+       WHERE id=$1 AND document_id=$2 AND owner_id=$3 AND seal_hash=$4 AND deleted_at IS NULL`,
+      [recording.id, document, user, recording.seal_sha256],
+    );
+  }
+  async setRetentionPolicy(
+    workspace: string,
+    value: z.infer<typeof audioRetentionPolicySchema>,
+  ) {
+    const policy = audioRetentionPolicySchema.parse(value);
+    return this.database.transaction(async (tx) => {
+      const changed = await tx.query(
+        'UPDATE workspaces SET audio_retention_days=$2,audio_processing_days=$3 WHERE id=$1',
+        [workspace, policy.retention_days, policy.processing_days],
+      );
+      if (!changed.rowCount)
+        throw new ServiceError(
+          'workspace_not_found',
+          'The workspace does not exist.',
+          404,
+        );
+      const shortened = await tx.query(
+        `UPDATE recordings SET retention_days=least(retention_days,$2),
+         retention_expires_at=least(retention_expires_at,
+           retention_started_at+$3*interval '24 hours',
+           canonical_transcript_at+$2*interval '24 hours')
+         WHERE workspace_id=$1 AND deleted_at IS NULL`,
+        [workspace, policy.retention_days, policy.processing_days],
+      );
+      return {
+        workspace_id: workspace,
+        ...policy,
+        affected_recordings: shortened.rowCount,
+      };
+    });
+  }
+  async retention(user: string, id: string) {
+    const row = (
+      await this.database.pool.query<Row & { pending: number; errors: number }>(
+        `SELECT r.id,r.document_id,r.retention_days,r.retention_expires_at,r.canonical_transcript_at,
+         r.deleted_at,r.deletion_reason,r.retention_expires_at<=now() retention_expired,
+         count(o.id) FILTER (WHERE o.deleted_at IS NULL)::int pending,
+         count(o.id) FILTER (WHERE o.last_error IS NOT NULL)::int errors
+         FROM recordings r JOIN documents d ON d.id=r.document_id
+         JOIN memberships m ON m.workspace_id=d.workspace_id AND m.user_id=r.owner_id AND m.active
+         JOIN users u ON u.id=r.owner_id AND u.active
+         LEFT JOIN recording_objects o ON o.recording_id=r.id
+         WHERE r.id=$1 AND r.owner_id=$2 GROUP BY r.id`,
+        [id, user],
+      )
+    ).rows[0];
+    if (!row) throw unavailable();
+    return recordingRetentionSchema.parse({
+      id: row.id,
+      document_id: row.document_id,
+      state:
+        row.deletion_reason === 'retention' ||
+        (!row.deleted_at && row.retention_expired)
+          ? 'expired'
+          : row.deleted_at
+            ? 'deleted'
+            : 'retained',
+      canonical_at: row.canonical_transcript_at?.toISOString() ?? null,
+      expires_at: row.retention_expires_at.toISOString(),
+      retention_days: row.retention_days,
+      deletion: row.deleted_at ? deletionState(row) : null,
+    });
+  }
+  private async erase(
+    tx: Transaction,
+    id: string,
+    reason: NonNullable<Row['deletion_reason']> = 'user',
+  ) {
+    await this.database.recordingTranscriptions.eraseRecording(
+      tx,
+      id,
+      reason === 'retention',
+    );
+    await tx.query(
+      "UPDATE recordings SET deleted_at=coalesce(deleted_at,now()),deletion_reason=coalesce(deletion_reason,$2),tracks='[]'::jsonb,seal=NULL,seal_hash=NULL,seal_key=NULL WHERE id=$1",
+      [id, reason],
     );
     await tx.query('DELETE FROM recording_chunks WHERE recording_id=$1', [id]);
     await tx.query(
@@ -681,7 +801,7 @@ export class RecordingStore {
       if (!row) throw unavailable();
       await this.database.document(user, row.document_id, tx);
       if (row.deleted_at) return;
-      await this.access(user, id, tx);
+      await tx.query('SELECT id FROM recordings WHERE id=$1 FOR UPDATE', [id]);
       await this.erase(tx, id);
     });
   }
@@ -698,8 +818,8 @@ export class RecordingStore {
       if (!row) {
         const inserted = await tx.query(
           `INSERT INTO recordings
-          (id,document_id,workspace_id,owner_id,source_created_at,tracks,create_key,create_hash,deleted_at)
-          VALUES ($1,$2,$3,$4,now(),'[]'::jsonb,$5,$6,now()) ON CONFLICT DO NOTHING`,
+          (id,document_id,workspace_id,owner_id,source_created_at,tracks,create_key,create_hash,deleted_at,deletion_reason)
+          VALUES ($1,$2,$3,$4,now(),'[]'::jsonb,$5,$6,now(),'user') ON CONFLICT DO NOTHING`,
           [
             id,
             document,
@@ -720,7 +840,7 @@ export class RecordingStore {
         [document],
       )
     ).rows;
-    for (const row of rows) await this.erase(tx, row.id);
+    for (const row of rows) await this.erase(tx, row.id, 'document');
   }
   async deletion(user: string, id: string) {
     const row = (
@@ -736,25 +856,21 @@ export class RecordingStore {
       )
     ).rows[0];
     if (!row) throw unavailable();
-    return {
-      state:
-        row.pending || row.errors ? 'cleanup_pending' : 'cleanup_confirmed',
-      pending_objects: row.pending,
-      cleanup_errors: row.errors,
-      repeated_cleanup: true,
-    };
+    return deletionState(row);
   }
   async claimCleanup(): Promise<(RecordingObject & { token: number })[]> {
     return this.database.transaction(async (tx) => {
+      // Lock the document before touching source jobs, matching publication and deletion.
       const revoked = (
-        await tx.query<{ id: string }>(
-          `SELECT r.id FROM recordings r JOIN documents d ON d.id=r.document_id
+        await tx.query<{ id: string; expired: boolean }>(
+          `SELECT r.id,r.retention_expires_at<=now() expired FROM recordings r JOIN documents d ON d.id=r.document_id
          JOIN memberships m ON m.workspace_id=r.workspace_id AND m.user_id=r.owner_id JOIN users u ON u.id=r.owner_id
-         WHERE r.deleted_at IS NULL AND (d.deleted_at IS NOT NULL OR NOT m.active OR NOT u.active)
-         ORDER BY r.id LIMIT 20 FOR UPDATE OF r SKIP LOCKED`,
+         WHERE r.deleted_at IS NULL AND (r.retention_expires_at<=now() OR d.deleted_at IS NOT NULL OR NOT m.active OR NOT u.active)
+         ORDER BY r.id LIMIT 20 FOR UPDATE OF d SKIP LOCKED`,
         )
       ).rows;
-      for (const row of revoked) await this.erase(tx, row.id);
+      for (const row of revoked)
+        await this.erase(tx, row.id, row.expired ? 'retention' : 'revoked');
       return (
         await tx.query<RecordingObject & { token: number }>(
           `WITH eligible AS (

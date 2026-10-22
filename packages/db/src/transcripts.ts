@@ -331,7 +331,16 @@ export class TranscriptStore {
         'UPDATE documents SET transcript_revision=$2,updated_at=now() WHERE id=$1',
         [id, version],
       );
-    if (!options.candidate) await recordChange(tx, id, 'transcript');
+    if (!options.candidate) {
+      if (options.recording)
+        await this.database.recordings.confirmTranscript(
+          tx,
+          user,
+          id,
+          options.recording,
+        );
+      await recordChange(tx, id, 'transcript');
+    }
     return version;
   }
   async apply(
@@ -365,7 +374,7 @@ export class TranscriptStore {
           'A newer transcript exists; review it before replacing it.',
           409,
         );
-      await this.header(user, id, source, tx);
+      const header = await this.header(user, id, source, tx);
       const next = (
         await tx.query<{ revision: number }>(
           'SELECT coalesce(max(revision),0)+1 revision FROM transcript_revisions WHERE document_id=$1',
@@ -396,6 +405,13 @@ export class TranscriptStore {
         'UPDATE documents SET transcript_revision=$2,updated_at=now() WHERE id=$1',
         [id, next],
       );
+      if (header.recording)
+        await this.database.recordings.confirmTranscript(
+          tx,
+          user,
+          id,
+          header.recording,
+        );
       await recordChange(tx, id, 'transcript');
       return next;
     });

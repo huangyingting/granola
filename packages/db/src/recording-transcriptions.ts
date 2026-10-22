@@ -319,19 +319,32 @@ export class RecordingTranscriptions {
       },
     };
   }
-  async eraseRecording(tx: Transaction, recording: string) {
+  async eraseRecording(tx: Transaction, recording: string, expired = false) {
+    const failure = {
+      code: 'recording_retention_expired',
+      message:
+        'Raw audio reached its retention deadline. Saved transcripts remain available; this audio cannot be processed again.',
+      retryable: false,
+    };
     const rows = (
       await tx.query<{ id: string }>(
-        `UPDATE jobs SET state='cancelled',lease_token=lease_token+1,lease_until=NULL,error=NULL,updated_at=now()
+        `UPDATE jobs SET state=$2,lease_token=lease_token+1,lease_until=NULL,error=$3,updated_at=now()
        WHERE kind='recording_transcription' AND input->>'recording_id'=lower($1)
        AND state IN ('queued','running','retry_wait') RETURNING id`,
-        [recording],
+        [
+          recording,
+          expired ? 'failed' : 'cancelled',
+          expired ? JSON.stringify(failure) : null,
+        ],
       )
     ).rows;
     for (const row of rows)
-      await this.database.event(tx, row.id, 'job.cancelled', {
-        code: 'recording_deleted',
-      });
+      await this.database.event(
+        tx,
+        row.id,
+        expired ? 'job.failed' : 'job.cancelled',
+        expired ? failure : { code: 'recording_deleted' },
+      );
     await tx.query(
       `DELETE FROM recording_transcription_runs WHERE job_id IN
        (SELECT id FROM jobs WHERE kind='recording_transcription' AND input->>'recording_id'=lower($1))`,

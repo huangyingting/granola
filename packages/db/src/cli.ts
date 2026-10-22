@@ -6,6 +6,7 @@ import {
   ServiceError,
 } from '@windows-ai-notes/contracts/server';
 import { Database, requireDatabaseUrl } from './index.js';
+import { audioRetentionPolicySchema } from '@windows-ai-notes/contracts/uploads';
 
 async function main() {
   const { values, positionals } = parseArgs({
@@ -20,12 +21,16 @@ async function main() {
       'audio-ms': { type: 'string' },
       'input-tokens': { type: 'string' },
       'output-tokens': { type: 'string' },
+      'retention-days': { type: 'string' },
+      'processing-days': { type: 'string' },
     },
   });
   const database = new Database(requireDatabaseUrl());
   try {
     if (positionals.length !== 1)
-      throw new Error('Choose migrate, provision or usage-limits.');
+      throw new Error(
+        'Choose migrate, provision, usage-limits or audio-retention.',
+      );
     if (positionals[0] === 'migrate') {
       await database.migrate();
       console.log('Database migrations applied.');
@@ -70,7 +75,28 @@ async function main() {
         output_tokens: Number(values['output-tokens']),
       });
       console.log(JSON.stringify(await database.usage.setLimits(user, limits)));
-    } else throw new Error('Choose migrate, provision or usage-limits.');
+    } else if (positionals[0] === 'audio-retention') {
+      const workspace = resourceId.parse(values['workspace-id']);
+      const fields = ['retention-days', 'processing-days'] as const;
+      if (fields.some((field) => !/^[0-9]{1,2}$/.test(values[field] ?? '')))
+        throw new ServiceError(
+          'invalid_retention',
+          'Supply --workspace-id, --retention-days (0-7) and --processing-days (1-30).',
+          400,
+        );
+      const policy = audioRetentionPolicySchema.parse({
+        retention_days: Number(values['retention-days']),
+        processing_days: Number(values['processing-days']),
+      });
+      console.log(
+        JSON.stringify(
+          await database.recordings.setRetentionPolicy(workspace, policy),
+        ),
+      );
+    } else
+      throw new Error(
+        'Choose migrate, provision, usage-limits or audio-retention.',
+      );
   } finally {
     await database.close();
   }

@@ -98,6 +98,25 @@ export const recordingDeletionSchema = z
       (value.state === 'cleanup_confirmed') ===
       (value.pending_objects === 0 && value.cleanup_errors === 0),
   );
+export const audioRetentionPolicySchema = z.strictObject({
+  retention_days: z.number().int().min(0).max(7),
+  processing_days: z.number().int().min(1).max(30),
+});
+export const recordingRetentionSchema = z
+  .strictObject({
+    id: resourceId,
+    document_id: resourceId,
+    state: z.enum(['retained', 'expired', 'deleted']),
+    canonical_at: z.iso.datetime().nullable(),
+    expires_at: z.iso.datetime(),
+    retention_days: z.number().int().min(0).max(7),
+    deletion: recordingDeletionSchema.nullable(),
+  })
+  .refine(
+    (value) =>
+      (value.state !== 'deleted' || value.deletion !== null) &&
+      (value.state !== 'retained' || value.deletion === null),
+  );
 export const remoteChunkSchema = z.strictObject({
   upload: uploadChunkSchema,
   state: z.enum(['pending', 'checking', 'verified']),

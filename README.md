@@ -618,8 +618,45 @@ unfinished source jobs and erases their processing drafts. Deletion returns `202
 observable through its status endpoint; cleanup protects outstanding
 authorizations/in-flight checks, retries failures and resweeps tombstones for
 late PUTs. `cleanup_confirmed` describes the last successful sweep, not an
-instantaneous erasure guarantee. Independent backup deletion-ledger replay,
-retention policies and production storage drills remain release work.
+instantaneous erasure guarantee.
+
+Server raw audio has a hard **30-day processing deadline**, measured from server
+receipt, not the recording's client-supplied date. When its complete-recording
+transcript becomes canonical, retention shortens to at most **seven days**.
+Safe automatic publication counts as canonical; a conflict candidate does not
+start that clock until explicitly applied. Reapplication, retries and later
+transcripts never extend an existing deadline. Notes, all saved transcript
+revisions, summaries and chat are not removed by audio expiry.
+
+`GET /v1/recordings/{id}/retention` reports the authorized owner's body-free
+deadline, canonical-publication time, expiry/deletion state and physical-cleanup
+progress. Expired input is denied immediately, before the next cleanup sweep:
+uploads, verification, sealing, transcription, explicit recovery and worker
+lease renewal cannot reuse it. Unfinished source jobs fail visibly with
+`recording_retention_expired`; their staged speech is removed and late provider
+output cannot publish. Existing short-lived upload authorizations remain
+protected until their outstanding window ends; physical removal still uses
+the repeatable, observable cleanup queue. A Speech request issued before expiry
+may still be billed; expiry does not promise cancellation at the provider.
+
+A deployment administrator can choose a stricter workspace policy without an
+HTTP administrative endpoint:
+
+```sh
+pnpm audio:retention --workspace-id <workspace-uuid> --retention-days 3 --processing-days 7
+```
+
+Post-canonical retention accepts 0–7 days (zero means immediate expiry);
+the processing window accepts 1–30 days. Shorter policy also shortens existing
+recordings. Increasing policy applies only to future recordings and cannot
+restore deleted audio or extend an existing deadline. Migration 010 grants older
+recordings a fresh bounded grace window: seven days if a matching canonical
+recording transcript already exists, otherwise 30 days. It does not purge old
+audio immediately based on historical or client-supplied timestamps.
+
+Local audio TTL/disk-budget enforcement, independent backup deletion-ledger
+replay and production storage drills remain release work. This server policy
+never deletes the sole unuploaded local copy.
 The main-process transfer core reads authenticated native ranges, checks the
 approved object origin/staging path and immutable checksum, excludes API
 credentials, rejects redirects, and reconciles already-verified chunks after a
@@ -707,6 +744,7 @@ letters, digits, dots, colons, underscores or hyphens.
 | POST                 | `/v1/audio-chunks/{id}/upload`                                       | Empty object; issue/replay bounded staging authorization                                                                           |
 | POST                 | `/v1/audio-chunks/{id}/complete`                                     | `{upload_id}`; verify actual bytes and publish immutable private object                                                            |
 | DELETE / GET         | `/v1/recordings/{id}`, `/v1/recordings/{id}/deletion`                | Request audio-only deletion; observe durable cleanup                                                                               |
+| GET                  | `/v1/recordings/{id}/retention`                                      | Inspect the authorized raw-audio deadline, expiry and physical cleanup without recording bodies                                    |
 | DELETE               | `/v1/documents/{document}/recordings/{id}`                           | Tombstone audio even when an uncertain creation has not yet arrived; observe cleanup                                               |
 
 Notes include canonical plain text and optional structured `content`, validated
