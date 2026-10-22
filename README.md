@@ -428,13 +428,23 @@ Preparation cancellation cannot silently release a lease already returned to its
 caller. The client is exercised inside actual installed Main processes using the
 compiled workspace module; this debug probe is not normal product activation.
 
+The Main-only installer-worker client owns this guard through loading and the
+worker's exact-parent ready acknowledgment, then waits for confirmed guardian
+release. It accepts installer metadata, not caller-selected trust pins or parent
+identity, and uses bounded private framing and a fresh single-use challenge.
+Only a durable commit acknowledgment permits detaching for Main exit. Expiry,
+cancellation, transport failure or an unexpectedly live Main aborts the owned
+worker; uncertain termination keeps further attempts blocked. The installed
+probe exercises the guardian and client together against the unsigned app and
+requires a durable trust-rejection outcome and released runtime locks. This is
+negative-path evidence, not a signed installation acceptance.
+
 **Desktop activation remains disconnected.** The activation coordinator must
-retain this guard through worker loading and its own runtime-lease acknowledgment,
-then coordinate editor/recording/background/database shutdown and integrate
-restart health and interrupted-install/schema-compatible recovery. A worker's
-post-load manifest check alone is insufficient. Installation/restart controls
-remain disabled, and real first-party signed update acceptance is still a release
-gate.
+use this client and coordinate editor/recording/background/database shutdown,
+then integrate restart health and interrupted-install/schema-compatible recovery.
+A worker's post-load manifest check alone is insufficient. Installation/restart
+controls remain disabled, and real first-party signed update acceptance is still
+a release gate.
 
 ### Verified signed Windows candidates
 

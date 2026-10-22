@@ -13,6 +13,7 @@ import {
   updateParentCommittedSchema,
   updateParentIdentitySchema,
   updateParentReadySchema,
+  updateWorkerFailureSchema,
   updateWorkerOutcomeSchema,
   updateWorkerRequestSchema,
 } from './updates.js';
@@ -149,6 +150,29 @@ describe('packaged update and feed contracts', () => {
     ])
       expect(
         updateParentIdentitySchema.safeParse({ ...parent, ...change }).success,
+      ).toBe(false);
+  });
+  it('bounds worker failures to a strict diagnostic code without granting update authority', () => {
+    const failure = {
+      version: 1,
+      event: 'update_worker_failed',
+      code: 'update_signature_invalid',
+    };
+    expect(updateWorkerFailureSchema.parse(failure)).toEqual(failure);
+    for (const change of [
+      { version: 2 },
+      { event: 'update_runtime_failed' },
+      { code: '' },
+      { code: 'INVALID' },
+      { code: 'invalid\n' },
+      { code: 'a'.repeat(101) },
+      { code: 1 },
+      { parent_pid: 123 },
+      { certificate_sha256: policy.certificate_sha256 },
+      { installation_enabled: true },
+    ])
+      expect(
+        updateWorkerFailureSchema.safeParse({ ...failure, ...change }).success,
       ).toBe(false);
   });
   it('limits the private handoff channel to a challenge and exact process identity, never install metadata', () => {

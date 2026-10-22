@@ -444,6 +444,7 @@ test('preserves encrypted data and new edits through actual installation, compat
         _electron,
         input: {
           module: string;
+          workerModule: string;
           helper: string;
           version: string;
           product: string;
@@ -463,6 +464,8 @@ test('preserves encrypted data and new edits through actual installation, compat
         );
         const fs = process.getBuiltinModule('node:fs');
         let locked = false;
+        let rejection: string | null = null;
+        let outcome: unknown = null;
         try {
           lease.assertHeld();
           try {
@@ -477,6 +480,59 @@ test('preserves encrypted data and new edits through actual installation, compat
               throw error;
             locked = true;
           }
+          const worker: typeof import('../src/main/update-worker.js') = require(
+            process
+              .getBuiltinModule('node:url')
+              .fileURLToPath(input.workerModule),
+          );
+          const path = process.getBuiltinModule('node:path');
+          const policyPath = path.join(
+            process.resourcesPath,
+            'update-policy.json',
+          );
+          fs.writeFileSync(
+            policyPath,
+            JSON.stringify({
+              version: 1,
+              feed_url: 'https://updates.example/windows/stable.json',
+              certificate_sha256: '00'.repeat(32),
+              publisher: 'Synthetic nonexistent publisher',
+              product_name: input.product,
+            }),
+            { flag: 'wx' },
+          );
+          try {
+            const version = input.version.split('.').map(Number);
+            const session = await worker.prepareUpdateWorker(lease, {
+              application: process.execPath,
+              current_version: input.version,
+              offered_version: `${version[0]}.${version[1]}.${Number(version[2]) + 1}`,
+              installer: lease.runtime.executable,
+              bytes: 1,
+              sha512: Buffer.alloc(64).toString('base64'),
+            });
+            await session.cancel();
+            throw new Error(
+              'The unsigned installation must not prepare an update.',
+            );
+          } catch (error) {
+            if (
+              typeof error !== 'object' ||
+              error === null ||
+              !('code' in error) ||
+              typeof error.code !== 'string'
+            )
+              throw error;
+            rejection = error.code;
+            outcome = JSON.parse(
+              fs.readFileSync(
+                path.join(lease.runtime.directory, 'update-outcome.json'),
+                'utf8',
+              ),
+            );
+          } finally {
+            fs.unlinkSync(policyPath);
+          }
         } finally {
           await lease.release();
         }
@@ -487,10 +543,14 @@ test('preserves encrypted data and new edits through actual installation, compat
           parent: lease.identity,
           pid: process.pid,
           locked,
+          rejection,
+          outcome,
         };
       },
       {
         module: new URL('../dist/main/update-runtime.js', import.meta.url).href,
+        workerModule: new URL('../dist/main/update-worker.js', import.meta.url)
+          .href,
         helper: join(current.resources, 'audio-host', 'AudioHost.exe'),
         version,
         product: z.string().min(1).parse(base.productName),
@@ -499,6 +559,15 @@ test('preserves encrypted data and new edits through actual installation, compat
     try {
       expect(guarded.parent.pid).toBe(guarded.pid);
       expect(guarded.locked).toBe(true);
+      expect(guarded.rejection).toBe('update_signature_invalid');
+      expect(updateWorkerOutcomeSchema.parse(guarded.outcome)).toMatchObject({
+        phase: 'failed',
+        code: 'update_signature_invalid',
+        installer_started: false,
+        installer_process: null,
+        installer_exit_code: null,
+        current_version: version,
+      });
     } finally {
       await rm(guarded.runtime.directory, {
         recursive: true,

@@ -158,6 +158,11 @@ export const updateWorkerRequestSchema = z.strictObject({
   sha512,
   runtime_sha256: handoffChallenge,
 });
+export const updateWorkerFailureSchema = z.strictObject({
+  version: z.literal(1),
+  event: z.literal('update_worker_failed'),
+  code: z.string().regex(/^[a-z][a-z0-9_]{0,99}$/u),
+});
 export const updateWorkerOutcomeSchema = z
   .strictObject({
     version: z.literal(1),
