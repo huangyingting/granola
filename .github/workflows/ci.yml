@@ -112,17 +112,22 @@ jobs:
       - name: Package unsigned developer-preview installer
         if: runner.os == 'Windows'
         run: pnpm desktop:package:unsigned
+      - name: Open the packaged application
+        if: runner.os == 'Windows'
+        env:
+          DESKTOP_EXECUTABLE: ${{ github.workspace }}/artifacts/desktop/win-unpacked/Windows AI Notes Preview.exe
+        run: pnpm --filter @windows-ai-notes/desktop test:ui tests/packaged.spec.ts
+      - name: Actual per-user installation, compatible upgrade, rollback and reinstall
+        if: runner.os == 'Windows'
+        env:
+          DESKTOP_INSTALLATION_PROBE: '1'
+        run: pnpm --filter @windows-ai-notes/desktop test:ui tests/installation.spec.ts
       - uses: actions/upload-artifact@v4
         if: failure() && runner.os == 'Windows'
         with:
           name: desktop-test-diagnostics
           path: apps/desktop/test-results/
           retention-days: 3
-      - name: Open the packaged application
-        if: runner.os == 'Windows'
-        env:
-          DESKTOP_EXECUTABLE: ${{ github.workspace }}/artifacts/desktop/win-unpacked/Windows AI Notes Preview.exe
-        run: pnpm --filter @windows-ai-notes/desktop test:ui tests/packaged.spec.ts
       - uses: actions/upload-artifact@v4
         if: runner.os == 'Windows'
         with:

@@ -274,8 +274,19 @@ Windows CI exercises the actual Electron renderer and DPAPI, local restart
 persistence, invalid-save close protection, renderer isolation, key-loss recovery,
 real loopback OIDC, consent-gated synchronization, stale-editor recovery,
 revocation-driven UI clearing and the packaged executable. It publishes an **unsigned developer-preview**
-NSIS installer under the workflow artifacts; this is not a signed release or
-evidence of clean-machine install/upgrade/rollback compatibility.
+NSIS installer under the workflow artifacts; this is not a signed release.
+
+An explicitly gated, isolated hosted-Windows check also runs the real per-user
+installer into a path containing spaces. It preserves a locally encrypted draft,
+its document ID, DPAPI-protected key envelope and synthetic unsealed-file marker
+through a metadata-only version upgrade, compatible binary rollback,
+uninstall and reinstall. Edits made after upgrading must survive rollback;
+uninstall is exercised without an explicit keep-data override. The fixture
+versions use the **same application/database schema**: this does not establish
+future schema downgrade safety, interrupted-update recovery, CA/SmartScreen
+trust, arbitrary clean-machine compatibility or trusted automatic updates.
+The installation-changing test is disabled outside the explicitly enabled
+GitHub-hosted Windows check.
 
 ### Verified signed Windows candidates
 
