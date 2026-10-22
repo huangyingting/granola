@@ -699,11 +699,11 @@ export class RecordingStore {
     document: string,
     recording: { id: string; seal_sha256: string },
   ) {
-    // Text can outlive its audio. Never recreate deleted input or extend its first deadline.
+    // Retained text can become canonical after audio deletion; only body-free proof changes.
     await tx.query(
       `UPDATE recordings SET canonical_transcript_at=coalesce(canonical_transcript_at,now()),
        retention_expires_at=least(retention_expires_at,coalesce(canonical_transcript_at,now())+retention_days*interval '24 hours')
-       WHERE id=$1 AND document_id=$2 AND owner_id=$3 AND seal_hash=$4 AND deleted_at IS NULL`,
+       WHERE id=$1 AND document_id=$2 AND owner_id=$3 AND (seal_hash=$4 OR deleted_at IS NOT NULL)`,
       [recording.id, document, user, recording.seal_sha256],
     );
   }

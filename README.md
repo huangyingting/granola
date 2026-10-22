@@ -627,6 +627,8 @@ Safe automatic publication counts as canonical; a conflict candidate does not
 start that clock until explicitly applied. Reapplication, retries and later
 transcripts never extend an existing deadline. Notes, all saved transcript
 revisions, summaries and chat are not removed by audio expiry.
+Applying retained candidate text after audio-only deletion or expiry records its
+first canonical proof without restoring raw input or extending its deadline.
 
 `GET /v1/recordings/{id}/retention` reports the authorized owner's body-free
 deadline, canonical-publication time, expiry/deletion state and physical-cleanup

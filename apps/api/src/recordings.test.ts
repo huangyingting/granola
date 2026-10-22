@@ -697,6 +697,62 @@ describe.skipIf(!databaseUrl || !endpoint)(
           (await db.transcript(c.user_id, c.doc.id)).segments[0]!.text,
         ).toBe('Synthetic recognized speech.');
       });
+      it.each(['delete', 'expire'] as const)(
+        'records first canonical proof when retained text is applied after raw audio %s without restoring input',
+        async (action) => {
+          const c = await context();
+          await ready(c, 1);
+          await enqueue(c);
+          await db.editTranscript(c.user_id, c.doc.id, 0, [
+            {
+              id: randomUUID(),
+              start_ms: 0,
+              end_ms: 1,
+              text: 'Original manual text.',
+            },
+          ]);
+          await runOnce(db, provider(), undefined, blobs);
+          expect((await retention(c)).canonical_at).toBeNull();
+          if (action === 'delete')
+            await db.recordings.remove(c.user_id, c.input.id);
+          else {
+            await expireRetention(c);
+            await cleanupRecordingObjects(
+              db,
+              blobs,
+              AbortSignal.timeout(10_000),
+            );
+          }
+          const before = await retention(c);
+          expect(before).toMatchObject({
+            state: action === 'delete' ? 'deleted' : 'expired',
+            canonical_at: null,
+          });
+          await db.transcripts.apply(c.user_id, c.doc.id, 1, 2, randomUUID());
+          const after = await retention(c);
+          expect(after.canonical_at).not.toBeNull();
+          expect(after.state).toBe(before.state);
+          expect(Date.parse(after.expires_at)).toBeLessThanOrEqual(
+            Date.parse(before.expires_at),
+          );
+          await expect(
+            db.recordings.get(c.user_id, c.input.id),
+          ).rejects.toMatchObject({ code: 'recording_not_found' });
+          expect(
+            (await db.transcript(c.user_id, c.doc.id)).segments[0]!.text,
+          ).toBe('Synthetic recognized speech.');
+          expect(
+            (await db.transcript(c.user_id, c.doc.id, 1)).segments[0]!.text,
+          ).toBe('Original manual text.');
+          const stored = (
+            await db.pool.query<{ tracks: unknown; seal: unknown }>(
+              'SELECT tracks,seal FROM recordings WHERE id=$1',
+              [c.input.id],
+            )
+          ).rows[0]!;
+          expect(stored).toEqual({ tracks: [], seal: null });
+        },
+      );
       it('applies shorter workspace policy to existing and new audio without extending previous deadlines', async () => {
         const c = await context();
         await ready(c, 1);
