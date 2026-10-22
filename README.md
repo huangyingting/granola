@@ -1237,9 +1237,12 @@ declared chunks and unambiguous sample ranges. The result remains interrupted
 cannot be reconstructed. Repeating a completed adoption does not rewrite files.
 The command's success means adoption succeeded, not that a whole meeting survived.
 
-The probe stops after one hour of wall time, at 5 GiB of PCM per recording, or
-when a chunk commit finds less than 64 MiB of free disk space. Recording data is not automatically
-deleted. Manually remove a test recording only after reviewing its inspection.
+The probe stops after one hour of wall time. Native admission and write checks
+also enforce the default 5 GiB total-audio-directory budget and safety reserves
+described above, alongside the existing 5 GiB PCM per-recording cap. Other
+recordings or low disk space can therefore stop capture earlier. Probe data is
+not automatically deleted. Manually remove a test recording only after reviewing
+its inspection.
 
 ## Protocol and storage
 
