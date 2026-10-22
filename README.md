@@ -415,12 +415,26 @@ pipes, retained processes and file locks with explicitly synthetic installer
 services; the actual installed unsigned app exercises worker rejection and its
 failed outcome, not first-party signed success.
 
-**Desktop activation remains disconnected.** Main must still secure runtime
-paths before process loading, coordinate editor/recording/background/database
-shutdown, and integrate restart health and interrupted-install/schema-compatible
-recovery. A worker's post-load manifest check does not close a pre-launch path
-substitution window. Installation/restart controls remain disabled, and real
-first-party signed update acceptance is still a release gate.
+The separate `--hold-update-runtime` guardian and Main-only client protect the
+pre-load boundary. The bundled guardian stages into a fixed private local-app-data
+root and duplicates the verified runtime's read-only file/ancestor handles into
+the exact retained Main process before reporting ready. These noninheritable
+handles remain Main-owned even if the guardian crashes; no raw handle values or
+caller-selected destination cross the protocol. Normal EOF release reclaims only
+those recorded duplicates and waits for confirmed native exit. Partial transfer
+failure unwinds earlier duplicates. A crash or forced termination reports
+uncertain cleanup and requires restarting Main before another install attempt.
+Preparation cancellation cannot silently release a lease already returned to its
+caller. The client is exercised inside actual installed Main processes using the
+compiled workspace module; this debug probe is not normal product activation.
+
+**Desktop activation remains disconnected.** The activation coordinator must
+retain this guard through worker loading and its own runtime-lease acknowledgment,
+then coordinate editor/recording/background/database shutdown and integrate
+restart health and interrupted-install/schema-compatible recovery. A worker's
+post-load manifest check alone is insufficient. Installation/restart controls
+remain disabled, and real first-party signed update acceptance is still a release
+gate.
 
 ### Verified signed Windows candidates
 

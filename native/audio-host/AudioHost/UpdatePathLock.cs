@@ -17,6 +17,24 @@ internal static class UpdatePathLock
     internal static SafeFileHandle OpenFile(string path)
         => Open(path, directory: false);
 
+    internal static List<SafeFileHandle> OpenAncestors(string path)
+    {
+        var handles = new List<SafeFileHandle>();
+        try
+        {
+            var paths = new Stack<string>();
+            for (var current = path; current is not null; current = Path.GetDirectoryName(current))
+                paths.Push(current);
+            foreach (var current in paths) handles.Add(OpenDirectory(current));
+            return handles;
+        }
+        catch
+        {
+            for (var index = handles.Count - 1; index >= 0; index--) handles[index].Dispose();
+            throw;
+        }
+    }
+
     private static SafeFileHandle Open(string path, bool directory)
     {
         // Do not follow reparse points or share DELETE access.

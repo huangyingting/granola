@@ -19,6 +19,10 @@ public sealed class UpdateParentLease : IDisposable
     private readonly Process process;
     public UpdateParentIdentity Identity { get; }
     internal string Executable { get; }
+    internal SafeProcessHandle ProcessHandle
+    {
+        get { ObjectDisposedException.ThrowIf(IsDisposed, this); return process.SafeHandle; }
+    }
     public bool IsDisposed { get; private set; }
     public bool HasExited
     {

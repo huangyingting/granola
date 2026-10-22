@@ -45,7 +45,8 @@ public static class UpdateRuntimeStager
         }
     }
 
-    internal static StagedUpdateRuntime Copy(string source, string installation, string parent, string[] required)
+    internal static StagedUpdateRuntime Copy(string source, string installation, string parent, string[] required,
+        Action<StagedUpdateRuntime>? retain = null)
     {
         if (!OperatingSystem.IsWindows() || !UpdateInstallationVerifier.CanonicalPath(source) ||
             !UpdateInstallationVerifier.CanonicalPath(installation) || !UpdateInstallationVerifier.CanonicalPath(parent) ||
@@ -57,7 +58,7 @@ public static class UpdateRuntimeStager
         var succeeded = false;
         try
         {
-            LockAncestors(parent);
+            directories.AddRange(UpdatePathLock.OpenAncestors(parent));
             for (var ancestor = parent; ancestor is not null; ancestor = Path.GetDirectoryName(ancestor))
                 if (UpdatePathLock.SameDirectory(ancestor, installation))
                     throw new UpdateRuntimeException("update_worker_location");
@@ -101,6 +102,7 @@ public static class UpdateRuntimeStager
             }
             var result = new StagedUpdateRuntime(destination, Path.Combine(destination, "AudioHost.exe"),
                 inventory.Files.Count, inventory.Bytes, Convert.ToHexStringLower(manifest.GetHashAndReset()));
+            retain?.Invoke(result);
             succeeded = true;
             return result;
         }
@@ -108,14 +110,6 @@ public static class UpdateRuntimeStager
         {
             for (var index = directories.Count - 1; index >= 0; index--) directories[index].Dispose();
             if (staged is not null && !succeeded) Directory.Delete(staged, recursive: true);
-        }
-
-        void LockAncestors(string path)
-        {
-            var parents = new Stack<string>();
-            for (var ancestor = path; ancestor is not null; ancestor = Path.GetDirectoryName(ancestor))
-                parents.Push(ancestor);
-            foreach (var ancestor in parents) directories.Add(UpdatePathLock.OpenDirectory(ancestor));
         }
 
     }

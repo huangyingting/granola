@@ -439,6 +439,71 @@ test('preserves encrypted data and new edits through actual installation, compat
         maxRetries: 3,
       });
     }
+    const guarded = await lifecycle.application.evaluate(
+      async (
+        _electron,
+        input: {
+          module: string;
+          helper: string;
+          application: string;
+          version: string;
+          product: string;
+        },
+      ) => {
+        const client: typeof import('../src/main/update-runtime.js') =
+          await import(input.module);
+        const lease = await client.holdUpdateRuntime(
+          input.helper,
+          input.application,
+          input.version,
+          input.product,
+        );
+        const fs = process.getBuiltinModule('node:fs');
+        let locked = false;
+        try {
+          lease.assertHeld();
+          try {
+            const file = fs.openSync(lease.runtime.executable, 'r+');
+            fs.closeSync(file);
+          } catch (error) {
+            if (
+              !(error instanceof Error) ||
+              !('code' in error) ||
+              !['EACCES', 'EPERM', 'EBUSY'].includes(String(error.code))
+            )
+              throw error;
+            locked = true;
+          }
+        } finally {
+          await lease.release();
+        }
+        const released = fs.openSync(lease.runtime.executable, 'r+');
+        fs.closeSync(released);
+        return {
+          runtime: lease.runtime,
+          parent: lease.identity,
+          pid: process.pid,
+          locked,
+        };
+      },
+      {
+        module: new URL('../dist/main/update-runtime.js', import.meta.url).href,
+        helper: join(current.resources, 'audio-host', 'AudioHost.exe'),
+        application: executable,
+        version,
+        product: z.string().min(1).parse(base.productName),
+      },
+    );
+    try {
+      expect(guarded.parent.pid).toBe(guarded.pid);
+      expect(guarded.locked).toBe(true);
+    } finally {
+      await rm(guarded.runtime.directory, {
+        recursive: true,
+        force: true,
+        maxRetries: 3,
+      });
+    }
     const location = relative(installation, current.directory);
     expect(isAbsolute(location) || location.startsWith('..')).toBe(true);
     if (identity) expect(current).toMatchObject(identity);

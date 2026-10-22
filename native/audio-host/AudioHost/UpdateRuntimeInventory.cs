@@ -12,6 +12,9 @@ internal sealed class UpdateRuntimeInventory : IDisposable
     internal IReadOnlyList<(string Relative, FileStream Stream)> Files => files;
     internal long Bytes { get; private set; }
 
+    internal UpdateRemoteRuntimeLease RetainForParent(UpdateParentLease parent) =>
+        UpdateRemoteRuntimeLease.Open(parent, directories.Concat(files.Select(file => file.Stream.SafeFileHandle)));
+
     internal static UpdateRuntimeInventory Open(string directory, string[] required)
     {
         if (!OperatingSystem.IsWindows() || !UpdateInstallationVerifier.CanonicalPath(directory) ||
@@ -20,10 +23,7 @@ internal sealed class UpdateRuntimeInventory : IDisposable
         var inventory = new UpdateRuntimeInventory();
         try
         {
-            var ancestors = new Stack<string>();
-            for (var ancestor = directory; ancestor is not null; ancestor = Path.GetDirectoryName(ancestor))
-                ancestors.Push(ancestor);
-            foreach (var ancestor in ancestors) inventory.directories.Add(UpdatePathLock.OpenDirectory(ancestor));
+            inventory.directories.AddRange(UpdatePathLock.OpenAncestors(directory));
             inventory.Read(directory, directory, 0);
             if (inventory.files.Count == 0 || required.Any(name => !inventory.files.Any(file =>
                 string.Equals(file.Relative, name, StringComparison.OrdinalIgnoreCase))))

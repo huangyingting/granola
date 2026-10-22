@@ -9,6 +9,17 @@ if (!OperatingSystem.IsWindows())
     Console.Error.WriteLine("platform_unsupported: AudioHost capture and DPAPI require Windows 11.");
     return 1;
 }
+if (args.Length > 0 && args[0] == "--hold-update-runtime")
+{
+    await using var guardInput = Console.OpenStandardInput();
+    await using var guardOutput = Console.OpenStandardOutput();
+    if (args.Length == 5 && int.TryParse(args[1], System.Globalization.NumberStyles.None,
+        System.Globalization.CultureInfo.InvariantCulture, out var guardParent))
+        return await UpdateRuntimeGuard.RunAsync(guardParent, args[2], args[3], args[4], guardInput, guardOutput);
+    await FrameCodec.WriteJsonAsync(guardOutput,
+        new { Version = 1, Event = "update_runtime_failed", Code = "update_worker_arguments" });
+    return 2;
+}
 if (args.Length > 0 && args[0] == "--apply-update")
 {
     await using var workerInput = Console.OpenStandardInput();

@@ -5,6 +5,7 @@ import {
   audioEventSchema,
   audioRequestSchema,
   encodeFrame,
+  encodeJsonFrame,
   FrameDecoder,
   MAX_CONTROL_BYTES,
   liveAudioBatchSchema,
@@ -24,6 +25,18 @@ const request: AudioRequest = {
 };
 
 describe('AudioHost framing', () => {
+  it('shares bounded JSON framing with Main-only update messages without widening the audio API', () => {
+    const message = { version: 1, operation: 'release', label: '更新' };
+    const decoder = new FrameDecoder();
+    expect(decoder.push(encodeJsonFrame(message))).toEqual([message]);
+    decoder.finish();
+    expect(encodeJsonFrame(request)).toEqual(encodeFrame(request));
+    expect(() => encodeJsonFrame(undefined)).toThrow('JSON');
+    expect(() => encodeJsonFrame('x'.repeat(MAX_CONTROL_BYTES))).toThrow(
+      'limit',
+    );
+  });
+
   it('handles fragmented headers, payloads, and multiple frames', () => {
     const decoder = new FrameDecoder();
     const frame = encodeFrame(request);

@@ -597,7 +597,14 @@ export type AudioEvent = z.infer<typeof audioEventSchema>;
 export type Track = z.infer<typeof trackSchema>;
 
 export function encodeFrame(value: AudioRequest | AudioEvent): Buffer {
-  const body = Buffer.from(JSON.stringify(value), 'utf8');
+  return encodeJsonFrame(value);
+}
+
+export function encodeJsonFrame(value: unknown): Buffer {
+  const json = JSON.stringify(value);
+  if (json === undefined)
+    throw new Error('A control message must be JSON serializable.');
+  const body = Buffer.from(json, 'utf8');
   if (body.length > MAX_CONTROL_BYTES) {
     throw new Error('Control message exceeds the protocol limit.');
   }

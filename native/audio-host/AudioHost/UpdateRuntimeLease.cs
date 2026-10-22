@@ -33,5 +33,7 @@ internal sealed class UpdateRuntimeLease(UpdateRuntimeInventory inventory) : IDi
         Guid.TryParseExact(name.AsSpan(7), "D", out var id) && name == $"worker-{id:D}" &&
         name[21] == '4' && name[26] is '8' or '9' or 'a' or 'b';
 
+    internal UpdateRemoteRuntimeLease RetainForParent(UpdateParentLease parent) => inventory.RetainForParent(parent);
+
     public void Dispose() => inventory.Dispose();
 }

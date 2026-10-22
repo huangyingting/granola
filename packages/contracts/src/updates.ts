@@ -120,6 +120,17 @@ export const updateParentIdentitySchema = z.strictObject({
     .regex(/^[1-9][0-9]{0,18}$/u)
     .refine((value) => value.length < 19 || value <= '9223372036854775807'),
 });
+export const heldUpdateRuntimeSchema = z.strictObject({
+  version: z.literal(1),
+  event: z.literal('update_runtime_held'),
+  identity: updateParentIdentitySchema,
+  runtime: stagedUpdateRuntimeSchema,
+});
+export const updateRuntimeFailureSchema = z.strictObject({
+  version: z.literal(1),
+  event: z.literal('update_runtime_failed'),
+  code: z.string().regex(/^[a-z][a-z0-9_]{0,99}$/u),
+});
 const handoffChallenge = z.string().regex(/^[0-9a-f]{64}$/u);
 export const updateParentReadySchema = z.strictObject({
   version: z.literal(1),

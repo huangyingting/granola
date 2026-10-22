@@ -324,7 +324,7 @@ export async function stageUpdateRuntime(
   return runtime;
 }
 
-function installationArguments(
+export function installationArguments(
   helper: string,
   executable: string,
   version: string,
