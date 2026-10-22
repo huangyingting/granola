@@ -44,6 +44,15 @@ afterEach(() => {
   electron.remove.mockClear();
 });
 describe('isolated desktop update bridge', () => {
+  it('exposes only the explicit note and update bridge methods', () => {
+    expect(Object.keys(bridge).sort()).toEqual([
+      'invoke',
+      'invokeUpdate',
+      'onChanged',
+      'onFlush',
+      'onUpdateState',
+    ]);
+  });
   it('forwards a validated action to its own channel and validates the response', async () => {
     electron.invoke.mockResolvedValue({ ok: true, state });
     expect(await bridge.invokeUpdate({ operation: 'check' })).toEqual({
