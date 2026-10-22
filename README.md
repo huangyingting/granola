@@ -284,7 +284,11 @@ The ordinary unsigned preview build remains unchanged, including its app ID,
 product name, per-user installation and encrypted data directory. Signing a
 candidate does **not** rename the app, reset local data or enable automatic updates.
 
-Run from a clean, trusted checkout using the pinned pnpm, Node and .NET SDK.
+Run from a clean, trusted checkout using the pinned pnpm, Node and .NET SDK,
+with **PowerShell 7** installed under `%ProgramFiles%\PowerShell\7`. This is a
+producer-tool requirement, not a new desktop runtime dependency. Signature
+inspection uses its Windows `Get-AuthenticodeSignature` cmdlet; missing tools,
+verifier timeouts and failed lookups reject the candidate without legacy fallback.
 Set `WIN_CSC_LINK` to an absolute local PFX/P12 file and
 `WIN_CSC_KEY_PASSWORD` to its password. Independently obtain the signing
 certificate's **SHA-256 DER fingerprint** as `WINDOWS_SIGNING_CERT_SHA256`

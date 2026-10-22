@@ -58,6 +58,12 @@ const childVariables = [
   'SystemRoot',
   'SYSTEMROOT',
   'WINDIR',
+  'SystemDrive',
+  'ProgramFiles',
+  'ProgramFiles(x86)',
+  'ProgramW6432',
+  'ProgramData',
+  'ALLUSERSPROFILE',
   'TEMP',
   'TMP',
   'USERPROFILE',
@@ -131,6 +137,37 @@ export function childEnvironment(environment = process.env) {
     DOTNET_NOLOGO: '1',
   };
 }
+export function windowsVerifierPath(environment = process.env) {
+  const root = environment.ProgramFiles;
+  if (
+    !root ||
+    !/^[A-Za-z]:[\\/]/.test(root) ||
+    /[\u0000-\u001f\u007f]/.test(root)
+  )
+    throw new ReleaseError(
+      'release_verifier',
+      'The signed-candidate producer requires PowerShell 7 in the local Program Files directory.',
+    );
+  return win32.join(root, 'PowerShell', '7', 'pwsh.exe');
+}
+async function requireVerifier(environment) {
+  const file = windowsVerifierPath(environment);
+  let stat;
+  try {
+    stat = await lstat(file);
+  } catch {
+    throw new ReleaseError(
+      'release_verifier',
+      'The PowerShell 7 verifier is missing or unreadable.',
+    );
+  }
+  if (!stat.isFile() || stat.isSymbolicLink())
+    throw new ReleaseError(
+      'release_verifier',
+      'The PowerShell 7 verifier must be a regular local executable.',
+    );
+  return file;
+}
 export function assertSignature(value, policy) {
   const parsed = signatureSchema.safeParse(value);
   if (!parsed.success)
@@ -158,7 +195,9 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 $OutputEncoding = [Console]::OutputEncoding
+[Console]::Error.WriteLine('NOTES_SIGNATURE_LOOKUP')
 $signature = Get-AuthenticodeSignature -LiteralPath $env:NOTES_RELEASE_FILE -ErrorAction Stop
+[Console]::Error.WriteLine('NOTES_SIGNATURE_METADATA')
 $hash = $null
 $publisher = $null
 if ($null -ne $signature.SignerCertificate) {
@@ -182,22 +221,11 @@ export async function inspectWindowsSignature(file, environment = process.env) {
       'release_platform',
       'Windows is required to inspect Authenticode signatures.',
     );
-  const root = environment.SystemRoot ?? environment.SYSTEMROOT;
-  if (!root || !win32.isAbsolute(root))
-    throw new ReleaseError(
-      'release_verifier',
-      'The Windows system verifier is unavailable.',
-    );
+  const verifier = await requireVerifier(environment);
   let stdout;
   try {
     ({ stdout } = await promisify(execFile)(
-      win32.join(
-        root,
-        'System32',
-        'WindowsPowerShell',
-        'v1.0',
-        'powershell.exe',
-      ),
+      verifier,
       ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', inspectScript],
       {
         env: { ...childEnvironment(environment), NOTES_RELEASE_FILE: file },
@@ -207,10 +235,19 @@ export async function inspectWindowsSignature(file, environment = process.env) {
         windowsHide: true,
       },
     ));
-  } catch {
+  } catch (error) {
+    const timedOut =
+      error?.killed === true &&
+      error?.code !== 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER';
+    const stderr = typeof error?.stderr === 'string' ? error.stderr : '';
+    const phase = stderr.includes('NOTES_SIGNATURE_METADATA')
+      ? 'metadata projection'
+      : stderr.includes('NOTES_SIGNATURE_LOOKUP')
+        ? 'signature lookup'
+        : 'process initialization';
     throw new ReleaseError(
-      'release_verifier',
-      'Windows signature inspection failed; no artifact was accepted.',
+      timedOut ? 'release_verifier_timeout' : 'release_verifier',
+      `Windows signature inspection ${timedOut ? 'timed out' : 'failed'} during ${phase}; no artifact was accepted.`,
     );
   }
   let value;
@@ -435,6 +472,7 @@ async function main() {
       'The signed-candidate command does not accept options.',
     );
   const policy = signingPolicy();
+  await requireVerifier(process.env);
   const certificate = await lstat(policy.certificate);
   if (
     !certificate.isFile() ||

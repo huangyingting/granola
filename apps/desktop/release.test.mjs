@@ -17,6 +17,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   signingPolicy,
   childEnvironment,
+  windowsVerifierPath,
   assertSignature,
   signedConfiguration,
   verifiedFile,
@@ -133,6 +134,8 @@ describe('fail-closed signed candidate policy', () => {
       PATH: 'synthetic-path',
       SystemRoot: 'C:\\Windows',
       TEMP: 'C:\\Temp',
+      ProgramFiles: 'C:\\Program Files',
+      ProgramData: 'C:\\ProgramData',
       NODE_OPTIONS: '--import=private-bootstrap.mjs',
       NODE_EXTRA_CA_CERTS: 'private-ca.pem',
       AZURE_OPENAI_API_KEY: 'private-model-key',
@@ -145,9 +148,26 @@ describe('fail-closed signed candidate policy', () => {
       PATH: 'synthetic-path',
       SystemRoot: 'C:\\Windows',
       TEMP: 'C:\\Temp',
+      ProgramFiles: 'C:\\Program Files',
+      ProgramData: 'C:\\ProgramData',
       DOTNET_CLI_TELEMETRY_OPTOUT: '1',
       DOTNET_NOLOGO: '1',
     });
+  });
+  it('requires an explicit local PowerShell 7 producer tool without PATH or legacy fallback', () => {
+    expect(windowsVerifierPath({ ProgramFiles: 'C:\\Program Files' })).toBe(
+      'C:\\Program Files\\PowerShell\\7\\pwsh.exe',
+    );
+    for (const ProgramFiles of [
+      undefined,
+      '',
+      'relative',
+      '\\\\remote\\tools',
+      'C:\\Program Files\n',
+    ])
+      expect(() => windowsVerifierPath({ ProgramFiles })).toThrow(
+        'requires PowerShell 7',
+      );
   });
   it.each([
     { status: 'NotSigned' },

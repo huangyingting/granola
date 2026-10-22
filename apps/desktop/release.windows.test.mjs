@@ -8,14 +8,11 @@ import {
   childEnvironment,
   inspectWindowsSignature,
   verifiedFile,
+  windowsVerifierPath,
 } from './release.mjs';
 
 function signedReference() {
-  if (!process.env.ProgramFiles)
-    throw new Error(
-      'The Windows PowerShell 7 signed test reference is unavailable.',
-    );
-  return join(process.env.ProgramFiles, 'PowerShell', '7', 'pwsh.exe');
+  return windowsVerifierPath();
 }
 
 describe.skipIf(process.platform !== 'win32')(
@@ -89,21 +86,15 @@ describe.skipIf(process.platform !== 'win32')(
     it('rejects an unsigned first-party PE using the real OS verifier without installing a test CA', async () => {
       const directory = await mkdtemp(join(tmpdir(), 'notes-unsigned-pe-'));
       try {
-        const file = join(directory, 'unsigned.exe');
+        const file = join(directory, 'unsigned.dll');
         await promisify(execFile)(
-          join(
-            process.env.SystemRoot ?? process.env.SYSTEMROOT,
-            'System32',
-            'WindowsPowerShell',
-            'v1.0',
-            'powershell.exe',
-          ),
+          windowsVerifierPath(),
           [
             '-NoLogo',
             '-NoProfile',
             '-NonInteractive',
             '-Command',
-            "$ErrorActionPreference='Stop'; Add-Type -TypeDefinition 'public static class SyntheticReleaseProbe { public static void Main() {} }' -OutputAssembly $env:NOTES_RELEASE_FIXTURE -OutputType ConsoleApplication -ErrorAction Stop",
+            "$ErrorActionPreference='Stop'; Add-Type -TypeDefinition 'public static class SyntheticReleaseProbe { public static void Marker() {} }' -OutputAssembly $env:NOTES_RELEASE_FIXTURE -OutputType Library -ErrorAction Stop",
           ],
           {
             env: { ...childEnvironment(), NOTES_RELEASE_FIXTURE: file },
@@ -115,7 +106,7 @@ describe.skipIf(process.platform !== 'win32')(
         const before = await readFile(file);
         expect(before.subarray(0, 2).toString('ascii')).toBe('MZ');
         const observed = await inspectWindowsSignature(file);
-        expect(observed.status).not.toBe('Valid');
+        expect(observed.status).toBe('NotSigned');
         await expect(
           verifiedFile(file, {
             certificate_sha256: '0'.repeat(64),
