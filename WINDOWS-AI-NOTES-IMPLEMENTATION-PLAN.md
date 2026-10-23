@@ -640,6 +640,8 @@ P1 内可并行开发桌面编辑器和服务端业务底座，前提是 contrac
 
 Linux 集成测试另执行实际编译的 API/Worker 子进程，以真实 PostgreSQL schema 锁阻塞启动，再发送 SIGTERM，等待无正文 stopping 观察并解除锁，必须自然退出且不能之后发布 ready；停止中的 Worker 不继续验证 storage 或报告就绪。真实 SSE 在 SIGTERM/SIGINT 后排空；另在真实已提交 response 丢失后 SIGKILL 自有 API，重启新进程并重开加密 SQLite，冻结请求及更新输入必须不重复、不丢失。观察日志不等于物理退出证明，测试还等待 child close/退出状态；不调用 Azure，不冒充 PostgreSQL/power-loss 故障、运行中 Worker/provider 崩溃恢复或生产部署/restore 验收。
 
+运行中 Worker 另增加真实进程恢复用例：实际编译的 Azure Worker 通过仅允许固定合成域名的 loopback CONNECT proxy 访问私有 HTTPS wire fixture，临时 TLS 证书只加入自有子进程信任，不关闭 TLS 或放宽 Azure origin 检查，不调用真实 Azure。确认持久 sending stage、未结算 usage 和默认 120 秒租约后，分别 SIGKILL 或 SIGSTOP；替代 Worker 必须等待真实租约到期，报告 summary_dispatch_unconfirmed，保留不确定预留且不能自动重发。经实际认证 API 显式确认新鲜 resume token 后，只允许一个替代请求；并发及完成后确认重放不能再次派发。合成 Azure SSE 只产生一个持久输出，冻结证据及手写笔记保持不变，只结算新请求；恢复旧 Worker 后，其真实终结观察必须为 fenced，不能改写新结果。供应商 deadline 为 90 秒，故此旧尝试不冒充“迟到成功模型输出”的 fencing 证明；测试证书更不是代码签名身份。清理等待所有自有进程物理关闭，再删除 schema 和私有 TLS 目录。此覆盖不替代真实供应商语义/计费、PostgreSQL/power-loss、生产 TLS/OIDC、容量或告警/restore 验收。
+
 ## 15. 风险、降级与启动条件
 
 | 风险 | 策略与可接受降级 |

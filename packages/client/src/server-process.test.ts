@@ -1,10 +1,7 @@
-import { spawn } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
-import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import {
   afterAll,
   afterEach,
@@ -23,124 +20,10 @@ import {
 import { ApiClient } from './http.js';
 import { SyncEngine } from './sync.js';
 import { acceptanceDatabaseUrl, responseLossProxy } from './load.fixture.js';
-
-type Exit = {
-  code: number | null;
-  signal: NodeJS.Signals | null;
-  error: Error | undefined;
-};
-
-async function unusedPort() {
-  const socket = createServer();
-  await new Promise<void>((resolve, reject) => {
-    socket.once('error', reject);
-    socket.listen(0, '127.0.0.1', resolve);
-  });
-  const address = socket.address();
-  await new Promise<void>((resolve, reject) =>
-    socket.close((error) => (error ? reject(error) : resolve())),
-  );
-  if (!address || typeof address === 'string')
-    throw new Error('The isolated service did not acquire a port.');
-  return address.port;
-}
-
-function launch(database: string, port: number, entry: 'api' | 'worker') {
-  const child = spawn(
-    process.execPath,
-    [
-      fileURLToPath(
-        new URL(`../../../apps/${entry}/dist/main.js`, import.meta.url),
-      ),
-    ],
-    {
-      env: {
-        NODE_ENV: 'development',
-        DATABASE_URL: database,
-        AUTH_MODE: 'development',
-        HOST: '127.0.0.1',
-        PORT: String(port),
-        ...(entry === 'worker'
-          ? {
-              AZURE_OPENAI_ENDPOINT: 'https://synthetic.openai.azure.com/',
-              AZURE_OPENAI_API_KEY: 'synthetic-azure-key-not-a-secret',
-              AZURE_OPENAI_API_VERSION: '2024-10-21',
-              AZURE_OPENAI_DEPLOYMENT: 'synthetic',
-              AZURE_SPEECH_KEY: 'synthetic-speech-key-not-a-secret',
-              AZURE_SPEECH_REGION: 'eastus',
-            }
-          : {}),
-      },
-      stdio: ['ignore', 'pipe', 'pipe'],
-      timeout: 20_000,
-      killSignal: 'SIGKILL',
-    },
-  );
-  let stdout = '',
-    stderr = '',
-    failure: Error | undefined,
-    result: Exit | undefined;
-  child.once('error', (error) => {
-    failure = error;
-  });
-  function collect(text: string, bytes: Buffer) {
-    if (Buffer.byteLength(text) + bytes.length > 65_536) {
-      failure = new Error(
-        'The isolated service exceeded its diagnostic bound.',
-      );
-      child.kill('SIGKILL');
-      return text;
-    }
-    return text + bytes.toString('utf8');
-  }
-  child.stdout.on('data', (bytes: Buffer) => {
-    stdout = collect(stdout, bytes);
-  });
-  child.stderr.on('data', (bytes: Buffer) => {
-    stderr = collect(stderr, bytes);
-  });
-  const closed = new Promise<Exit>((resolve) =>
-    child.once('close', (code, signal) => {
-      result = { code, signal, error: failure };
-      resolve(result);
-    }),
-  );
-  return {
-    child,
-    closed,
-    port,
-    base: `http://127.0.0.1:${port}`,
-    get result() {
-      return result;
-    },
-    get stdout() {
-      return stdout;
-    },
-    get stderr() {
-      return stderr;
-    },
-    async observed(code: string) {
-      await vi.waitFor(
-        () => {
-          if (stdout.includes(`"code":"${code}"`)) return;
-          throw new Error(
-            result
-              ? `Service exited before ${code}: ${JSON.stringify(result)} ${stderr}`
-              : `Waiting for ${code}.`,
-          );
-        },
-        { timeout: 10_000, interval: 20 },
-      );
-    },
-    async exit() {
-      await vi.waitFor(() => expect(result).toBeDefined(), {
-        timeout: 10_000,
-        interval: 20,
-      });
-      return closed;
-    },
-  };
-}
+import {
+  launchService as launch,
+  unusedServicePort as unusedPort,
+} from './service-process.fixture.js';
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 describe.skipIf(!databaseUrl || process.platform !== 'linux')(

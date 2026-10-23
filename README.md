@@ -1513,6 +1513,37 @@ After `pnpm build`, run with an isolated `TEST_DATABASE_URL`:
 `pnpm test packages/client/src/server-process.test.ts`. Normal server CI includes
 these cases; they are intentionally skipped on non-Linux hosts.
 
+### Real Worker crash, lease expiry and consented recovery
+
+`packages/client/src/worker-process.test.ts` runs the actual compiled API and Azure
+Worker entrypoints against isolated PostgreSQL. After a synthetic model request
+reaches a private HTTPS fixture, it checks the durable `sending` stage and unsettled
+usage reservation, then physically kills or pauses the owned Worker. A replacement
+waits for the unchanged **120-second database lease**, refuses automatic resend
+with `summary_dispatch_unconfirmed`, and retains the uncertain usage hold.
+
+An authenticated API request must explicitly confirm the fresh resume token.
+Concurrent confirmation replays authorize only one replacement request; replay
+after success cannot queue another. The valid synthetic Azure SSE response must
+produce exactly one durable output, preserve the frozen evidence and manual notes,
+settle only its own receipt, and leave the original uncertainty recorded. Resuming
+the stopped Worker must yield an actual `fenced` terminal observation without
+changing the replacement result. Because the provider deadline is 90 seconds,
+this stale attempt is **not** evidence of fencing a late successful model response.
+
+The fixture uses an ephemeral test TLS certificate trusted only by the owned Worker
+children and a loopback CONNECT proxy that cannot relay outside the fixture.
+Azure origin checks and TLS verification remain enabled; no real Azure credentials
+or services are used. This certificate is not a code-signing identity or signed
+update acceptance evidence. These cases do not certify semantic quality, billing,
+PostgreSQL crash/power-loss recovery, production TLS/OIDC deployment or capacity.
+
+After `pnpm build`, run
+`pnpm test packages/client/src/worker-process.test.ts` with an isolated literal-loopback
+`TEST_DATABASE_URL` and OpenSSL available. Normal Linux server CI includes both cases;
+each intentionally waits for the real lease clock. Cleanup awaits physical child
+closure before dropping its schema and deleting the private TLS directory.
+
 ### Controlled sync and overload acceptance
 
 The server CI job separately runs an opt-in real-HTTP/PostgreSQL/encrypted-SQLite
