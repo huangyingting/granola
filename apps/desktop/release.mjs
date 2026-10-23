@@ -381,6 +381,16 @@ export function signedConfiguration(
     ],
     forceCodeSigning: true,
     publish: null,
+    ...(updatePolicyFile
+      ? {
+          afterSign: (context) =>
+            finalizeNativeRuntime(context, {
+              helper: join(native, 'AudioHost.exe'),
+              version: context.packager.appInfo.version,
+              policy,
+            }),
+        }
+      : {}),
     nsis: {
       ...base.nsis,
       include: fileURLToPath(new URL('./build/installer.nsh', import.meta.url)),
@@ -402,6 +412,94 @@ export function signedConfiguration(
     },
   };
 }
+export async function runtimeProvenanceOperation(
+  helper,
+  operation,
+  directory,
+  version,
+  policy,
+  environment = process.env,
+) {
+  if (
+    process.platform !== 'win32' ||
+    !['--seal-update-runtime', '--verify-update-runtime'].includes(operation)
+  )
+    throw new ReleaseError(
+      'release_runtime_platform',
+      'Runtime provenance requires Windows and a fixed build operation.',
+    );
+  const args = [operation, directory, version];
+  if (operation === '--verify-update-runtime')
+    args.push(policy.certificate_sha256, policy.publisher);
+  let stdout;
+  try {
+    ({ stdout } = await promisify(execFile)(helper, args, {
+      env: childEnvironment(environment),
+      encoding: 'utf8',
+      timeout: 120_000,
+      maxBuffer: 16_384,
+      windowsHide: true,
+    }));
+  } catch {
+    throw new ReleaseError(
+      'release_runtime_provenance',
+      'Native runtime sealing or signed-payload verification failed; no candidate was accepted.',
+    );
+  }
+  let value;
+  try {
+    value = JSON.parse(stdout);
+  } catch {
+    throw new ReleaseError(
+      'release_runtime_protocol',
+      'Native runtime provenance returned invalid metadata.',
+    );
+  }
+  const result = z.strictObject({
+    version: z.literal(1),
+    operation: z.literal(operation),
+    success: z.literal(true),
+    code: z.literal(
+      operation === '--seal-update-runtime'
+        ? 'update_runtime_sealed'
+        : 'update_runtime_verified',
+    ),
+  });
+  if (!result.safeParse(value).success)
+    throw new ReleaseError(
+      'release_runtime_protocol',
+      'Native runtime provenance returned invalid metadata.',
+    );
+}
+export async function finalizeNativeRuntime(
+  context,
+  { helper, version, policy },
+  {
+    operate = runtimeProvenanceOperation,
+    inspect = inspectWindowsSignature,
+  } = {},
+) {
+  if (
+    context.electronPlatformName !== 'win32' ||
+    typeof context.packager?.signIf !== 'function'
+  )
+    throw new ReleaseError(
+      'release_runtime_platform',
+      'Runtime sealing requires the Windows signing phase.',
+    );
+  const directory = join(context.appOutDir, 'resources', 'audio-host');
+  for (const file of helperFiles)
+    await verifiedFile(join(directory, file), policy, inspect);
+  await operate(helper, '--seal-update-runtime', directory, version, policy);
+  const executable = join(directory, 'AudioHost.exe');
+  if (!(await context.packager.signIf(executable)))
+    throw new ReleaseError(
+      'release_runtime_signing',
+      'The sealed runtime executable was not re-signed.',
+    );
+  await verifiedFile(executable, policy, inspect);
+  await operate(helper, '--verify-update-runtime', directory, version, policy);
+}
 export async function promoteCandidate(
   {
     output,
@@ -414,6 +512,7 @@ export async function promoteCandidate(
   },
   inspect,
   verifyInstaller = verifyInstallerCandidate,
+  verifyRuntime = verifyNativeRuntimeCandidate,
 ) {
   versionSchema.parse(version);
   if (!sourceCommit.safeParse(commit).success)
@@ -432,6 +531,11 @@ export async function promoteCandidate(
   for (const file of files)
     artifacts[file] = await verifiedFile(join(output, file), policy, inspect);
   if (updates) {
+    await verifyRuntime(
+      join(output, 'win-unpacked/resources/audio-host'),
+      version,
+      policy,
+    );
     const artifact = artifacts[installer];
     await verifyInstaller(
       join(output, 'win-unpacked/resources/audio-host/AudioHost.exe'),
@@ -456,6 +560,7 @@ export async function promoteCandidate(
     verified_at: new Date().toISOString(),
     production_accepted: false,
     installer_role_verified: updates,
+    runtime_provenance_verified: updates,
     installer,
     artifacts,
   };
@@ -490,6 +595,15 @@ async function verifyInstallerCandidate(helper, file, expected) {
   const { verifyInstallerUpdateArtifact } =
     await import('./dist/main/update-trust.js');
   await verifyInstallerUpdateArtifact(helper, file, expected);
+}
+async function verifyNativeRuntimeCandidate(directory, version, policy) {
+  await runtimeProvenanceOperation(
+    join(directory, 'AudioHost.exe'),
+    '--verify-update-runtime',
+    directory,
+    version,
+    policy,
+  );
 }
 async function destinationAvailable(destination) {
   try {

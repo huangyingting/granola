@@ -9,6 +9,36 @@ if (!OperatingSystem.IsWindows())
     Console.Error.WriteLine("platform_unsupported: AudioHost capture and DPAPI require Windows 11.");
     return 1;
 }
+if (args.Length > 0 && args[0] is "--seal-update-runtime" or "--verify-update-runtime")
+{
+    try
+    {
+        if (args[0] == "--seal-update-runtime" && args.Length == 3)
+            UpdateRuntimeProvenance.Seal(args[1], args[2]);
+        else if (args[0] == "--verify-update-runtime" && args.Length == 5)
+        {
+            using var proof = UpdateRuntimeProvenance.Open(args[1], args[2], args[3], args[4]);
+        }
+        else throw new WindowsAiNotes.Updates.UpdateHandoffException("update_worker_arguments");
+        Console.WriteLine(JsonSerializer.Serialize(
+            new { Version = 1, Operation = args[0], Success = true, Code = args[0] == "--seal-update-runtime" ? "update_runtime_sealed" : "update_runtime_verified" },
+            AudioJson.Options));
+        return 0;
+    }
+    catch (Exception error) when (error is IOException or System.ComponentModel.Win32Exception or
+        UnauthorizedAccessException or System.Security.SecurityException or ArgumentException or BadImageFormatException)
+    {
+        var code = error switch
+        {
+            WindowsAiNotes.Updates.UpdateHandoffException handoff => handoff.Code,
+            UpdateRuntimeException runtime => runtime.Code,
+            _ => "update_runtime_unavailable"
+        };
+        Console.WriteLine(JsonSerializer.Serialize(
+            new { Version = 1, Operation = args[0], Success = false, Code = code }, AudioJson.Options));
+        return 2;
+    }
+}
 if (args.Length > 0 && args[0] == "--claim-update-startup")
 {
     await using var startupOutput = Console.OpenStandardOutput();

@@ -72,6 +72,7 @@ public static class UpdateInstallerWorker
                 UpdateLaunchedProcess.Start,
                 TimeSpan.FromMinutes(10));
             VerifyApplication(services, request.CurrentVersion);
+            using var provenance = UpdateRuntimeProvenance.Open(location, request.CurrentVersion, policy.CertificateSha256, policy.Publisher);
             RequireOutsideInstallation(request.Installer, directory);
             var verification = PreparedInstaller.Open(request.Installer, policy.Trust(request.OfferedVersion),
                 request.CurrentVersion, request.Bytes, request.Sha512, out var installer);

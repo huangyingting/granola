@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
+using WindowsAiNotes.Updates;
 
 namespace WindowsAiNotes.AudioHost;
 
@@ -20,10 +21,7 @@ public static class UpdateTrustVerifier
     public static bool HasInstallerIdentity(string? internalName, string? originalFilename, string version) =>
         internalName == InstallerInternalName && originalFilename == $"windows-ai-notes-{version}-x64-setup.exe";
 
-    internal static bool IsStableVersion(string value) =>
-        System.Version.TryParse(value, out var version) && version.Major <= 65_535 && version.Minor <= 65_535 &&
-        version.Build is >= 0 and <= 65_535 && version.Revision == -1 &&
-        value == $"{version.Major}.{version.Minor}.{version.Build}";
+    internal static bool IsStableVersion(string value) => UpdateVersion.IsStable(value);
 
     public static UpdateTrustResult Verify(string file, UpdateTrustPolicy policy) => VerifyAndClose(file, policy, false);
     public static UpdateTrustResult VerifyInstaller(string file, UpdateTrustPolicy policy) => VerifyAndClose(file, policy, true);

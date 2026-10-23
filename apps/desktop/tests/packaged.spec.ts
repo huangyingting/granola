@@ -1,8 +1,10 @@
 import { _electron as electron, expect, test } from '@playwright/test';
 import { existsSync, readFileSync } from 'node:fs';
-import { rename, rm } from 'node:fs/promises';
-import { spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { cp, mkdtemp, rename, rm } from 'node:fs/promises';
+import { execFile, spawn } from 'node:child_process';
+import { createHash, randomUUID } from 'node:crypto';
+import { tmpdir } from 'node:os';
+import { promisify } from 'node:util';
 import { join } from 'node:path';
 import { audioHostEnvironment } from '@windows-ai-notes/client/audio';
 import {
@@ -11,6 +13,85 @@ import {
 } from '../src/main/update-trust.js';
 
 const executable = process.env.DESKTOP_EXECUTABLE;
+async function verifyNativeRuntimeSeal(resources: string, version: string) {
+  const root = await mkdtemp(join(tmpdir(), 'notes-packaged-runtime-seal-'));
+  const source = join(resources, 'audio-host', 'AudioHost.exe');
+  const original = createHash('sha256')
+    .update(readFileSync(source))
+    .digest('hex');
+  const native = join(root, 'runtime');
+  const run = promisify(execFile);
+  const options = {
+    env: audioHostEnvironment(process.env),
+    encoding: 'utf8' as const,
+    timeout: 30_000,
+    maxBuffer: 16_384,
+    windowsHide: true,
+  };
+  try {
+    await cp(join(resources, 'audio-host'), native, {
+      recursive: true,
+      force: false,
+      errorOnExist: true,
+    });
+    const sealed = await run(
+      source,
+      ['--seal-update-runtime', native, version],
+      options,
+    );
+    expect(JSON.parse(sealed.stdout)).toEqual({
+      version: 1,
+      operation: '--seal-update-runtime',
+      success: true,
+      code: 'update_runtime_sealed',
+    });
+    expect(
+      createHash('sha256')
+        .update(readFileSync(join(native, 'AudioHost.exe')))
+        .digest('hex'),
+    ).not.toBe(original);
+    for (const [operation, args, code] of [
+      [
+        '--seal-update-runtime',
+        [native, version],
+        'update_runtime_already_sealed',
+      ],
+      [
+        '--verify-update-runtime',
+        [native, version, '0'.repeat(64), 'Synthetic untrusted publisher'],
+        'update_signature_invalid',
+      ],
+    ] as const) {
+      let rejection: unknown;
+      try {
+        await run(join(native, 'AudioHost.exe'), [operation, ...args], options);
+      } catch (error) {
+        rejection = error;
+      }
+      expect(rejection).toMatchObject({ code: 2 });
+      if (
+        !(rejection instanceof Error) ||
+        !('stdout' in rejection) ||
+        typeof rejection.stdout !== 'string'
+      )
+        throw new Error(
+          'The sealed packaged helper did not return a native rejection.',
+          { cause: rejection },
+        );
+      expect(JSON.parse(rejection.stdout)).toEqual({
+        version: 1,
+        operation,
+        success: false,
+        code,
+      });
+    }
+    expect(
+      createHash('sha256').update(readFileSync(source)).digest('hex'),
+    ).toBe(original);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}
 test.skip(
   !executable,
   'Run after packaging with DESKTOP_EXECUTABLE set to the unpacked Windows executable.',
@@ -308,6 +389,7 @@ test('opens the actual packaged sandboxed editor without workspace runtime depen
       BrowserWindow.getAllWindows()[0]?.close();
     });
     await closed;
+    await verifyNativeRuntimeSeal(resources, currentVersion);
     if (
       process.env.GITHUB_ACTIONS === 'true' &&
       process.env.RUNNER_ENVIRONMENT === 'github-hosted'

@@ -560,6 +560,20 @@ Missing signing credentials cannot silently produce an unsigned candidate.
 No model, login or signing secrets are passed to compilation or the Windows
 signature-inspection subprocess.
 
+For update-enabled candidates, the official builder's `afterSign` hook embeds a
+strict payload inventory in `AudioHost.exe` only after its dependencies have their
+final signatures. It then re-signs that executable and verifies the whole runtime
+before packaging. The inventory is a bounded Win32 resource covered by that
+executable's pinned, timestamped Authenticode signature—not an unsigned sidecar.
+It binds the application version and every other runtime file's exact relative
+name, byte count and SHA-256, including DLLs, dependency/runtime configuration and
+notices. The executable cannot hash itself; its own signature protects it.
+Unknown, missing, changed, aliased or malformed members are rejected while files
+and ancestor paths remain locked. The installation worker now requires this
+signed provenance before preparing an installer. Mutable lifecycle state/outcome
+records are excluded from code inventories, never treated as signature authority,
+and still require their separate strict recovery validation.
+
 Before promotion, the actual Windows Authenticode verifier must accept each
 required executable/assembly as an embedded signature with a timestamp and the
 exact configured certificate fingerprint and publisher. Catalog-only,
@@ -591,6 +605,12 @@ generic transport. Omitting the variable preserves the existing unconfigured
 candidate behavior. Feed generation/upload is **not publication, a separately
 signed manifest, production approval or update activation**; the candidate
 receipt still sets `production_accepted=false`.
+Promotion also independently verifies the embedded runtime inventory with the
+already signature-verified packaged helper before writing either receipt/feed;
+update-enabled receipts record `runtime_provenance_verified=true`. Static signed
+payload provenance is not live process authentication, pre-database admission or
+fresh startup health. Those must still be composed with the retained process and
+one-use restart channel; installation/restart controls remain disabled.
 
 The ordinary Windows checks verify real first-party installer/uninstaller metadata,
 reject unsigned first-party packages and correctly signed non-installer runtimes,
@@ -599,6 +619,10 @@ Generic staging/recovery is also exercised with an explicitly injected generic
 verifier and a real signed runtime. That fixture is **not** evidence of successful
 production-signed first-party installer acceptance; a real signed candidate remains
 a separate release gate. No test CA or signature bypass is installed.
+The ordinary packaged probe seals only a temporary copy of the real self-contained
+unsigned helper, requires the modified helper to remain runnable, rejects its
+unsigned provenance and preserves the original bundle. This verifies PE-resource
+and runtime mechanics, not a first-party signed production success.
 
 For hosted PFX candidate builds, configure the **`signed-release` environment**
 with required reviewers and branch restrictions **before** storing credentials.

@@ -23,6 +23,8 @@ import {
   verifiedFile,
   promoteCandidate,
   updatePolicy,
+  finalizeNativeRuntime,
+  runtimeProvenanceOperation,
 } from './release.mjs';
 
 const policy = {
@@ -117,6 +119,10 @@ describe('fail-closed signed candidate policy', () => {
     const base = JSON.parse(await readFile(packageFile, 'utf8'));
     const path = 'C:\\fresh-stage\\update-policy.json';
     const config = signedConfiguration(base, 'output', 'native', policy, path);
+    expect(config.afterSign).toBeTypeOf('function');
+    expect(
+      signedConfiguration(base, 'output', 'native', policy).afterSign,
+    ).toBeUndefined();
     expect(
       config.extraResources.filter(
         (entry) => entry.to === 'update-policy.json',
@@ -379,11 +385,148 @@ describe('fail-closed signed candidate policy', () => {
       ),
       { isEnabled: false },
     );
+    await validateConfiguration(
+      signedConfiguration(
+        base,
+        'C:\\candidate\\output',
+        'C:\\candidate\\native',
+        policy,
+        'C:\\candidate\\policy.json',
+      ),
+      { isEnabled: false },
+    );
     expect(
       Platform.WINDOWS.createTarget('nsis', Arch.x64)
         .get(Platform.WINDOWS)
         .get(Arch.x64),
     ).toEqual(['nsis']);
+  });
+  it('seals only after every first-party dependency signature, then re-signs and verifies the complete payload', async () => {
+    const paths = await fixture();
+    const appOutDir = join(paths.output, 'win-unpacked');
+    const directory = join(appOutDir, 'resources', 'audio-host');
+    const observations = [];
+    const context = {
+      electronPlatformName: 'win32',
+      appOutDir,
+      packager: {
+        signIf: vi.fn(async (file) => {
+          observations.push(['sign', file]);
+          return true;
+        }),
+      },
+    };
+    await finalizeNativeRuntime(
+      context,
+      { helper: 'fresh-native-helper', version, policy },
+      {
+        inspect: async (file) => {
+          observations.push(['inspect', file]);
+          return signature;
+        },
+        operate: async (...args) => {
+          observations.push(['operate', ...args]);
+        },
+      },
+    );
+    expect(observations).toEqual([
+      ...['AudioHost.exe', 'AudioHost.dll', 'AudioHost.Core.dll'].map(
+        (file) => ['inspect', join(directory, file)],
+      ),
+      [
+        'operate',
+        'fresh-native-helper',
+        '--seal-update-runtime',
+        directory,
+        version,
+        policy,
+      ],
+      ['sign', join(directory, 'AudioHost.exe')],
+      ['inspect', join(directory, 'AudioHost.exe')],
+      [
+        'operate',
+        'fresh-native-helper',
+        '--verify-update-runtime',
+        directory,
+        version,
+        policy,
+      ],
+    ]);
+  });
+  it.each([
+    'dependency',
+    'seal',
+    'resign-false',
+    'resign-error',
+    'resigned-signature',
+    'payload',
+  ])(
+    'stops signed-runtime finalization at this failure instead of accepting partial provenance: %s',
+    async (failure) => {
+      const paths = await fixture();
+      let inspected = 0;
+      const operations = [];
+      const signIf = vi.fn(async () => {
+        if (failure === 'resign-error')
+          throw new Error('Synthetic signing failure.');
+        return failure !== 'resign-false';
+      });
+      await expect(
+        finalizeNativeRuntime(
+          {
+            electronPlatformName: 'win32',
+            appOutDir: join(paths.output, 'win-unpacked'),
+            packager: { signIf },
+          },
+          { helper: 'synthetic-helper', version, policy },
+          {
+            inspect: async () => {
+              inspected++;
+              return (failure === 'dependency' && inspected === 2) ||
+                (failure === 'resigned-signature' && inspected === 4)
+                ? { ...signature, status: 'NotSigned' }
+                : signature;
+            },
+            operate: async (_helper, operation) => {
+              operations.push(operation);
+              if (
+                (failure === 'seal' && operation === '--seal-update-runtime') ||
+                (failure === 'payload' &&
+                  operation === '--verify-update-runtime')
+              )
+                throw new Error('Synthetic provenance failure.');
+            },
+          },
+        ),
+      ).rejects.toThrow();
+      if (failure === 'dependency') {
+        expect(operations).toEqual([]);
+        expect(signIf).not.toHaveBeenCalled();
+      } else if (failure !== 'payload') {
+        expect(operations).toEqual(['--seal-update-runtime']);
+      } else
+        expect(operations).toEqual([
+          '--seal-update-runtime',
+          '--verify-update-runtime',
+        ]);
+    },
+  );
+  it('rejects unsupported runtime build operations before launching a helper', async () => {
+    await expect(
+      runtimeProvenanceOperation(
+        'missing-helper',
+        '--other-operation',
+        '.',
+        version,
+        policy,
+      ),
+    ).rejects.toMatchObject({ code: 'release_runtime_platform' });
+    await expect(
+      finalizeNativeRuntime(
+        { electronPlatformName: 'linux' },
+        { helper: 'unused', version, policy },
+      ),
+    ).rejects.toMatchObject({ code: 'release_runtime_platform' });
   });
   it('hashes the inspected bytes exactly and detects changes during inspection', async () => {
     const paths = await fixture(),
@@ -465,10 +608,12 @@ describe('fail-closed signed candidate policy', () => {
   it('derives an optional feed only from the completely verified installer without claiming production acceptance', async () => {
     const paths = await fixture();
     const verifyInstaller = vi.fn(async () => {});
+    const verifyRuntime = vi.fn(async () => {});
     const receipt = await promoteCandidate(
       { ...paths, updates: true },
       async () => signature,
       verifyInstaller,
+      verifyRuntime,
     );
     const feed = JSON.parse(
       await readFile(join(paths.destination, 'windows-update.json'), 'utf8'),
@@ -485,6 +630,12 @@ describe('fail-closed signed candidate policy', () => {
     });
     expect(receipt.production_accepted).toBe(false);
     expect(receipt.installer_role_verified).toBe(true);
+    expect(receipt.runtime_provenance_verified).toBe(true);
+    expect(verifyRuntime).toHaveBeenCalledExactlyOnceWith(
+      join(paths.output, 'win-unpacked/resources/audio-host'),
+      version,
+      policy,
+    );
     expect(verifyInstaller).toHaveBeenCalledExactlyOnceWith(
       join(paths.output, 'win-unpacked/resources/audio-host/AudioHost.exe'),
       join(paths.output, receipt.installer),
@@ -518,11 +669,38 @@ describe('fail-closed signed candidate policy', () => {
     const paths = await fixture();
     const inspect = vi.fn(async () => signature);
     await expect(
-      promoteCandidate({ ...paths, updates: true }, inspect, async () => {
-        throw new Error('Synthetic native installer-role rejection.');
-      }),
+      promoteCandidate(
+        { ...paths, updates: true },
+        inspect,
+        async () => {
+          throw new Error('Synthetic native installer-role rejection.');
+        },
+        async () => {},
+      ),
     ).rejects.toThrow('installer-role rejection');
     expect(inspect).toHaveBeenCalledTimes(5);
+    await expect(readdir(paths.destination)).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+    for (const name of ['signed-candidate.json', 'windows-update.json'])
+      await expect(readFile(join(paths.output, name))).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+  });
+  it('never publishes a receipt or feed when signed runtime payload verification fails', async () => {
+    const paths = await fixture();
+    const installer = vi.fn(async () => {});
+    await expect(
+      promoteCandidate(
+        { ...paths, updates: true },
+        async () => signature,
+        installer,
+        async () => {
+          throw new Error('Synthetic runtime provenance rejection.');
+        },
+      ),
+    ).rejects.toThrow('runtime provenance rejection');
+    expect(installer).not.toHaveBeenCalled();
     await expect(readdir(paths.destination)).rejects.toMatchObject({
       code: 'ENOENT',
     });

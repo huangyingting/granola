@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using System.Security.Cryptography;
 using System.Text;
 using Microsoft.Win32.SafeHandles;
+using WindowsAiNotes.Updates;
 
 namespace WindowsAiNotes.AudioHost;
 
@@ -66,9 +67,10 @@ internal sealed class UpdateRuntimeInventory : IDisposable
             throw new UpdateRuntimeException("update_worker_source");
         foreach (var path in Directory.EnumerateFileSystemEntries(directory))
         {
-            if (directory == root && string.Equals(Path.GetFileName(path), UpdateRuntimeState.Filename, StringComparison.OrdinalIgnoreCase))
+            if (directory == root && UpdateRuntimeSeal.IsOperationalFile(Path.GetFileName(path)))
             {
-                UpdateInstallationVerifier.RequireRegularPath(path, directory: false);
+                using var metadata = UpdatePathLock.OpenFile(path);
+                UpdatePathLock.RequireSingleRegularFile(metadata);
                 continue;
             }
             if ((File.GetAttributes(path) & FileAttributes.Directory) != 0)

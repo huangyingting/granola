@@ -546,6 +546,8 @@ request ID 串联 API、job、worker 和 provider request，生产 trace 默认�
 
 已增加单次原生重启健康 receiver 原语，但尚未接到 activation：启动新 Main 前创建不可预测、当前用户专属的独占命名管道，使用 OS 返回的 pipe peer PID 对照 `CreateProcessW` 创建时保留的精确内核句柄，并检查该进程仍存活；不能用消息中的 PID/创建时间重新打开进程充当授权。新鲜挑战绑定 session、精确创建身份、目标版本及有界整数 schema 报告，1 KiB 严格帧拒绝未知/重复字段、旧挑战及复用。只有 owner 的持久化回调实际成功结束后才发送确认；超时、取消、通道故障或 Main 退出都关闭通道，不终止可能已经持有写入的新 Main，且须 drain 已接纳的持久化回调才返回。Windows 样机使用真正新启动的合成子进程及 OS peer 身份，不代替签名应用的正向健康验收。此 receiver 不授予数据库准入、不修改恢复 fence、不自行判定 schema 兼容；Main 对 worker/server 的认证、首次启动准入转移、健康状态持久授权及协调接线仍须完成，安装与重启入口继续关闭。
 
+更新启用的签名候选已增加完整原生运行时来源绑定：official builder 的 `afterSign` 在依赖签名结束后，将有界、严格的版本/相对路径/长度/SHA-256 清单写入 `AudioHost.exe` 的 Win32 resource，再重新签名该 exe 并核对完整 payload；exe 本身由精确 pin 的可信、带时间戳 Authenticode 签名保护，不能用 unsigned sidecar/hash 自称授权。清单覆盖除 exe 本身以外的全部 runtime 文件，包括依赖与配置，拒绝未知/缺失/同长篡改、路径别名、重复/越界内容，验证期间保留文件和祖先目录锁。真正 installer worker 在准备安装器前必须验证原始版本的此签名 payload；state/outcome 两个 mutable 元数据不进入代码 inventory，但仍须独立完成严格恢复校验，绝不构成签名来源。候选晋升前使用已独立验签的打包 helper 再核对全量 runtime，成功才允许生成 receipt/feed 并记录 `runtime_provenance_verified=true`。实际 unsigned packaged 探针只修改临时完整拷贝，验证 exe resource 写入后仍能执行、未签名清单仍拒绝且原 bundle 不变；这不是第一方签名正例，也不授予首次数据库准入或恢复清理。Main 对真实 server/creator 的认证、准入转移和新鲜健康持久授权仍待组合，安装/重启保持禁用。
+
 ## 12. 建议代码组织
 
 以下是未来建项布局，不是已经存在的目录：
