@@ -362,7 +362,12 @@ public sealed class UpdateRestartServerTests
 
         internal async Task WaitForFile(string path)
         {
-            while (!File.Exists(path)) await Task.Delay(10, Deadline.Token);
+            while (!File.Exists(path))
+            {
+                if (Server.HasExited)
+                    throw new InvalidOperationException($"The server fixture exited with code {Server.ExitCode} before {Path.GetFileName(path)}.");
+                await Task.Delay(10, Deadline.Token);
+            }
         }
 
         internal async Task StopMainAsync()

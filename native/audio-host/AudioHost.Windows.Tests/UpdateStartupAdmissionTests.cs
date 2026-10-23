@@ -42,7 +42,7 @@ public sealed class UpdateStartupAdmissionTests : IDisposable
         await using var fixture = await UpdateParentHandoffTests.Fixture.OpenAsync();
         using var local = UpdateOperationLock.Open(Locks, admission: true);
         using var remote = UpdateRemoteRuntimeLease.Open(fixture.Parent, local.Handles);
-        remote.TransferToParent();
+        remote.TransferToProcess();
         remote.Dispose();
         local.Dispose();
         Assert.False(fixture.Parent.HasExited);

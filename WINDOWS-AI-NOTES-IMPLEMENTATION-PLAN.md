@@ -550,6 +550,8 @@ request ID 串联 API、job、worker 和 provider request，生产 trace 默认�
 
 已增加内部原生 restart-server 租约原语：从已连接命名管道读取真实 Windows server PID，在检查 SID、会话、image 和创建身份之前仅打开一次该进程内核句柄；server 必须是所持新 Main 的真实、仍存活创建者，PID snapshot 前后同时核对两个精确句柄的存活状态。生产组合还要求真实 `AudioHost.exe` 位于固定私有 worker 根下，严格 session/state/outcome 与目标版本一致，并保留原版本完整 runtime 的第一方 pin 签名来源及不可变文件/祖先目录锁。成功后将连接、Main/server 进程租约和签名 runtime 一起持有；释放不终止任何进程，失败不消耗调用方的 Main/连接。真实 Windows 合成 server/child 覆盖错误创建者、自身/兄弟进程、退出、断线和释放；受信 Microsoft 样机也不能冒充第一方 worker。此原语尚未形成 Main bridge 或双通道新鲜挑战绑定，不转移数据库准入、不清除恢复 fence、不开放安装或重启；首次启动组合和真实签名正向验收仍待完成。
 
+首次启动准入转移另增加内部原生子进程路径：worker 连续持有 exclusion 时以完全禁止句柄继承的方式创建新 Main，再直接向 `CreateProcessW` 保留的精确子进程句柄复制不可继承的准入句柄，不重新按 PID 打开；移交前失败回收已复制的目标句柄，移交后 Main 持有至物理退出。Windows 内核样机覆盖部分复制失败、已退出/已释放及借用进程拒绝、私有 pipe/无关文件不继承，以及新 Main 显式开启继承的后代仍不能延长准入寿命。安装器原有显式继承列表保持不变；此路径尚未与认证 first-start 协调接线，不授予健康或恢复清理。
+
 ## 12. 建议代码组织
 
 以下是未来建项布局，不是已经存在的目录：

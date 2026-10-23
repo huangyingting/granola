@@ -23,7 +23,7 @@ public static class UpdateStartupAdmission
             using var retained = UpdateRemoteRuntimeLease.Open(parent, admission.Handles);
             await FrameCodec.WriteJsonAsync(output,
                 new { Version = 1, Event = "update_startup_admitted", parent.Identity });
-            retained.TransferToParent();
+            retained.TransferToProcess();
             return 0;
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or SecurityException or

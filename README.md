@@ -523,6 +523,16 @@ retained proof, not a diagnostic authorization receipt, a Main-side bridge or a
 completed cross-channel challenge protocol. It does not transfer startup
 admission, clear recovery fences or enable installation/restart.
 
+Fresh-process admission transfer also has an internal native path: launch Main
+with all handle inheritance disabled while the worker retains exclusion, then
+duplicate noninheritable admission handles directly into the retained
+`CreateProcessW` child handle, never by reopening its PID. Before ownership
+transfer, partial failures reclaim target copies; afterward Main keeps them
+until physical exit. Windows probes check that private pipes/unlisted files are
+not inherited and that even an explicitly inheriting descendant cannot retain
+Main's transferred admission. This is not yet wired to authenticated first
+start; the real installer still uses its separate explicit inherited lease list.
+
 Activation now requires the runtime's physical parent to be the fixed private
 worker root, so recovery cannot miss an installer launched from an arbitrary
 diagnostic staging directory. `--stage-update-runtime` still supports copy/

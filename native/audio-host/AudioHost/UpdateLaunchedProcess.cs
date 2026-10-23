@@ -14,6 +14,15 @@ internal sealed class UpdateLaunchedProcess : IDisposable
     private Task? exited;
     internal int Id { get; }
     internal bool IsNativeLaunch => handle is not null;
+    internal SafeProcessHandle ProcessHandle
+    {
+        get
+        {
+            if (handle is null) throw new ArgumentException("A retained native child process is required.");
+            ObjectDisposedException.ThrowIf(handle.IsClosed, this);
+            return handle;
+        }
+    }
     internal UpdateParentIdentity Identity => new(Id,
         StartTime.ToUniversalTime().ToFileTimeUtc().ToString(CultureInfo.InvariantCulture));
     internal DateTime StartTime => surrogate?.StartTime ?? CreationTime();
@@ -44,7 +53,13 @@ internal sealed class UpdateLaunchedProcess : IDisposable
     internal Task WaitForExitAsync(CancellationToken token) =>
         (exited ??= surrogate?.WaitForExitAsync(CancellationToken.None) ?? Task.Run(() => Signaled(uint.MaxValue))).WaitAsync(token);
 
-    internal static UpdateLaunchedProcess Start(ProcessStartInfo start, IEnumerable<SafeFileHandle> retained)
+    internal static UpdateLaunchedProcess Start(ProcessStartInfo start, IEnumerable<SafeFileHandle> retained) =>
+        StartCore(start, retained, requireLease: true);
+
+    internal static UpdateLaunchedProcess StartIsolated(ProcessStartInfo start) =>
+        StartCore(start, [], requireLease: false);
+
+    private static UpdateLaunchedProcess StartCore(ProcessStartInfo start, IEnumerable<SafeFileHandle> retained, bool requireLease)
     {
         if (start.UseShellExecute || start.RedirectStandardInput || start.RedirectStandardOutput ||
             start.RedirectStandardError || start.ArgumentList.Count != 0 ||
@@ -67,25 +82,32 @@ internal sealed class UpdateLaunchedProcess : IDisposable
                 }
                 inherited.Add(copy);
             }
-            if (inherited.Count == 0) throw new ArgumentException("An inherited startup admission lease is required.");
-            nuint size = 0;
-            if (InitializeProcThreadAttributeList(0, 1, 0, ref size) || Marshal.GetLastPInvokeError() != 122 ||
-                size is 0 or > 65_536) throw LastError();
-            attributes = Marshal.AllocHGlobal(checked((int)size));
-            if (!InitializeProcThreadAttributeList(attributes, 1, 0, ref size)) throw LastError();
-            initialized = true;
-            values = Marshal.AllocHGlobal(checked(inherited.Count * nint.Size));
-            for (var index = 0; index < inherited.Count; index++)
-                Marshal.WriteIntPtr(values, index * nint.Size, inherited[index].DangerousGetHandle());
-            if (!UpdateProcThreadAttribute(attributes, 0, new(0x00020002), values,
-                (nuint)(inherited.Count * nint.Size), 0, 0)) throw LastError();
+            if (inherited.Count == 0 && requireLease) throw new ArgumentException("An inherited startup admission lease is required.");
+            if (inherited.Count > 0)
+            {
+                nuint size = 0;
+                if (InitializeProcThreadAttributeList(0, 1, 0, ref size) || Marshal.GetLastPInvokeError() != 122 ||
+                    size is 0 or > 65_536) throw LastError();
+                attributes = Marshal.AllocHGlobal(checked((int)size));
+                if (!InitializeProcThreadAttributeList(attributes, 1, 0, ref size)) throw LastError();
+                initialized = true;
+                values = Marshal.AllocHGlobal(checked(inherited.Count * nint.Size));
+                for (var index = 0; index < inherited.Count; index++)
+                    Marshal.WriteIntPtr(values, index * nint.Size, inherited[index].DangerousGetHandle());
+                if (!UpdateProcThreadAttribute(attributes, 0, new(0x00020002), values,
+                    (nuint)(inherited.Count * nint.Size), 0, 0)) throw LastError();
+            }
             var entries = start.Environment.OrderBy(pair => pair.Key, StringComparer.OrdinalIgnoreCase)
                 .Select(pair => $"{pair.Key}={pair.Value}");
             environment = Marshal.StringToHGlobalUni(string.Join('\0', entries) + "\0\0");
-            var startup = new StartupInfoEx { Startup = new() { Size = (uint)Marshal.SizeOf<StartupInfoEx>() }, Attributes = attributes };
+            var startup = new StartupInfoEx
+            {
+                Startup = new() { Size = (uint)(initialized ? Marshal.SizeOf<StartupInfoEx>() : Marshal.SizeOf<StartupInfo>()) },
+                Attributes = attributes
+            };
             // Only the explicit lease list is inherited, never private protocol pipes or other handles.
             if (!CreateProcess(start.FileName, new StringBuilder($"\"{start.FileName}\" {start.Arguments}"),
-                0, 0, true, 0x00080000u | 0x00000400u | (start.CreateNoWindow ? 0x08000000u : 0u),
+                0, 0, inherited.Count > 0, (initialized ? 0x00080000u : 0u) | 0x00000400u | (start.CreateNoWindow ? 0x08000000u : 0u),
                 environment, start.WorkingDirectory, ref startup, out var process)) throw LastError();
             using var thread = new SafeWaitHandle(process.Thread, ownsHandle: true);
             return new(new SafeProcessHandle(process.Process, ownsHandle: true), checked((int)process.Pid));
