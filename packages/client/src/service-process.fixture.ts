@@ -34,10 +34,15 @@ export function launchService(
   entry: 'api' | 'worker',
   options: {
     durationMs?: number;
+    health?: boolean;
     proxy?: { url: string; certificate: string };
   } = {},
 ) {
   const duration = options.durationMs ?? 20_000;
+  if (options.health && entry !== 'worker')
+    throw new Error(
+      'The private health option applies only to the Worker fixture.',
+    );
   if (!Number.isInteger(duration) || duration < 1000 || duration > 240_000)
     throw new Error('The isolated service exceeds its process lifetime bound.');
   if (options.proxy) {
@@ -81,6 +86,7 @@ export function launchService(
               AZURE_OPENAI_DEPLOYMENT: 'synthetic',
               AZURE_SPEECH_KEY: 'synthetic-speech-key-not-a-secret',
               AZURE_SPEECH_REGION: 'eastus',
+              ...(options.health ? { WORKER_HEALTH_PORT: String(port) } : {}),
             }
           : {}),
         ...(options.proxy

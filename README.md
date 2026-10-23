@@ -2352,9 +2352,20 @@ follow the independent deletion/usage/media restore procedure above with writers
 stopped instead. Schema upgrades also require the documented backup/migration
 procedure, not merely restarting containers.
 
-The API health command checks real database-backed readiness, consumes no response
-body and reports only a fixed failure code. The Worker exposes its existing
-body-free startup/iteration observations, not a fabricated health endpoint.
+Both health commands consume no response body and report only fixed failure
+codes. The API checks real database-backed readiness. The Worker has an optional
+`WORKER_HEALTH_PORT` (canonical integer 1–65535), absent/disabled for standalone
+runs; this manifest enables port 4412 **only inside the Worker**, always bound to
+`127.0.0.1`, never published. `/health/live` checks HTTP/event-loop liveness without
+SQL. `/health` remains 503 until the existing schema/deletion/storage startup
+checks complete, then checks a real `SELECT 1`; simultaneous probes share one
+query, without caching either success or failure. The independent probe budgets
+are 120/minute each. Shutdown immediately makes readiness unavailable, rechecks
+the stop state after pending SQL, and drains the listener before closing the
+database. Invalid ports and bind failures fail startup with fixed diagnostics.
+Readiness **does not** check provider availability/quality, ongoing storage
+health, scheduler/queue progress, or deployment acceptance. Keep using the
+body-free startup/iteration observations and actual queue/outcome monitoring.
 Compose health failure alone does not restart a container; process exit uses
 `unless-stopped`. A five-minute stop grace allows normal application cancellation
 and receipt settlement, but forced termination can still leave uncertain usage.

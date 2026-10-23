@@ -218,6 +218,9 @@ importers:
 
   apps/worker:
     dependencies:
+      '@fastify/rate-limit':
+        specifier: 10.3.0
+        version: 10.3.0
       '@windows-ai-notes/ai':
         specifier: workspace:*
         version: link:../../packages/ai
@@ -230,6 +233,9 @@ importers:
       '@windows-ai-notes/storage':
         specifier: workspace:*
         version: link:../../packages/storage
+      fastify:
+        specifier: 5.12.7
+        version: 5.12.7
 
   packages/ai:
     dependencies:

@@ -190,6 +190,7 @@ export const digest = (value: unknown, canonical = false): string =>
 
 export class Database {
   readonly pool: pg.Pool;
+  private healthQuery: Promise<void> | undefined;
   readonly sync: SyncStore;
   readonly recordings: RecordingStore;
   readonly transcripts: TranscriptStore;
@@ -245,6 +246,15 @@ export class Database {
   async close() {
     this.deletions.close();
     await this.pool.end();
+  }
+  checkHealth(): Promise<void> {
+    this.healthQuery ??= this.pool
+      .query('SELECT 1')
+      .then(() => undefined)
+      .finally(() => {
+        this.healthQuery = undefined;
+      });
+    return this.healthQuery;
   }
   async operations() {
     return operationsSnapshot(this);

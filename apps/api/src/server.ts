@@ -180,19 +180,12 @@ export async function createServer(
   registerRealtime();
   registerRecordingRoutes(app, db, storage);
   registerChatRoutes(app, db, streams, shutdown.signal);
-  let healthQuery: Promise<void> | undefined;
   app.get(
     '/health',
     { config: { rateLimit: { groupId: 'health/readiness' } } },
     async () => {
       try {
-        healthQuery ??= db.pool
-          .query('SELECT 1')
-          .then(() => undefined)
-          .finally(() => {
-            healthQuery = undefined;
-          });
-        await healthQuery;
+        await db.checkHealth();
         return { status: 'ok' };
       } catch {
         throw new ServiceError(

@@ -42,7 +42,9 @@ describe.skipIf(!databaseUrl || process.platform !== 'linux')(
     async function start(port?: number, entry: 'api' | 'worker' = 'api') {
       const url = new URL(scoped);
       url.searchParams.set('application_name', schema);
-      const child = launch(url.href, port ?? (await unusedPort()), entry);
+      const child = launch(url.href, port ?? (await unusedPort()), entry, {
+        health: entry === 'worker',
+      });
       children.push(child);
       return child;
     }
@@ -110,8 +112,14 @@ describe.skipIf(!databaseUrl || process.platform !== 'linux')(
               ).toBe(1),
             { timeout: 10_000, interval: 20 },
           );
+          if (entry === 'worker') {
+            expect((await fetch(`${child.base}/health`)).status).toBe(503);
+            expect((await fetch(`${child.base}/health/live`)).status).toBe(200);
+          }
           expect(child.child.kill('SIGTERM')).toBe(true);
           await child.observed(`${entry}_stopping`);
+          if (entry === 'worker')
+            expect((await fetch(`${child.base}/health`)).status).toBe(503);
         } finally {
           try {
             await lock.query('ROLLBACK');
@@ -128,6 +136,24 @@ describe.skipIf(!databaseUrl || process.platform !== 'linux')(
         expect(child.stderr).toBe('');
       },
     );
+    it('serves actual Worker startup/database readiness and closes its listener on physical exit', async () => {
+      expect((await database().pool.query('SELECT 1 FROM jobs')).rowCount).toBe(
+        0,
+      );
+      const child = await start(undefined, 'worker');
+      await child.observed('worker_ready');
+      const response = await fetch(`${child.base}/health`);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ status: 'ok' });
+      expect(child.child.kill('SIGTERM')).toBe(true);
+      expect(await child.exit()).toEqual({
+        code: 0,
+        signal: null,
+        error: undefined,
+      });
+      await expect(fetch(`${child.base}/health`)).rejects.toThrow();
+      expect(child.stderr).toBe('');
+    });
     it.each(['SIGTERM', 'SIGINT'] as const)(
       'drains an actual open SSE connection and closes naturally on %s',
       async (signal) => {

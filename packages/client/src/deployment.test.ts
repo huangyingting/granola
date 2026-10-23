@@ -70,6 +70,7 @@ describe.skipIf(process.env.SERVER_COMPOSE_ACCEPTANCE !== '1')(
           'AUTH_MODE=development',
           'HOST=192.0.2.10',
           'PORT=80',
+          'WORKER_HEALTH_PORT=0',
           'DATABASE_URL=postgres://synthetic:synthetic@database.invalid/notes',
           'S3_BUCKET=synthetic-private-media',
           'DELETION_ARCHIVE_BUCKET=synthetic-independent-archive',
@@ -200,12 +201,13 @@ describe.skipIf(process.env.SERVER_COMPOSE_ACCEPTANCE !== '1')(
       expect(services.api?.environment.AZURE_OPENAI_API_KEY).toBeUndefined();
       expect(services.worker?.environment).toMatchObject({
         NODE_ENV: 'production',
+        WORKER_HEALTH_PORT: '4412',
         AZURE_OPENAI_API_KEY: 'synthetic-worker-only',
         AZURE_SPEECH_KEY: 'synthetic-worker-speech-only',
       });
       expect(services.worker?.environment.OIDC_ISSUER).toBeUndefined();
     });
-    it('restricts ingress, filesystem, privileges and shutdown without pretending the Worker has a readiness probe', async () => {
+    it('keeps both probes private and restricts filesystem, privileges and shutdown', async () => {
       const { services } = await model();
       expect(services.api?.ports).toEqual([
         {
@@ -216,7 +218,6 @@ describe.skipIf(process.env.SERVER_COMPOSE_ACCEPTANCE !== '1')(
         },
       ]);
       expect(services.worker?.ports).toBeUndefined();
-      expect(services.worker?.healthcheck).toBeUndefined();
       for (const service of Object.values(services)) {
         expect(service).toMatchObject({
           user: 'node',
@@ -230,19 +231,22 @@ describe.skipIf(process.env.SERVER_COMPOSE_ACCEPTANCE !== '1')(
         expect(service.tmpfs).toEqual([
           '/tmp:rw,noexec,nosuid,size=64m,mode=1777',
         ]);
+        expect(service.healthcheck).toMatchObject({
+          interval: '15s',
+          timeout: '3s',
+          start_period: '5m0s',
+          retries: 3,
+        });
+        expect(service.healthcheck?.test.slice(0, 4)).toEqual([
+          'CMD',
+          'node',
+          '--input-type=module',
+          '--eval',
+        ]);
       }
-      expect(services.api?.healthcheck).toMatchObject({
-        interval: '15s',
-        timeout: '3s',
-        start_period: '5m0s',
-        retries: 3,
-      });
-      expect(services.api?.healthcheck?.test.slice(0, 4)).toEqual([
-        'CMD',
-        'node',
-        '--input-type=module',
-        '--eval',
-      ]);
+      expect(services.worker?.healthcheck?.test.at(-1)).toContain(
+        'http://127.0.0.1:4412/health',
+      );
     });
     it('keeps a custom published port on loopback without changing the application port', async () => {
       const { services } = await model({
@@ -288,9 +292,9 @@ describe.skipIf(process.env.SERVER_COMPOSE_ACCEPTANCE !== '1')(
       'runs the real %s container with the declared restrictions and no external network',
       async (service) => {
         const config = await model();
-        const health = config.services.api?.healthcheck?.test.slice(2);
+        const health = config.services[service]?.healthcheck?.test.slice(2);
         if (!health?.length)
-          throw new Error('The production API health command is missing.');
+          throw new Error('A production service health command is missing.');
         const script = `
         import assert from 'node:assert/strict';
         import {readFile, writeFile, unlink} from 'node:fs/promises';
@@ -325,6 +329,34 @@ describe.skipIf(process.env.SERVER_COMPOSE_ACCEPTANCE !== '1')(
             await assert.rejects(promisify(execFile)(process.execPath, probe, {timeout: 5000}),
               error => error.code === 1 && error.stderr.trim() === 'api_readiness_failed' && error.stdout === '');
           } finally { await new Promise(resolve => server.close(resolve)); }
+        } else {
+          const {startWorkerHealth} = await import('./apps/worker/dist/health.js');
+          const shutdown = new AbortController();
+          let failure = false, blocked, release;
+          const endpoint = await startWorkerHealth(Number(process.env.WORKER_HEALTH_PORT),
+            {checkHealth: async () => { if (blocked) await blocked; if (failure) throw new Error('private-health-error'); }},
+            shutdown.signal);
+          const probe = JSON.parse(process.argv[2]);
+          const execute = () => promisify(execFile)(process.execPath, probe, {timeout: 5000});
+          const unavailable = () => assert.rejects(execute(),
+            error => error.code === 1 && error.stderr.trim() === 'worker_readiness_failed' && error.stdout === '');
+          try {
+            await unavailable();
+            endpoint.markReady();
+            await execute();
+            failure = true;
+            await unavailable();
+            failure = false;
+            await execute();
+            blocked = new Promise(resolve => { release = resolve; });
+            await unavailable();
+            release();
+            shutdown.abort();
+            await unavailable();
+            const live = await fetch(endpoint.url + '/health/live');
+            assert.equal(live.status, 200);
+            await live.body.cancel();
+          } finally { release?.(); await endpoint.close(); }
         }
         console.log(JSON.stringify({unprivileged: true, read_only: true, no_new_privileges: true, capabilities_dropped: true, writable_private_tmpfs: true}));
       `;

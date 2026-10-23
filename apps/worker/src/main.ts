@@ -8,6 +8,7 @@ import {
   withAuditContext,
 } from '@windows-ai-notes/db';
 import { runOnce } from './worker.js';
+import { loadWorkerHealthPort, startWorkerHealth } from './health.js';
 import { loadStorageConfig, RecordingBlobs } from '@windows-ai-notes/storage';
 import { workerObservability } from './observability.js';
 import { ServiceError } from '@windows-ai-notes/contracts/server';
@@ -17,6 +18,7 @@ import {
 } from '@windows-ai-notes/storage/deletion';
 
 async function main() {
+  const healthPort = loadWorkerHealthPort();
   const providers = createAzureProviders(loadAzureConfig());
   const config = loadStorageConfig();
   const archiveConfig = loadDeletionArchiveConfig();
@@ -34,11 +36,16 @@ async function main() {
   let nextCleanup = 0;
   const closeTelemetry = registerProviderTelemetry();
   const observations = workerObservability();
+  let health: Awaited<ReturnType<typeof startWorkerHealth>> | undefined;
   try {
+    if (healthPort !== undefined)
+      health = await startWorkerHealth(healthPort, db, shutdown.signal);
+    if (shutdown.signal.aborted) return;
     await db.assertReady(shutdown.signal);
     if (shutdown.signal.aborted) return;
     await storage?.assertReady();
     if (shutdown.signal.aborted) return;
+    health?.markReady();
     console.log(
       JSON.stringify({ code: 'worker_ready', provider: providers.provider }),
     );
@@ -70,19 +77,25 @@ async function main() {
       }
     }
   } finally {
-    observations.close();
-    closeTelemetry();
-    storage?.close();
     try {
-      await db.close();
+      await health?.close();
     } finally {
-      archive?.close();
+      observations.close();
+      closeTelemetry();
+      storage?.close();
+      try {
+        await db.close();
+      } finally {
+        archive?.close();
+      }
     }
   }
 }
 withAuditContext({ source: 'worker' }, main).catch((error: unknown) => {
   console.error(
-    error instanceof ServiceError && error.code.startsWith('deletion_')
+    error instanceof ServiceError &&
+      (error.code.startsWith('deletion_') ||
+        error.code.startsWith('worker_health_'))
       ? `${error.code}: ${error.message}`
       : 'worker_start_failed: check Azure/storage, independent deletion archive and database migrations. Secrets were not logged.',
   );

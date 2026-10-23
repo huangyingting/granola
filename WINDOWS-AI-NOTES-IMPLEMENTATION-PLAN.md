@@ -515,7 +515,7 @@ RBAC 负责工作区能力，文档 ACL 决定具体内容可见性。PostgreSQL
 
 初期单机 Compose 足够做部署验证，但不是高可用方案。具体 CPU/内存/并发容量以负载测试决定；云 ASR/LLM 路径不要求服务器有 GPU，本地模型需要另做容量设计。
 
-另提供显式 operator 控制的 `infra/compose/runtime.yml`，分别运行既有 API/Worker 镜像；只发布 loopback API 端口，强制 production/OIDC、非 root、只读 root、移除 capabilities/no-new-privileges 及非执行 tmpfs，分开公共/API/Worker 环境文件。外部 PostgreSQL、私有加密媒体、独立删除档案、OIDC 与 HTTPS/WSS 由部署方提供；启动不自动迁移、初始化档案、创建账号或声明恢复用量已核对。API 使用真实数据库 readiness，Worker 不伪造健康端点；Compose health 不等于自动重启，强制终止仍可能保留未知用量。真实 Compose 配置与隔离容器限制探针不等于生产部署、容量、告警或恢复验收。
+另提供显式 operator 控制的 `infra/compose/runtime.yml`，分别运行既有 API/Worker 镜像；只发布 loopback API 端口，强制 production/OIDC、非 root、只读 root、移除 capabilities/no-new-privileges 及非执行 tmpfs，分开公共/API/Worker 环境文件。外部 PostgreSQL、私有加密媒体、独立删除档案、OIDC 与 HTTPS/WSS 由部署方提供；启动不自动迁移、初始化档案、创建账号或声明恢复用量已核对。API 使用真实数据库 readiness；Worker 独立运行时 `WORKER_HEALTH_PORT` 默认关闭，manifest 显式启用仅容器内 loopback 4412、无发布端口。`/health/live` 不访问 SQL；`/health` 仅在既有 schema/删除/存储启动检查完成后查询真实 `SELECT 1`，同实例并发探针合并且不缓存成败。两组探针各限 120/min，停止立即拒绝 readiness，SQL 返回后再次检查停止状态，并在关闭数据库前排空 listener。此 readiness 不代表 provider、持续存储健康、队列推进或生产验收；Compose health 不等于自动重启，强制终止仍可能保留未知用量。真实 Compose 配置与隔离容器限制探针不等于生产部署、容量、告警或恢复验收。
 
 数据库使用版本化迁移；部署前备份与演练，变更采用先兼容再切换。API/客户端版本有最小兼容窗口，不能通过强制升级打断正在录音的客户端。
 
