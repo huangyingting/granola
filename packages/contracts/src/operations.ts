@@ -2,6 +2,30 @@ import { z } from 'zod';
 import { usageTotalsSchema } from './server.js';
 
 const count = z.string().regex(/^(0|[1-9][0-9]{0,29})$/);
+export const recordingMediaVerificationSchema = z
+  .strictObject({
+    version: z.literal(1),
+    scope: z.literal('retained_verified_recording_chunks'),
+    basis: z.literal('immutable_upload_size_and_sha256'),
+    snapshot_at: z.iso.datetime({ precision: 6 }),
+    verified_chunks: count,
+    verified_bytes: count,
+  })
+  .superRefine((value, context) => {
+    if (
+      !count.safeParse(value.verified_chunks).success ||
+      !count.safeParse(value.verified_bytes).success
+    )
+      return;
+    const chunks = BigInt(value.verified_chunks);
+    const bytes = BigInt(value.verified_bytes);
+    if (bytes < chunks * 46n || bytes > chunks * 960_044n)
+      context.addIssue({
+        code: 'custom',
+        message:
+          'Verified byte totals must match bounded canonical chunk sizes.',
+      });
+  });
 const age = count.nullable();
 const outcomes = {
   succeeded: count,

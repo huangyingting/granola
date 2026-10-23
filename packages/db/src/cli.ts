@@ -8,6 +8,7 @@ import {
 import { Database, requireDatabaseUrl, withAuditContext } from './index.js';
 import { audioRetentionPolicySchema } from '@windows-ai-notes/contracts/uploads';
 import { auditQuerySchema } from '@windows-ai-notes/contracts/audit';
+import { RecordingBlobs, loadStorageConfig } from '@windows-ai-notes/storage';
 import {
   DeletionArchive,
   loadDeletionArchiveConfig,
@@ -42,7 +43,7 @@ async function main() {
   try {
     if (positionals.length !== 1)
       throw new Error(
-        'Choose migrate, provision, usage-limits, audio-retention, operations, task-outcomes, audit, deletion-init, deletion-recover or deletion-usage-reviewed.',
+        'Choose migrate, provision, usage-limits, audio-retention, audio-verify, operations, task-outcomes, audit, deletion-init, deletion-recover or deletion-usage-reviewed.',
       );
     if (values['by-kind'] && positionals[0] !== 'task-outcomes')
       throw new ServiceError(
@@ -94,6 +95,33 @@ async function main() {
       console.log(
         'Usage reconciliation attested and independent recovery reverified.',
       );
+    } else if (positionals[0] === 'audio-verify') {
+      if (tokens.some((token) => token.kind === 'option'))
+        throw new ServiceError(
+          'invalid_audio_verification',
+          'Recording media verification is deployment-wide and does not accept options.',
+          400,
+        );
+      const config = loadStorageConfig();
+      if (!config)
+        throw new ServiceError(
+          'recording_storage_required',
+          'Configure private recording storage before verifying restored media.',
+          400,
+        );
+      const storage = new RecordingBlobs(config);
+      try {
+        console.log(
+          JSON.stringify(
+            await database.verifyRecordingMedia(
+              storage,
+              AbortSignal.timeout(300_000),
+            ),
+          ),
+        );
+      } finally {
+        storage.close();
+      }
     } else if (positionals[0] === 'operations') {
       if (tokens.some((token) => token.kind === 'option'))
         throw new ServiceError(
@@ -202,7 +230,7 @@ async function main() {
       );
     } else
       throw new Error(
-        'Choose migrate, provision, usage-limits, audio-retention, operations, task-outcomes, audit, deletion-init, deletion-recover or deletion-usage-reviewed.',
+        'Choose migrate, provision, usage-limits, audio-retention, audio-verify, operations, task-outcomes, audit, deletion-init, deletion-recover or deletion-usage-reviewed.',
       );
   } finally {
     try {

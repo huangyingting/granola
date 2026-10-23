@@ -23,6 +23,7 @@
     "user:provision": "node --env-file-if-exists=.env packages/db/dist/cli.js provision",
     "usage:limits": "node --env-file-if-exists=.env packages/db/dist/cli.js usage-limits",
     "audio:retention": "node --env-file-if-exists=.env packages/db/dist/cli.js audio-retention",
+    "audio:verify": "node --env-file-if-exists=.env packages/db/dist/cli.js audio-verify",
     "operations": "node --env-file-if-exists=.env packages/db/dist/cli.js operations",
     "task:outcomes": "node --env-file-if-exists=.env packages/db/dist/cli.js task-outcomes",
     "audit:events": "node --env-file-if-exists=.env packages/db/dist/cli.js audit",

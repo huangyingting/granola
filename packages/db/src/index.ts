@@ -38,6 +38,10 @@ import {
   taskOutcomeKindsSnapshot,
 } from './operations.js';
 import { AuditStore } from './audit.js';
+import {
+  verifyRecordingMedia,
+  type RecordingMediaReader,
+} from './media-verification.js';
 import { auditTransactionContext } from './audit-context.js';
 import { isDatabaseUnavailable } from './connection-errors.js';
 import {
@@ -250,6 +254,12 @@ export class Database {
   }
   async taskOutcomeKinds() {
     return taskOutcomeKindsSnapshot(this);
+  }
+  async verifyRecordingMedia(
+    storage: RecordingMediaReader,
+    signal: AbortSignal,
+  ) {
+    return verifyRecordingMedia(this, storage, signal);
   }
   async assertSchemaReady(): Promise<void> {
     const applied = await this.pool.query<{ version: number }>(

@@ -1,8 +1,53 @@
 import { describe, expect, it } from 'vitest';
 import {
+  recordingMediaVerificationSchema,
   taskOutcomesSnapshotSchema,
   taskOutcomeKindsSnapshotSchema,
 } from './operations.js';
+
+describe('deployment recording-media verification contract', () => {
+  const verified = {
+    version: 1,
+    scope: 'retained_verified_recording_chunks',
+    basis: 'immutable_upload_size_and_sha256',
+    snapshot_at: '2026-06-20T12:00:00.123456Z',
+    verified_chunks: '1',
+    verified_bytes: '46',
+  };
+  it('preserves exact totals and distinguishes an empty retained inventory', () => {
+    const chunks = 9_007_199_254_740_993n;
+    for (const [verified_chunks, verified_bytes] of [
+      ['0', '0'],
+      ['1', '46'],
+      [chunks.toString(), (chunks * 46n).toString()],
+    ]) {
+      const value = { ...verified, verified_chunks, verified_bytes };
+      expect(recordingMediaVerificationSchema.parse(value)).toEqual(value);
+    }
+  });
+  it.each([
+    { verified_chunks: '0', verified_bytes: '46' },
+    { verified_bytes: '45' },
+    { verified_bytes: '960045' },
+    { verified_chunks: '01' },
+    { verified_chunks: '-1' },
+    { verified_bytes: '1.2' },
+    { verified_chunks: 1 },
+    { snapshot_at: '2026-06-20T12:00:00.123Z' },
+    { document_id: 'private' },
+    { object_key: 'private' },
+    { sha256: 'a'.repeat(64) },
+    { production_accepted: true },
+  ])(
+    'rejects malformed, impossible or identifying report fields %j',
+    (change) => {
+      expect(
+        recordingMediaVerificationSchema.safeParse({ ...verified, ...change })
+          .success,
+      ).toBe(false);
+    },
+  );
+});
 
 const empty = {
   succeeded: '0',

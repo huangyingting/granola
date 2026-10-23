@@ -1421,6 +1421,9 @@ Do not resume service before this completes. Every restore must use this explici
 procedure even if the archive has no newer deletion intents: database rollback
 alone cannot prove that newer provider charges are absent. Normal startup also
 quarantines newly discovered unapplied archival intent until usage is reviewed.
+With writers still stopped, run `pnpm audio:verify` against the restored private
+media before exposing services; this additional integrity check never clears
+recovery or usage holds.
 Deployment access/TLS, approved reconciliation evidence and full operational restore
 drills are production release gates; the application remains a developer preview.
 
@@ -1739,6 +1742,45 @@ and physical power loss are not simulated. No titles, notes,
 resource IDs, database credentials, tokens or raw URLs enter the report;
 `production_accepted` stays false. Production load/restore drills, approved SLOs
 and real alert routing/delivery remain release gates.
+
+### Retained recording-media verification
+
+After applying migrations and completing independent deletion replay and
+authoritative usage review, keep **all API/Worker writers stopped** and run:
+
+```sh
+pnpm build
+pnpm audio:verify
+```
+
+The deployment-only command uses the configured private, unversioned recording
+bucket. It takes one read-only repeatable-read database snapshot, scans metadata
+in keyset pages of at most 128 chunks, and reads one bounded object at a time.
+Each eligible verified chunk must retain a valid immutable descriptor binding,
+matching recording/track/sample/object identities, exact byte length and SHA-256.
+Returned audio buffers are cleared after verification, including errors and
+cancellation. The CLI applies a five-minute cancellation signal and each object
+read also has a fifteen-second deadline; database queries and cleanup retain
+their existing bounds. It accepts no filters or recovery options.
+
+Successful version-1 JSON contains only the fixed scope/basis, database snapshot
+timestamp and exact decimal `verified_chunks`/`verified_bytes` totals. Missing,
+truncated, oversized or changed objects, inconsistent metadata, storage/database
+failures and known recovery/usage quarantine fail explicitly with no successful
+report. No resource IDs, hashes, object keys, meeting text or storage URLs enter
+the report.
+
+The scope is **retained verified chunks at the database snapshot**, not every
+recording or backup object. Pending uploads and expired, deleted or
+permission-revoked recordings are not fetched or claimed verified; zero counts
+can legitimately mean no eligible chunks. It does not check orphan/staging
+objects, recording completeness, audio quality, independent archive history or
+provider billing, and does not detect undeclared database rollback. It neither
+enforces stopped writers nor takes an atomic database/object-store snapshot;
+concurrent storage changes invalidate a restore-acceptance interpretation.
+It makes no writes, provider requests, replay, repair or quarantine clearance.
+Production backup/restore authorization, immutability, encryption, RPO/RTO and
+real deployment evidence remain separate release gates.
 
 ### Durable task-outcome observations
 
