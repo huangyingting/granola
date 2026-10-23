@@ -509,6 +509,20 @@ does not itself validate schema compatibility. Main-side worker authentication,
 first-start admission, durable healthy resolution and coordinator wiring are
 still required before installation/restart controls can be enabled.
 
+The native server-lease primitive now reads the actual Windows server PID from
+an already connected pipe and opens that process's kernel handle once, before
+checking its SID, session, image and creation identity. It must be the live
+creator of the exact retained restarted Main; both handles stay live across the
+creator snapshot. Production composition additionally requires `AudioHost.exe`
+in the fixed private worker root, matching installed-session context, and the
+original version's pinned, signed complete runtime. The connected pipe, both
+process leases and immutable runtime locks are retained together; disposal never
+terminates either process. A trusted Microsoft test server can exercise OS
+identity but cannot gain first-party worker authorization. This is an internal
+retained proof, not a diagnostic authorization receipt, a Main-side bridge or a
+completed cross-channel challenge protocol. It does not transfer startup
+admission, clear recovery fences or enable installation/restart.
+
 Activation now requires the runtime's physical parent to be the fixed private
 worker root, so recovery cannot miss an installer launched from an arbitrary
 diagnostic staging directory. `--stage-update-runtime` still supports copy/

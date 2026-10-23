@@ -548,6 +548,8 @@ request ID 串联 API、job、worker 和 provider request，生产 trace 默认�
 
 更新启用的签名候选已增加完整原生运行时来源绑定：official builder 的 `afterSign` 在依赖签名结束后，将有界、严格的版本/相对路径/长度/SHA-256 清单写入 `AudioHost.exe` 的 Win32 resource，再重新签名该 exe 并核对完整 payload；exe 本身由精确 pin 的可信、带时间戳 Authenticode 签名保护，不能用 unsigned sidecar/hash 自称授权。清单覆盖除 exe 本身以外的全部 runtime 文件，包括依赖与配置，拒绝未知/缺失/同长篡改、路径别名、重复/越界内容，验证期间保留文件和祖先目录锁。真正 installer worker 在准备安装器前必须验证原始版本的此签名 payload；state/outcome 两个 mutable 元数据不进入代码 inventory，但仍须独立完成严格恢复校验，绝不构成签名来源。候选晋升前使用已独立验签的打包 helper 再核对全量 runtime，成功才允许生成 receipt/feed 并记录 `runtime_provenance_verified=true`。实际 unsigned packaged 探针只修改临时完整拷贝，验证 exe resource 写入后仍能执行、未签名清单仍拒绝且原 bundle 不变；这不是第一方签名正例，也不授予首次数据库准入或恢复清理。Main 对真实 server/creator 的认证、准入转移和新鲜健康持久授权仍待组合，安装/重启保持禁用。
 
+已增加内部原生 restart-server 租约原语：从已连接命名管道读取真实 Windows server PID，在检查 SID、会话、image 和创建身份之前仅打开一次该进程内核句柄；server 必须是所持新 Main 的真实、仍存活创建者，PID snapshot 前后同时核对两个精确句柄的存活状态。生产组合还要求真实 `AudioHost.exe` 位于固定私有 worker 根下，严格 session/state/outcome 与目标版本一致，并保留原版本完整 runtime 的第一方 pin 签名来源及不可变文件/祖先目录锁。成功后将连接、Main/server 进程租约和签名 runtime 一起持有；释放不终止任何进程，失败不消耗调用方的 Main/连接。真实 Windows 合成 server/child 覆盖错误创建者、自身/兄弟进程、退出、断线和释放；受信 Microsoft 样机也不能冒充第一方 worker。此原语尚未形成 Main bridge 或双通道新鲜挑战绑定，不转移数据库准入、不清除恢复 fence、不开放安装或重启；首次启动组合和真实签名正向验收仍待完成。
+
 ## 12. 建议代码组织
 
 以下是未来建项布局，不是已经存在的目录：

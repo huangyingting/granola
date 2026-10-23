@@ -45,7 +45,7 @@ public sealed class UpdateParentLease : IDisposable
             return UpdateParentResult.Rejected("update_parent_platform");
         try
         {
-            if (ParentPid() != expectedPid)
+            if (ParentPid(Environment.ProcessId) != expectedPid)
                 return UpdateParentResult.Rejected("update_parent_mismatch");
             var result = OpenProcess(expectedPid, executable, out lease);
             using var current = Process.GetCurrentProcess();
@@ -70,6 +70,20 @@ public sealed class UpdateParentLease : IDisposable
         lease = null;
         if (!ValidArguments(pid, executable))
             return UpdateParentResult.Rejected("update_parent_arguments");
+        return OpenProcessCore(pid, executable, out lease);
+    }
+
+    internal static UpdateParentResult OpenObservedProcess(int pid, out UpdateParentLease? lease)
+    {
+        lease = null;
+        if (pid <= 0) return UpdateParentResult.Rejected("update_parent_arguments");
+        return OpenProcessCore(pid, null, out lease);
+    }
+
+    private static UpdateParentResult OpenProcessCore(int pid, string? executable, out UpdateParentLease? lease)
+    {
+        lease = null;
+        if (!OperatingSystem.IsWindows()) return UpdateParentResult.Rejected("update_parent_platform");
         Process? candidate = null;
         try
         {
@@ -97,13 +111,20 @@ public sealed class UpdateParentLease : IDisposable
             if (!QueryFullProcessImageName(handle, 0, image, ref size))
                 throw new Win32Exception(Marshal.GetLastPInvokeError());
             var actual = image.ToString();
-            UpdateInstallationVerifier.RequireRegularPath(actual, directory: false);
-            UpdateInstallationVerifier.RequireRegularPath(executable, directory: false);
-            if (!UpdatePathLock.SameFile(actual, executable))
+            if (!ValidArguments(pid, actual))
                 return UpdateParentResult.Rejected("update_parent_mismatch");
+            UpdateInstallationVerifier.RequireRegularPath(actual, directory: false);
+            if (executable is not null)
+            {
+                UpdateInstallationVerifier.RequireRegularPath(executable, directory: false);
+                if (!UpdatePathLock.SameFile(actual, executable))
+                    return UpdateParentResult.Rejected("update_parent_mismatch");
+            }
             var parent = new UpdateParentIdentity(pid,
                 candidate.StartTime.ToUniversalTime().ToFileTimeUtc().ToString(CultureInfo.InvariantCulture));
-            lease = new(candidate, parent, executable);
+            if (candidate.HasExited)
+                return UpdateParentResult.Rejected("update_parent_missing");
+            lease = new(candidate, parent, executable ?? actual);
             candidate = null;
             return new(1, true, "update_parent_matched", parent);
         }
@@ -120,6 +141,17 @@ public sealed class UpdateParentLease : IDisposable
         return process.WaitForExitAsync(token);
     }
 
+    internal bool IsCreatorOf(UpdateParentLease child)
+    {
+        ObjectDisposedException.ThrowIf(IsDisposed, this);
+        ObjectDisposedException.ThrowIf(child.IsDisposed, child);
+        if (HasExited || child.HasExited || Identity.Pid == child.Identity.Pid) return false;
+        var matches = process.StartTime.ToUniversalTime() <= child.process.StartTime.ToUniversalTime() &&
+            ParentPid(child.Identity.Pid) == Identity.Pid;
+        // Both cached kernel handles must still be live after the PID-based snapshot.
+        return matches && !HasExited && !child.HasExited;
+    }
+
     public void Dispose()
     {
         if (IsDisposed) return;
@@ -133,7 +165,7 @@ public sealed class UpdateParentLease : IDisposable
     private static bool Unavailable(Exception error) => error is IOException or UnauthorizedAccessException or
         Win32Exception or ArgumentException or InvalidOperationException or System.Security.SecurityException;
 
-    private static int ParentPid()
+    private static int ParentPid(int pid)
     {
         using var snapshot = CreateToolhelp32Snapshot(2, 0);
         var entry = new ProcessEntry { Size = (uint)Marshal.SizeOf<ProcessEntry>(), Executable = "" };
@@ -141,7 +173,7 @@ public sealed class UpdateParentLease : IDisposable
             throw new Win32Exception(Marshal.GetLastPInvokeError());
         do
         {
-            if (entry.Pid == (uint)Environment.ProcessId)
+            if (entry.Pid == (uint)pid)
                 return entry.ParentPid <= int.MaxValue ? (int)entry.ParentPid : 0;
         } while (Process32Next(snapshot, ref entry));
         if (Marshal.GetLastPInvokeError() != 18)
