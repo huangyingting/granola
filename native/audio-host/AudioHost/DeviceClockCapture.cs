@@ -36,6 +36,7 @@ internal sealed class DeviceClockCapture : IWaveIn
 {
     private readonly IDevicePacketReader reader;
     private readonly DevicePacketClock clock;
+    private readonly Func<long> observeTimestamp;
     private readonly ManualResetEvent stop = new(false);
     private readonly object gate = new();
     private Thread? thread;
@@ -50,21 +51,23 @@ internal sealed class DeviceClockCapture : IWaveIn
     }
 
     public DeviceClockCapture(MMDevice endpoint, string kind, CaptureClock origin)
-        : this(new WasapiPacketReader(endpoint, kind), origin.OriginTimestamp, Stopwatch.Frequency) { }
+        : this(new WasapiPacketReader(endpoint, kind), origin.OriginTimestamp, Stopwatch.Frequency, Stopwatch.GetTimestamp) { }
 
-    internal DeviceClockCapture(IDevicePacketReader reader, long originTimestamp, long counterFrequency)
+    internal DeviceClockCapture(IDevicePacketReader reader, long originTimestamp, long counterFrequency, Func<long> observeTimestamp)
     {
         this.reader = reader;
+        this.observeTimestamp = observeTimestamp;
         try
         {
+            ArgumentNullException.ThrowIfNull(observeTimestamp);
             clock = new DevicePacketClock(originTimestamp, counterFrequency, reader.WaveFormat.SampleRate);
             if (reader.WaveFormat.BlockAlign <= 0)
                 throw new AudioException("unsupported_format", "The endpoint mix format has an invalid frame size.");
         }
         catch
         {
-            reader.Dispose();
-            stop.Dispose();
+            try { reader.Dispose(); }
+            finally { stop.Dispose(); }
             throw;
         }
     }
@@ -148,7 +151,7 @@ internal sealed class DeviceClockCapture : IWaveIn
                         throw new AudioException("capture_overrun", "The endpoint supplied invalid or oversized packet data.");
                     range = clock.Map(packet.Frames, packet.DevicePosition, packet.Qpc100ns,
                         packet.Flags.HasFlag(AudioClientBufferFlags.DataDiscontinuity),
-                        packet.Flags.HasFlag(AudioClientBufferFlags.TimestampError));
+                        packet.Flags.HasFlag(AudioClientBufferFlags.TimestampError), observeTimestamp());
                     bytes = new byte[checked(packet.Frames * WaveFormat.BlockAlign)];
                     if (!packet.Flags.HasFlag(AudioClientBufferFlags.Silent))
                         Marshal.Copy(packet.Buffer, bytes, 0, bytes.Length);

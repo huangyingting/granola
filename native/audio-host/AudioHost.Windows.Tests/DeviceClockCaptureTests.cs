@@ -28,6 +28,7 @@ public sealed class DeviceClockCaptureTests
         public bool FailStart { get; init; }
         public bool FailStop { get; init; }
         public bool FailRelease { get; init; }
+        public bool FailDispose { get; init; }
         public bool HasLease => pointer != IntPtr.Zero;
         private void Call(string operation) => Calls.Enqueue((operation, Environment.CurrentManagedThreadId));
         public void Start()
@@ -76,6 +77,7 @@ public sealed class DeviceClockCaptureTests
             if (pointer != IntPtr.Zero) Marshal.FreeHGlobal(pointer);
             pointer = IntPtr.Zero;
             Disposals++;
+            if (FailDispose) throw new IOException("Synthetic disposal failure.");
         }
     }
 
@@ -85,7 +87,7 @@ public sealed class DeviceClockCaptureTests
     public async Task CopiesActualFramesAndReleasesNativeLeaseBeforeCallbackOnOneDedicatedThread(bool silent)
     {
         var reader = new Reader(new Input(Flags: silent ? AudioClientBufferFlags.Silent : AudioClientBufferFlags.DataDiscontinuity));
-        using var source = new DeviceClockCapture(reader, 3_000_000, 1_000_000);
+        using var source = Source(reader);
         var stopped = ObserveStop(source);
         byte[]? borrowed = null;
         source.DataAvailable += (_, args) =>
@@ -113,7 +115,7 @@ public sealed class DeviceClockCaptureTests
     public async Task EmptyBuffersIgnoreUnwrittenOutputsAndDoNotReleaseOrAdvanceTheClock()
     {
         var reader = new Reader(new Input(Frames: 0), new Input());
-        using var source = new DeviceClockCapture(reader, 3_000_000, 1_000_000);
+        using var source = Source(reader);
         var stopped = ObserveStop(source);
         var count = 0;
         source.DataAvailable += (_, args) =>
@@ -134,7 +136,7 @@ public sealed class DeviceClockCaptureTests
     public async Task CallbackFailureClearsUnclaimedBytesButNotExplicitlyTransferredOwnership(bool transfer)
     {
         var reader = new Reader(new Input());
-        using var source = new DeviceClockCapture(reader, 3_000_000, 1_000_000);
+        using var source = Source(reader);
         var stopped = ObserveStop(source);
         byte[]? observed = null;
         source.DataAvailable += (_, args) =>
@@ -160,10 +162,11 @@ public sealed class DeviceClockCaptureTests
     [InlineData(800, 0, 31_250_000, 4, "capture_clock_invalid")]
     [InlineData(800, -1, 31_250_000, 0, "capture_clock_invalid")]
     [InlineData(800, 0, 29_999_999, 0, "capture_clock_invalid")]
+    [InlineData(800, 0, 50_000_000, 0, "capture_clock_invalid")]
     public async Task InvalidPacketsReleaseWithoutPublishingOrRestarting(int frames, long position, long qpc, int flags, string code)
     {
         var reader = new Reader(new Input(frames, position, qpc, (AudioClientBufferFlags)flags));
-        using var source = new DeviceClockCapture(reader, 3_000_000, 1_000_000);
+        using var source = Source(reader);
         var stopped = ObserveStop(source);
         var callbacks = 0;
         source.DataAvailable += (_, _) => callbacks++;
@@ -180,7 +183,7 @@ public sealed class DeviceClockCaptureTests
     {
         var reader = new Reader(new Input(), new Input(Position: 800, Qpc: 31_750_000,
             Flags: AudioClientBufferFlags.DataDiscontinuity));
-        using var source = new DeviceClockCapture(reader, 3_000_000, 1_000_000);
+        using var source = Source(reader);
         var stopped = ObserveStop(source);
         var callbacks = 0;
         source.DataAvailable += (_, _) => callbacks++;
@@ -190,6 +193,95 @@ public sealed class DeviceClockCaptureTests
         Assert.Equal(1, callbacks);
         Assert.Equal(2, reader.Releases);
         Assert.Equal(1, reader.Disposals);
+    }
+
+    [Theory]
+    [InlineData(32_250_000)]
+    [InlineData(31_500_000)]
+    [InlineData(601_000_000)]
+    public async Task UnflaggedTimestampGapsAndOverlapReleaseTheLeaseWithoutPublishingUnaccountedMedia(long qpc)
+    {
+        var reader = new Reader(new Input(), new Input(Position: 800, Qpc: qpc));
+        var observations = 0;
+        using var source = Source(reader, () =>
+        {
+            Assert.True(reader.HasLease);
+            observations++;
+            return 4_000_000;
+        });
+        var stopped = ObserveStop(source);
+        var callbacks = 0;
+        source.DataAvailable += (_, _) => callbacks++;
+        source.StartRecording();
+        Assert.Equal("capture_discontinuity",
+            Assert.IsType<AudioException>(await stopped.WaitAsync(TimeSpan.FromSeconds(5))).Code);
+        Assert.Equal(1, callbacks);
+        Assert.Equal(2, observations);
+        Assert.Equal(2, reader.Releases);
+        Assert.Equal(1, reader.Disposals);
+        Assert.All(reader.Calls, call => Assert.Equal(reader.Calls.First().Thread, call.Thread));
+    }
+
+    [Fact]
+    public async Task EachNonemptyPacketRequiresANewObservationOnTheLeaseThread()
+    {
+        var reader = new Reader(new Input(), new Input(Position: 800, Qpc: 31_750_000));
+        var observations = 0;
+        using var source = Source(reader, () =>
+        {
+            Assert.True(reader.HasLease);
+            return ++observations == 1 ? 4_000_000 : 3_999_999;
+        });
+        var stopped = ObserveStop(source);
+        var callbacks = 0;
+        source.DataAvailable += (_, _) => callbacks++;
+        source.StartRecording();
+        Assert.Equal("capture_clock_invalid",
+            Assert.IsType<AudioException>(await stopped.WaitAsync(TimeSpan.FromSeconds(5))).Code);
+        Assert.Equal(2, observations);
+        Assert.Equal(1, callbacks);
+        Assert.Equal(2, reader.Releases);
+    }
+
+    [Theory]
+    [InlineData(64)]
+    [InlineData(65)]
+    public async Task StopTailDrainIsBoundedAndNeverDropsAnExcessPacketAsSuccessfulCapture(int packetCount)
+    {
+        var reader = new Reader(Enumerable.Range(0, packetCount)
+            .Select(index => new Input(Position: index * 800, Qpc: 31_250_000 + index * 500_000)).ToArray());
+        using var source = Source(reader, () => 7_000_000);
+        var stopped = ObserveStop(source);
+        var buffers = new List<byte[]>();
+        source.DataAvailable += (_, args) =>
+        {
+            buffers.Add(args.Buffer);
+            source.StopRecording();
+        };
+        source.StartRecording();
+        var error = await stopped.WaitAsync(TimeSpan.FromSeconds(5));
+        if (packetCount == 64) Assert.Null(error);
+        else Assert.Equal("capture_overrun", Assert.IsType<AudioException>(error).Code);
+        Assert.Equal(64, buffers.Count);
+        Assert.Equal(64, reader.Releases);
+        Assert.Equal(1, reader.Disposals);
+        foreach (var bytes in buffers) Assert.Equal(-1, bytes.AsSpan().IndexOfAnyExcept((byte)0));
+        Assert.Equal(1, reader.Calls.Count(call => call.Operation == "start"));
+        Assert.Equal(1, reader.Calls.Count(call => call.Operation == "stop"));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void InvalidClockConstructionDisposesTheReaderAndSurfacesAnyCleanupFailure(bool failDispose)
+    {
+        var reader = new Reader { FailDispose = failDispose };
+        if (failDispose)
+            Assert.Throws<IOException>(() => new DeviceClockCapture(reader, -1, 1_000_000, () => 4_000_000));
+        else
+            Assert.Throws<ArgumentOutOfRangeException>(() => new DeviceClockCapture(reader, -1, 1_000_000, () => 4_000_000));
+        Assert.Equal(1, reader.Disposals);
+        Assert.DoesNotContain(reader.Calls, call => call.Operation == "start");
     }
 
     [Theory]
@@ -204,7 +296,7 @@ public sealed class DeviceClockCaptureTests
             FailStop = phase == "stop",
             FailRelease = phase == "release"
         };
-        using var source = new DeviceClockCapture(reader, 3_000_000, 1_000_000);
+        using var source = Source(reader);
         var stopped = ObserveStop(source);
         var callbacks = 0;
         source.DataAvailable += (_, _) => { callbacks++; source.StopRecording(); };
@@ -220,7 +312,7 @@ public sealed class DeviceClockCaptureTests
     public void NeverStartedSourceCanBeDisposedWithoutStartingOrLeakingTheReader()
     {
         var reader = new Reader();
-        var source = new DeviceClockCapture(reader, 3_000_000, 1_000_000);
+        var source = Source(reader);
         source.Dispose();
         source.Dispose();
         source.StopRecording();
@@ -247,7 +339,7 @@ public sealed class DeviceClockCaptureTests
             writer.BeginEpoch(epoch);
             using var preview = new PcmLiveBuffer(id, epoch, [track.TrackId]);
             var reader = new Reader(new Input());
-            var source = new DeviceClockCapture(reader, 3_000_000, 1_000_000);
+            var source = Source(reader);
             byte[]? transferred = null;
             source.DataAvailable += (_, args) => transferred = args.Buffer;
             var failure = new TaskCompletionSource<AudioException>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -306,6 +398,64 @@ public sealed class DeviceClockCaptureTests
         return stopped.Task;
     }
 
+    [Fact]
+    public async Task ActualEncryptedArchiveAndLiveFramesPreserveOnlyTheGoodPrefixAfterAnUnflaggedGap()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "windows-ai-notes-device-clock", Guid.NewGuid().ToString("D"));
+        var protector = new TestKeyProtector();
+        try
+        {
+            var id = Guid.NewGuid();
+            var spec = new TrackSpec(Guid.NewGuid(), "microphone", "endpoint", "explicit", "synthetic");
+            var epoch = Guid.NewGuid();
+            var store = new RecordingStore(root, id, [spec], protector);
+            store.Transition("recording", "capture.started", 0, epoch, "wasapi_qpc_v1");
+            var writer = new PcmChunkWriter(store, spec.TrackId);
+            writer.BeginEpoch(epoch);
+            using var preview = new PcmLiveBuffer(id, epoch, [spec.TrackId]);
+            var reader = new Reader(new Input(), new Input(Position: 800, Qpc: 32_250_000));
+            var source = Source(reader);
+            byte[]? transferred = null;
+            source.DataAvailable += (_, args) => transferred = args.Buffer;
+            var failure = new TaskCompletionSource<AudioException>(TaskCreationOptions.RunContinuationsAsynchronously);
+            using var endpoint = new MemoryStream();
+            using var capture = new CaptureTrack(endpoint, source, spec.TrackId, writer, new CaptureClock(), failure,
+                (start, bytes, startMs, endMs) => preview.Append(spec.TrackId, epoch, start, bytes, startMs, endMs));
+            capture.Start();
+            var error = await failure.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Equal("capture_discontinuity", error.Code);
+            await capture.StopAsync();
+            store.Transition("failed", "capture.failed", 300, code: error.Code);
+            var frame = Assert.Single(preview.Read(300).Frames);
+            Assert.Equal(800, frame.SampleCount);
+            Assert.Equal(125, frame.ClockStartMs);
+            Assert.Equal(175, frame.ClockEndMs);
+            var path = Assert.Single(Directory.GetFiles(store.DirectoryPath, "*.chunk"));
+            var (header, pcm) = EncryptedFile.Read(path, id, "audio_chunk", protector);
+            Assert.Equal(800, header.Chunk!.SampleCount);
+            Assert.Equal(125, header.Chunk.ClockStartMs);
+            Assert.Equal(175, header.Chunk.ClockEndMs);
+            Assert.All(pcm, value => Assert.Equal(0x31, value));
+            CryptographicOperations.ZeroMemory(pcm);
+            var manifest = new RecordingArchive(root, protector).Describe(id);
+            Assert.Equal("failed", manifest.State);
+            Assert.Equal(800, Assert.Single(manifest.Tracks).SavedSamples);
+            Assert.Equal("capture_discontinuity", manifest.Events.Last().Code);
+            var report = RecordingStore.Inspect(root, id, protector);
+            Assert.Equal(1, report.VerifiedChunks);
+            Assert.Equal(800, report.TotalSamples);
+            Assert.NotEqual("sealed", report.State);
+            Assert.NotNull(transferred);
+            Assert.Equal(-1, transferred.AsSpan().IndexOfAnyExcept((byte)0));
+            Assert.Equal(2, reader.Releases);
+            Assert.Equal(1, reader.Disposals);
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, true);
+        }
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -334,7 +484,7 @@ public sealed class DeviceClockCaptureTests
                 var selected = index;
                 var writer = new PcmChunkWriter(store, specs[index].TrackId);
                 writer.BeginEpoch(Guid.NewGuid());
-                var source = new DeviceClockCapture(readers[index], 3_000_000, 1_000_000);
+                var source = Source(readers[index]);
                 var failure = new TaskCompletionSource<AudioException>(TaskCreationOptions.RunContinuationsAsynchronously);
                 captures.Add(new CaptureTrack(endpoints[index], source, specs[index].TrackId, writer, new CaptureClock(), failure,
                     (_, _, _, _) =>
@@ -381,4 +531,7 @@ public sealed class DeviceClockCaptureTests
             if (fail) throw new AudioException("stop_failed", "Synthetic endpoint disposal failure.");
         }
     }
+
+    private static DeviceClockCapture Source(Reader reader, Func<long>? observe = null) =>
+        new(reader, 3_000_000, 1_000_000, observe ?? (() => 4_000_000));
 }

@@ -2778,6 +2778,19 @@ including after pause/resume. Deterministic packet, queue, encrypted-writer and
 live-buffer cases are not real microphone/loopback, sleep/Bluetooth or one-hour
 drift acceptance; the path is not enabled by default.
 
+The experimental clock also checks each QPC interval against the preceding
+packet's actual frame duration. Its conservative rejection budget is **one source
+frame plus 100 ns of QPC quantization**, evaluated with integer arithmetic; this
+is not an SDK accuracy guarantee or physical drift acceptance. An unflagged gap
+or overlap outside that budget fails even when device positions are contiguous.
+Every nonempty packet requires a fresh monotonic observation, and its nominal
+end cannot exceed that observation by more than the same budget. Timestamps are
+not clamped, retimed or repaired with silence. Valid queued audio can still be
+encrypted and inspected as a failed recording's prefix; the uncertain interval
+is never published as media or marked sealed. Devices that violate the guard
+remain unsupported by this opt-in path until physical investigation, rather than
+silently receiving a looser tolerance.
+
 The CLI prints the recording UUID and typed JSON events. Status reports
 `saved_samples`, not merely received audio: short tails are not committed until a
 pause or clean stop. Ctrl+C asks the host to stop and seal. EOF also stops capture.

@@ -365,6 +365,8 @@ sequenceDiagram
 
 原生探针另增加显式 `--capture-clock wasapi_qpc_v1`（start 请求的可选 `capture_clock`），桌面及省略 profile 的原有 callback 后端保持默认。新路径使用公开 WASAPI packet API，把首帧 QPC 的 100 ns 单位映射到双路共享的单调 recording 原点，同时验证设备帧位置；暂停后的新 epoch 重新建立位置链。首包 discontinuity 仅定义新边界，不宣称补齐此前音频；后续 discontinuity、位置缺失/重复、时钟回退及 timestamp-error 都明确失败，不自动 reset、重连、回退或造样本，只有实际 SILENT packet 的帧才生成静音。原生指针在同一专用线程完成 copy/release，释放后才移交现有有界队列与清零路径；停止尾部排空有界，等待线程退出并报告不确定关闭，不能因一路清理失败跳过另一路。加密 capture.started 的 code 标记所选 profile。确定性时间映射、实际 packet 线程/lease、失败清理、加密 writer/live buffer 用例不代替真实设备、睡眠/蓝牙及一小时 200 ms 目标验收，新路径不默认开放。
 
+该实验 profile 还把相邻 QPC 时间差与前一个 packet 的实际帧时长核对：以一个原始 source frame 加 100 ns QPC 量化误差作为保守拒绝预算，使用整数计算边界，不宣称这是 SDK 精度保证或设备漂移验收。即使设备帧位置连续，超出预算且未带标志的时间缺口/重叠也必须失败；每个非空 packet 另读取新鲜单调 observation，标称结束时间不能超过 observation 加同一预算。不 clamp、重定时或补造静音；已经合法排队的前缀仍可加密检查，但记录保持 failed 而不是 sealed，不把不确定区间写成媒体。违反 guard 的设备继续阻断实验路径，需真实调查而不是自动放宽阈值。
+
 ## 8. AI 服务端设计
 
 ### 8.1 供应商适配与模型路由
