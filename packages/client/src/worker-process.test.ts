@@ -31,18 +31,75 @@ describe.skipIf(!databaseUrl || process.platform !== 'linux')(
       return provider;
     }
     async function start(entry: 'api' | 'worker') {
-      const child = launchService(
-        scoped.href,
-        await unusedServicePort(),
-        entry,
-        {
-          durationMs: 240_000,
-          ...(entry === 'worker' ? { proxy: wire().proxy } : {}),
-        },
-      );
+      const url = new URL(scoped);
+      url.searchParams.set('application_name', `${schema}_${entry}`);
+      const child = launchService(url.href, await unusedServicePort(), entry, {
+        durationMs: 240_000,
+        ...(entry === 'worker' ? { proxy: wire().proxy } : {}),
+      });
       children.push(child);
       await child.observed(`${entry}_ready`);
       return child;
+    }
+    async function dispatched() {
+      const subject = randomUUID();
+      const actor = await database().provision(
+        'urn:windows-ai-notes:development',
+        subject,
+      );
+      const document = await database().createDocument(
+        actor.user_id,
+        {
+          workspace_id: actor.workspace_id,
+          title: 'Synthetic physical Worker recovery',
+          notes: 'Only this frozen synthetic evidence may be summarized.',
+        },
+        randomUUID(),
+      );
+      const apiProcess = await start('api');
+      const api = new ApiClient(
+        apiProcess.base,
+        async () => ({ 'x-dev-subject': subject }),
+        { allowLoopback: true },
+      );
+      const job = await api.request(
+        `/v1/documents/${document.id}/summary-runs`,
+        jobSchema,
+        {
+          method: 'POST',
+          key: randomUUID(),
+          body: { note_revision: 1, transcript_revision: 0, language: 'en' },
+        },
+      );
+      const worker = await start('worker');
+      await vi.waitFor(
+        () => {
+          expect(wire().unexpected).toBe(0);
+          expect(wire().requests).toHaveLength(1);
+        },
+        { timeout: 10_000, interval: 25 },
+      );
+      const request = wire().requests[0];
+      if (!request)
+        throw new Error('The accepted synthetic dispatch is missing.');
+      expect(request.snapshot).toMatchObject({
+        document_id: document.id,
+        note_revision: 1,
+        notes: document.notes,
+      });
+      return { actor, document, api, job, worker, request };
+    }
+    async function stopChildren() {
+      for (const child of children) {
+        if (child.result) continue;
+        expect(child.child.kill('SIGTERM')).toBe(true);
+        expect(await child.exit()).toEqual({
+          code: 0,
+          signal: null,
+          error: undefined,
+        });
+      }
+      expect(wire().unexpected).toBe(0);
     }
     beforeEach(async () => {
       if (!databaseUrl)
@@ -87,54 +144,168 @@ describe.skipIf(!databaseUrl || process.platform !== 'linux')(
           'Owned Worker recovery fixture cleanup failed.',
         );
     });
+    describe.each([false, true])(
+      'in-flight interruption with a received usage receipt = %s',
+      (received) => {
+        it.each(['cancel', 'SIGTERM', 'SIGINT'] as const)(
+          'drains %s without publishing and preserves honest accounting',
+          async (interruption) => {
+            const { actor, document, api, job, worker, request } =
+              await dispatched();
+            const control = await database().pool.connect();
+            let locked = false;
+            try {
+              if (received) {
+                await control.query('BEGIN');
+                locked = true;
+                expect(
+                  (
+                    await control.query(
+                      'SELECT owner_id FROM ai_usage_periods WHERE owner_id=$1 FOR UPDATE',
+                      [actor.user_id],
+                    )
+                  ).rowCount,
+                ).toBe(1);
+                const owner = z
+                  .object({ pid: z.number().int().positive() })
+                  .parse(
+                    (await control.query('SELECT pg_backend_pid() pid'))
+                      .rows[0],
+                  );
+                request.complete();
+                await vi.waitFor(
+                  async () =>
+                    expect(
+                      (
+                        await database().pool.query(
+                          `SELECT 1 FROM pg_stat_activity
+                           WHERE application_name=$1 AND state='active'
+                           AND wait_event_type='Lock'
+                           AND $2=ANY(pg_blocking_pids(pid))
+                           AND query LIKE '%FROM ai_usage_periods%FOR UPDATE%'`,
+                          [`${schema}_worker`, owner.pid],
+                        )
+                      ).rowCount,
+                    ).toBe(1),
+                  { timeout: 10_000, interval: 20 },
+                );
+              }
+              if (interruption === 'cancel') {
+                expect(
+                  await api.request(
+                    `/v1/jobs/${job.id}/cancel`,
+                    z.object({
+                      already_terminal: z.literal(false),
+                      job: jobSchema,
+                    }),
+                    { method: 'POST' },
+                  ),
+                ).toMatchObject({
+                  job: { state: 'cancelled', result: null },
+                });
+              } else {
+                expect(worker.child.kill(interruption)).toBe(true);
+                await worker.observed('worker_stopping');
+                if (received) expect(worker.result).toBeUndefined();
+              }
+              if (locked) {
+                await control.query('ROLLBACK');
+                locked = false;
+              }
+              if (interruption === 'cancel') {
+                await worker.observed('worker_attempt_completed');
+                expect(worker.stdout).toContain('"completion":"fenced"');
+              } else {
+                expect(await worker.exit()).toEqual({
+                  code: 0,
+                  signal: null,
+                  error: undefined,
+                });
+                expect(worker.stdout).toContain('"completion":"failed"');
+                await start('worker');
+              }
+              if (!received)
+                await vi.waitFor(() => expect(request.closed).toBe(true));
+              expect(
+                await api.request(`/v1/jobs/${job.id}`, jobSchema),
+              ).toMatchObject({
+                state: interruption === 'cancel' ? 'cancelled' : 'failed',
+                result: null,
+                ...(interruption === 'cancel'
+                  ? {}
+                  : {
+                      error: {
+                        code: 'worker_restarting',
+                        retryable: false,
+                      },
+                    }),
+              });
+              expect(
+                await database().usage.snapshot(actor.user_id),
+              ).toMatchObject({
+                settled_requests: received ? '1' : '0',
+                uncertain_requests: received ? '0' : '1',
+                settled: {
+                  input_tokens: received ? '5' : '0',
+                  output_tokens: received ? '4' : '0',
+                  audio_ms: '0',
+                },
+                uncertain: {
+                  input_tokens: received ? '0' : '64000',
+                  output_tokens: received ? '0' : '4096',
+                  audio_ms: '0',
+                },
+              });
+              expect(
+                await api.request(
+                  `/v1/jobs/${job.id}/summary-progress`,
+                  summaryProgressSchema,
+                ),
+              ).toMatchObject({
+                completed_stages: 0,
+                provider_requests: 1,
+                uncertain_requests: received ? 0 : 1,
+                resume_available: interruption !== 'cancel',
+              });
+              expect(
+                await database().document(actor.user_id, document.id),
+              ).toMatchObject({
+                notes: document.notes,
+                revision: 1,
+              });
+              expect(
+                (
+                  await database().pool.query(
+                    "SELECT count(*)::text count FROM job_events WHERE job_id=$1 AND event_type='output.completed'",
+                    [job.id],
+                  )
+                ).rows,
+              ).toEqual([{ count: '0' }]);
+              await stopChildren();
+              expect(wire().requests).toHaveLength(1);
+            } finally {
+              try {
+                if (locked) await control.query('ROLLBACK');
+              } finally {
+                control.release();
+              }
+            }
+          },
+          30_000,
+        );
+      },
+    );
     it.each(['SIGKILL', 'SIGSTOP'] as const)(
       'retains uncertain paid dispatch after %s and requires consent before one replacement result',
       async (signal) => {
-        const subject = randomUUID();
-        const actor = await database().provision(
-          'urn:windows-ai-notes:development',
-          subject,
-        );
-        const document = await database().createDocument(
-          actor.user_id,
-          {
-            workspace_id: actor.workspace_id,
-            title: 'Synthetic physical Worker recovery',
-            notes: 'Only this frozen synthetic evidence may be summarized.',
-          },
-          randomUUID(),
-        );
-        const apiProcess = await start('api');
-        const api = new ApiClient(
-          apiProcess.base,
-          async () => ({ 'x-dev-subject': subject }),
-          { allowLoopback: true },
-        );
-        const job = await api.request(
-          `/v1/documents/${document.id}/summary-runs`,
-          jobSchema,
-          {
-            method: 'POST',
-            key: randomUUID(),
-            body: { note_revision: 1, transcript_revision: 0, language: 'en' },
-          },
-        );
-        const original = await start('worker');
-        await vi.waitFor(
-          () => {
-            expect(wire().unexpected).toBe(0);
-            expect(wire().requests).toHaveLength(1);
-          },
-          { timeout: 10_000, interval: 25 },
-        );
-        const first = wire().requests[0];
-        if (!first)
-          throw new Error('The accepted synthetic dispatch is missing.');
-        expect(first.snapshot).toMatchObject({
-          document_id: document.id,
-          note_revision: 1,
-          notes: document.notes,
-        });
+        const {
+          actor,
+          document,
+          api,
+          job,
+          worker: original,
+          request: first,
+        } = await dispatched();
         const lease = z
           .object({
             lease_token: z.number().int().positive(),
@@ -308,15 +479,7 @@ describe.skipIf(!databaseUrl || process.platform !== 'linux')(
             )
           ).rows,
         ).toEqual([{ count: '1' }]);
-        for (const child of children) {
-          if (child.result) continue;
-          expect(child.child.kill('SIGTERM')).toBe(true);
-          expect(await child.exit()).toEqual({
-            code: 0,
-            signal: null,
-            error: undefined,
-          });
-        }
+        await stopChildren();
         expect(wire().requests).toHaveLength(2);
         expect(wire().unexpected).toBe(0);
       },

@@ -1531,6 +1531,15 @@ the stopped Worker must yield an actual `fenced` terminal observation without
 changing the replacement result. Because the provider deadline is 90 seconds,
 this stale attempt is **not** evidence of fencing a late successful model response.
 
+Additional actual-process cases cancel through the authenticated API or send
+`SIGTERM`/`SIGINT`, both before a receipt and while a valid synthetic receipt awaits
+settlement. A real usage-period row lock and the owned Worker's PostgreSQL lock wait
+prove the latter timing without sleeps or replacing the Azure adapter. Cancellation must retain
+the late known receipt but never publish output; graceful shutdown must wait for
+settlement before physical zero-code closure. Before a receipt, uncertainty remains
+held. A new Worker must not automatically retry the interrupted summary, and manual
+notes remain unchanged in every case.
+
 The fixture uses an ephemeral test TLS certificate trusted only by the owned Worker
 children and a loopback CONNECT proxy that cannot relay outside the fixture.
 Azure origin checks and TLS verification remain enabled; no real Azure credentials
@@ -1540,9 +1549,9 @@ PostgreSQL crash/power-loss recovery, production TLS/OIDC deployment or capacity
 
 After `pnpm build`, run
 `pnpm test packages/client/src/worker-process.test.ts` with an isolated literal-loopback
-`TEST_DATABASE_URL` and OpenSSL available. Normal Linux server CI includes both cases;
-each intentionally waits for the real lease clock. Cleanup awaits physical child
-closure before dropping its schema and deleting the private TLS directory.
+`TEST_DATABASE_URL` and OpenSSL available. Normal Linux server CI includes these cases;
+the kill/pause cases intentionally wait for the real lease clock. Cleanup awaits
+physical child closure before dropping its schema and deleting the private TLS directory.
 
 ### Controlled sync and overload acceptance
 
