@@ -110,6 +110,7 @@ export class OidcClient {
   private keys: {
     url: string;
     verify: ReturnType<typeof createLocalJWKSet>;
+    until: number;
   } | null = null;
   constructor(
     configuration: OidcClientConfiguration,
@@ -207,7 +208,12 @@ export class OidcClient {
   }
   private async verifier(signal: AbortSignal, force = false) {
     const metadata = await this.metadata(signal);
-    if (force || !this.keys || this.keys.url !== metadata.jwks_uri) {
+    if (
+      force ||
+      !this.keys ||
+      this.keys.url !== metadata.jwks_uri ||
+      this.keys.until <= Date.now()
+    ) {
       const jwks = await responseJson(
         await this.fetch(
           endpoint(metadata.jwks_uri, this.allowLoopback),
@@ -229,7 +235,11 @@ export class OidcClient {
           'invalid_oidc_configuration',
           'The identity service did not return a public verification-key set.',
         );
-      this.keys = { url: metadata.jwks_uri, verify: createLocalJWKSet(jwks) };
+      this.keys = {
+        url: metadata.jwks_uri,
+        verify: createLocalJWKSet(jwks),
+        until: Date.now() + 600_000,
+      };
     }
     return this.keys.verify;
   }
@@ -522,6 +532,7 @@ export class OidcClient {
     beforeRequest: () => void,
   ): Promise<TokenSet> {
     const metadata = await this.metadata(signal);
+    await this.verifier(signal);
     signal.throwIfAborted();
     beforeRequest();
     const response = await responseJson(

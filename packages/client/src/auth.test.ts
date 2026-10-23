@@ -27,6 +27,7 @@ describe('native OIDC code/PKCE and encrypted rotating credentials', () => {
   });
   afterEach(async () => {
     vi.restoreAllMocks();
+    vi.useRealTimers();
     session?.cancel();
     await fixture?.close();
     local?.close();
@@ -208,6 +209,95 @@ describe('native OIDC code/PKCE and encrypted rotating credentials', () => {
       code: 'reauthentication_required',
     });
     expect(fixture.state.refreshCalls).toBe(1);
+  });
+  it('reuses fresh verification keys but expires their original ten-minute lease despite successful token refreshes', async () => {
+    const now = Date.now();
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(now);
+    await session.signIn(fixture.browser);
+    expect(fixture.state.jwksCalls).toBe(1);
+    vi.setSystemTime(now + 600_000 - 1);
+    await session.authorization(true);
+    expect(fixture.state.jwksCalls).toBe(1);
+    vi.setSystemTime(now + 600_000);
+    await session.authorization(true);
+    expect(fixture.state.jwksCalls).toBe(2);
+    expect(fixture.state.refreshCalls).toBe(2);
+    expect(session.summary().status).toBe('active');
+  });
+  it('rejects tokens signed by a retired key after cache expiry and never replays the consumed refresh', async () => {
+    const now = Date.now();
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(now);
+    await session.signIn(fixture.browser);
+    local.create('offline');
+    await fixture.rotate(true);
+    vi.setSystemTime(now + 600_000);
+    await expect(session.authorization(true)).rejects.toMatchObject({
+      code: 'invalid_identity_token',
+      status: 401,
+    });
+    expect(fixture.state.jwksCalls).toBeGreaterThan(1);
+    expect(fixture.state.refreshCalls).toBe(1);
+    expect(session.summary()).toEqual({
+      status: 'reauth_required',
+      subject: fixture.state.subject,
+    });
+    await expect(session.authorization()).rejects.toMatchObject({
+      code: 'reauthentication_required',
+    });
+    expect(fixture.state.refreshCalls).toBe(1);
+    expect(local.list('offline')).toHaveLength(1);
+  });
+  it('checks expired verification keys before consuming a rotating refresh and safely retries after a key-service outage', async () => {
+    const now = Date.now();
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(now);
+    await session.signIn(fixture.browser);
+    const original = await session.authorization();
+    local.create('offline');
+    vi.setSystemTime(now + 600_000);
+    fixture.state.keysRejected = true;
+    await expect(session.authorization(true)).rejects.toMatchObject({
+      code: 'identity_request_rejected',
+      status: 503,
+      retryable: true,
+    });
+    expect(fixture.state.refreshCalls).toBe(0);
+    expect(session.summary().status).toBe('active');
+    expect(await session.authorization()).toBe(original);
+    local.close();
+    local = new LocalStore(join(directory, 'notes.sqlite'), key);
+    session = new AccountSession(
+      local,
+      new OidcClient(fixture.configuration, true),
+      'https://notes.example.test',
+    );
+    expect(session.summary().status).toBe('active');
+    fixture.state.keysRejected = false;
+    await expect(session.authorization(true)).resolves.toMatch(/^Bearer /);
+    expect(fixture.state.refreshCalls).toBe(1);
+    expect(session.summary().status).toBe('active');
+    expect(local.list('offline')).toHaveLength(1);
+  });
+  it('still fences a consumed refresh when a new signing key becomes unavailable after dispatch', async () => {
+    await session.signIn(fixture.browser);
+    local.create('offline');
+    await fixture.rotate();
+    fixture.state.keysRejected = true;
+    await expect(session.authorization(true)).rejects.toMatchObject({
+      code: 'identity_request_rejected',
+      status: 503,
+      retryable: true,
+    });
+    expect(session.summary().status).toBe('reauth_required');
+    expect(fixture.state.refreshCalls).toBe(1);
+    expect(fixture.state.jwksCalls).toBe(2);
+    await expect(session.authorization(true)).rejects.toMatchObject({
+      code: 'reauthentication_required',
+    });
+    expect(fixture.state.refreshCalls).toBe(1);
+    expect(local.list('offline')).toHaveLength(1);
   });
   it('does not replace the account if a refresh produces a different subject', async () => {
     await session.signIn(fixture.browser);

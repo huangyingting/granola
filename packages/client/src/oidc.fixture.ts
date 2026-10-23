@@ -28,6 +28,8 @@ export async function oidcFixture() {
   let keys = await generateKeyPair('RS256');
   const invalidKeys = await generateKeyPair('RS256');
   let keyId = randomUUID();
+  let publishedKeys = keys;
+  let publishedKeyId = keyId;
   const codes = new Map<
     string,
     { nonce: string; challenge: string; redirect: string }
@@ -41,6 +43,7 @@ export async function oidcFixture() {
     tokenCalls: 0,
     refreshCalls: 0,
     jwksCalls: 0,
+    keysRejected: false,
     failures: [] as unknown[],
     revoked: [] as string[],
     submittedFields: [] as string[][],
@@ -130,12 +133,17 @@ export async function oidcFixture() {
     }
     if (url.pathname === '/keys') {
       state.jwksCalls++;
+      if (state.keysRejected) {
+        response.writeHead(503);
+        response.end('{"error":"temporarily_unavailable"}');
+        return;
+      }
       response.end(
         JSON.stringify({
           keys: [
             {
-              ...(await exportJWK(keys.publicKey)),
-              kid: keyId,
+              ...(await exportJWK(publishedKeys.publicKey)),
+              kid: publishedKeyId,
               alg: 'RS256',
               use: 'sig',
             },
@@ -277,9 +285,13 @@ export async function oidcFixture() {
       if (!response.ok) throw new Error('Synthetic browser sign-in failed.');
       await response.text();
     },
-    async rotate() {
-      keys = await generateKeyPair('RS256');
-      keyId = randomUUID();
+    async rotate(preserveSigner = false) {
+      publishedKeys = await generateKeyPair('RS256');
+      publishedKeyId = randomUUID();
+      if (!preserveSigner) {
+        keys = publishedKeys;
+        keyId = publishedKeyId;
+      }
     },
     async close() {
       await new Promise<void>((resolve) => {

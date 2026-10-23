@@ -219,6 +219,10 @@ and 8,000,000 UTF-8 text bytes; each API page contains at most 50 segments and
 The OIDC client core uses a system-browser code/S256 flow and a loopback-only
 callback, validates signed ID/access tokens and state/nonce/audience/scope, and
 stores rotating refresh credentials only in the encrypted main-process vault.
+Desktop verification keys expire ten minutes after retrieval; successful token
+refreshes do not extend that deadline. Expired keys are fetched before dispatching
+a rotating refresh, so a preflight key-service outage preserves untouched
+credentials. Expired keys are never used as an availability fallback.
 Refresh requests are durably fenced before sending; an uncertain rotation requires
 sign-in again rather than replaying a possibly consumed refresh token. Real
 synthetic-issuer tests cover rollover, cancellation and logout races; a production
