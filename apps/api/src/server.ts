@@ -72,6 +72,10 @@ export async function createServer(
   const shutdown = new AbortController();
   app.addHook('onReady', async () => db.assertReady(shutdown.signal));
   app.addHook('preClose', async () => shutdown.abort());
+  app.addHook('onSend', async (_request, reply, payload) => {
+    if (shutdown.signal.aborted) reply.header('Connection', 'close');
+    return payload;
+  });
   // Track upgrades before authentication so rejected requests close their raw sockets.
   const registerRealtime = await prepareRealtimeRoutes(app, db, realtime);
   app.decorateRequest('principal', null);

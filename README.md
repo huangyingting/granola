@@ -1587,9 +1587,31 @@ Diagnostics never include the exception, SQL, connection string or meeting body.
 
 Checked-out clients have connection-error handlers as well as the pool's idle-client
 handler, so a broken active transaction does not cause an uncaught process exception.
-If rollback also fails, its fixed diagnostic is recorded, the connection is discarded,
-and the original error is preserved. This does not automatically retry a transaction
-or assume that an uncertain commit was rolled back.
+Known connection failures discard the client without sending another command through
+the failed transport. Other transaction errors still attempt rollback; a rollback
+failure records a fixed diagnostic, discards the connection and preserves the
+original error. Neither path automatically retries a transaction or assumes that an
+uncertain commit was rolled back.
+
+The pool's existing five-second connection-acquisition and ten-second server statement
+timeouts are complemented by a **15-second client query-read deadline**. A server
+timeout alone cannot report failure through a stalled network connection. A pinned
+`pg` read timeout returns the same sanitized, retryable availability error, evicts the
+connection and never queues `ROLLBACK` behind an uncertain query or `COMMIT`.
+Server-reported statement cancellation remains distinct and can reuse the connection
+after a successful rollback.
+
+`packages/client/src/database-timeout.test.ts` exercises actual PostgreSQL through a
+private literal-loopback TCP proxy that drops responses without disconnecting first.
+Eight overlapping readiness probes share one bounded query while liveness remains
+available, then recover through a fresh connection. A dropped, actually committed
+`COMMIT` response must retain the encrypted frozen request and newer typing across
+SQLite reopening; explicit idempotent replay must not duplicate the document.
+Another case verifies natural zero-code API closure after `SIGTERM` while the database
+response is stalled. Responses whose headers are sent during shutdown close their
+keep-alive connection, without destroying active requests; normal responses retain
+keep-alive. These cases run in normal server CI, use real timers and no Azure calls,
+and do not substitute for production network, capacity or restore drills.
 
 An opt-in Linux test physically sends `SIGKILL` to an explicitly supplied, disposable
 PostgreSQL 16 Docker container. It requires an otherwise empty database/cluster,

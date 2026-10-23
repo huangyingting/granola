@@ -28,6 +28,7 @@ const connectionMessages = new Set([
   'timeout exceeded when trying to connect',
   'Client has encountered a connection error and is not queryable',
   'Client was closed and is not queryable',
+  'Query read timeout',
 ]);
 
 export function isDatabaseUnavailable(error: unknown): boolean {

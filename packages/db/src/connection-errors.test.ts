@@ -46,6 +46,7 @@ it.each([
   'timeout exceeded when trying to connect',
   'Client has encountered a connection error and is not queryable',
   'Client was closed and is not queryable',
+  'Query read timeout',
 ])('recognizes the pinned pg/pg-pool connection failure: %s', (message) => {
   expect(isDatabaseUnavailable(new Error(message))).toBe(true);
 });
@@ -74,6 +75,8 @@ it.each([
   Object.assign(new Error('private-configuration-error'), {
     code: 'ENOTFOUND',
   }),
+  databaseError('57014', 'Query read timeout'),
+  Object.assign(new Error('Query read timeout'), { code: 'P0001' }),
 ])(
   'leaves unknown and non-Error values outside the availability classifier: %s',
   (error) => {

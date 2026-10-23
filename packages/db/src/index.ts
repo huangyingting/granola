@@ -35,6 +35,7 @@ import { ChatStore } from './chat.js';
 import { operationsSnapshot, taskOutcomesSnapshot } from './operations.js';
 import { AuditStore } from './audit.js';
 import { auditTransactionContext } from './audit-context.js';
+import { isDatabaseUnavailable } from './connection-errors.js';
 import {
   DeletionPublications,
   type DeletionArchivePublisher,
@@ -197,6 +198,8 @@ export class Database {
       max: 10,
       connectionTimeoutMillis: 5000,
       statement_timeout: 10_000,
+      // Server-side timeouts cannot deliver errors through a stalled transport.
+      query_timeout: 15_000,
     });
     this.sync = new SyncStore(this);
     this.recordings = new RecordingStore(this);
@@ -275,13 +278,17 @@ export class Database {
       await client.query('COMMIT');
       return result;
     } catch (error) {
-      try {
-        await client.query('ROLLBACK');
-      } catch {
-        discard = true;
-        console.error(
-          JSON.stringify({ code: 'database_transaction_rollback_failed' }),
-        );
+      discard = isDatabaseUnavailable(error);
+      // A timed-out query, including COMMIT, can still have reached PostgreSQL.
+      if (!discard) {
+        try {
+          await client.query('ROLLBACK');
+        } catch {
+          discard = true;
+          console.error(
+            JSON.stringify({ code: 'database_transaction_rollback_failed' }),
+          );
+        }
       }
       if (error instanceof Error && 'code' in error && error.code === 'PDR01')
         throw new ServiceError(
