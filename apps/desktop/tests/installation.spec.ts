@@ -346,6 +346,7 @@ test('preserves encrypted data and new edits through actual installation, compat
                 bytes: 1,
                 sha512: Buffer.alloc(64).toString('base64'),
                 runtime_sha256: input.manifest,
+                user_data: _electron.app.getPath('userData'),
               }),
             );
             const header = Buffer.alloc(4);
@@ -491,6 +492,7 @@ test('preserves encrypted data and new edits through actual installation, compat
             const version = input.version.split('.').map(Number);
             const session = await worker.prepareUpdateWorker(lease, {
               application: process.execPath,
+              user_data: _electron.app.getPath('userData'),
               current_version: input.version,
               offered_version: `${version[0]}.${version[1]}.${Number(version[2]) + 1}`,
               installer: lease.runtime.executable,

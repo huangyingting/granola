@@ -10,7 +10,7 @@ using WindowsAiNotes.Updates;
 namespace WindowsAiNotes.AudioHost;
 
 public sealed record UpdateWorkerRequest(int ParentPid, string Application, string CurrentVersion, string OfferedVersion,
-    string Installer, long Bytes, string Sha512, string RuntimeSha256)
+    string Installer, long Bytes, string Sha512, string RuntimeSha256, string UserData)
 {
     internal static UpdateWorkerRequest Parse(ReadOnlySpan<byte> bytes)
     {
@@ -36,7 +36,8 @@ public sealed record UpdateWorkerResult(int Version, bool Installed, string Code
 
 internal sealed record UpdateWorkerServices(Func<string, UpdateInstallationResult> Installation,
     Func<string, UpdateTrustResult> Application,
-    Func<ProcessStartInfo, IEnumerable<SafeFileHandle>, UpdateLaunchedProcess> Start, TimeSpan InstallerTimeout);
+    Func<ProcessStartInfo, IEnumerable<SafeFileHandle>, UpdateLaunchedProcess> Start, TimeSpan InstallerTimeout,
+    Func<UpdateOperationLock, UpdateWorkerJournal, Task> Restart);
 
 public static class UpdateInstallerWorker
 {
@@ -70,9 +71,12 @@ public static class UpdateInstallerWorker
                     return UpdateTrustVerifier.Verify(request.Application, policy.Trust(version));
                 },
                 UpdateLaunchedProcess.Start,
-                TimeSpan.FromMinutes(10));
+                TimeSpan.FromMinutes(10),
+                (admission, outcome) => UpdateFirstStart.RunAsync(request, policy, outcome, admission));
             VerifyApplication(services, request.CurrentVersion);
             using var provenance = UpdateRuntimeProvenance.Open(location, request.CurrentVersion, policy.CertificateSha256, policy.Publisher);
+            UpdateInstallationVerifier.RequireRegularPath(request.UserData, directory: true);
+            RequireOutsideInstallation(Path.Combine(request.UserData, "notes.sqlite"), directory);
             RequireOutsideInstallation(request.Installer, directory);
             var verification = PreparedInstaller.Open(request.Installer, policy.Trust(request.OfferedVersion),
                 request.CurrentVersion, request.Bytes, request.Sha512, out var installer);
@@ -154,7 +158,8 @@ public static class UpdateInstallerWorker
             if (exitCode != 0) throw new UpdateHandoffException("update_installer_failed");
             VerifyApplication(services, request.OfferedVersion);
             journal.Write("installed", "update_worker_installed", true, exitCode);
-            return new(1, true, "update_worker_installed", journal.Latest);
+            await services.Restart(admission, journal);
+            return new(1, true, journal.Latest!.Code, journal.Latest);
         }
         catch (Exception error) when (Expected(error))
         {
@@ -208,6 +213,7 @@ public static class UpdateInstallerWorker
         UpdateInstallationVerifier.CanonicalPath(request.Installer) &&
         request.Installer.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) &&
         UpdateTrustVerifier.IsStableVersion(request.CurrentVersion) && UpdateTrustVerifier.IsStableVersion(request.OfferedVersion) &&
+        UpdateInstallationVerifier.CanonicalPath(request.UserData) &&
         System.Version.Parse(request.OfferedVersion) > System.Version.Parse(request.CurrentVersion) &&
         request.Bytes is > 0 and <= UpdateTrustVerifier.MaximumArtifactBytes && PreparedInstaller.ValidHash(request.Sha512) &&
         UpdateRuntimeLease.ValidManifest(request.RuntimeSha256);
@@ -215,7 +221,7 @@ public static class UpdateInstallerWorker
     private static UpdateWorkerResult Fail(UpdateWorkerJournal? journal, string code, bool started, int? exitCode,
         UpdateParentIdentity? installerProcess = null)
     {
-        if (journal is not null)
+        if (journal is not null && journal.Latest?.Phase != "healthy")
         {
             try { journal.Write("failed", code, started, exitCode, installerProcess); }
             catch (Exception error) when (StorageFailure(error))

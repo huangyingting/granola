@@ -162,6 +162,21 @@ export const updateRestartConfirmedSchema = z.strictObject({
   ...restartIdentity,
   event: z.literal('update_restart_confirmed'),
 });
+export const updateRestartAdmittedSchema = z.strictObject({
+  ...restartIdentity,
+  event: z.literal('update_restart_admitted'),
+});
+export const updateRestartFailureSchema = z.strictObject({
+  version: z.literal(1),
+  event: z.literal('update_restart_failed'),
+  code: z.string().regex(/^[a-z][a-z0-9_]{0,99}$/u),
+});
+export const updateRestartProofSchema = z.strictObject({
+  session_id: z.uuidv4(),
+  identity: updateParentIdentitySchema,
+  application_version: updateVersionSchema,
+  storage_schema: z.number().int().min(1).max(65_535),
+});
 export const updateParentReadySchema = z.strictObject({
   version: z.literal(1),
   event: z.literal('update_parent_ready'),
@@ -187,6 +202,7 @@ export const updateWorkerRequestSchema = z.strictObject({
   bytes,
   sha512,
   runtime_sha256: handoffChallenge,
+  user_data: localWindowsPath,
 });
 export const updateWorkerFailureSchema = z.strictObject({
   version: z.literal(1),
@@ -205,6 +221,7 @@ export const updateWorkerOutcomeSchema = z
       'committed',
       'installing',
       'installed',
+      'healthy',
       'failed',
     ]),
     code: z.string().regex(/^[a-z][a-z0-9_]{0,99}$/u),
@@ -217,9 +234,10 @@ export const updateWorkerOutcomeSchema = z
       .max(2 ** 31 - 1)
       .nullable(),
     updated_at: z.iso.datetime(),
+    restart: updateRestartProofSchema.nullable().optional(),
   })
   .refine((value) =>
-    value.phase === 'installed'
+    value.phase === 'installed' || value.phase === 'healthy'
       ? value.installer_started &&
         value.installer_exit_code === 0 &&
         value.installer_process !== null
@@ -233,6 +251,13 @@ export const updateWorkerOutcomeSchema = z
           : value.installer_started ||
             (value.installer_exit_code === null &&
               value.installer_process === null),
+  )
+  .refine((value) =>
+    value.phase === 'healthy'
+      ? value.restart != null &&
+        value.restart.session_id === value.session_id &&
+        value.restart.application_version === value.offered_version
+      : value.restart == null,
   );
 export const cachedUpdateSchema = z.strictObject({
   version: z.literal(1),

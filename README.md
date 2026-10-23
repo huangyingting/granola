@@ -487,14 +487,15 @@ write-through atomic replacement. The mutable fence is deliberately excluded
 from executable-runtime hashes and Main's immutable runtime-file leases.
 Only unused staging or a valid uncommitted preparation/failure may pass this
 gate. Missing legacy markers, corrupt or contradictory records, uncertain
-claimed sessions and **all post-commit sessions, including `installed`, remain
+claimed sessions and **all unresolved post-commit sessions, including `installed`, remain
 blocked before local-key/SQLite access**. No saved PID, timestamp, outcome,
 automatic deletion, retry or snapshot restore grants recovery/health authority.
-Fresh restart health and authorized resolution of these retained records are
-still unfinished. A repaired record does not reopen the failed Main process.
+Only the fresh first-start protocol below can produce a matching, current-user
+DPAPI-sealed healthy resolution. A repaired plain journal or saved process
+identity cannot clear this fence or reopen the failed Main process.
 
-The native restart-health receiver is a separate, single-use primitive, not yet
-an activation path. It creates an unpredictable, exclusive current-user pipe
+The native restart-health receiver is single-use and composed into the worker's
+internal first-start path, not exposed as an activation action. It creates an unpredictable, exclusive current-user pipe
 before launch, then checks the OS pipe peer against the fresh child's retained
 `CreateProcessW` handle and physical lifetime. A new challenge binds the exact
 session, process creation identity, target version and bounded integer storage
@@ -504,10 +505,11 @@ confirmation; cancellation, timeout, transport failure or child exit closes
 the channel without killing Main and drains any admitted persistence first.
 Windows cases use actual newly launched synthetic peers, including wrong-OS-peer
 and stale-challenge rejection. These cases do not prove signed-app restart health.
-The receiver grants no pre-database admission, changes no recovery fence and
-does not itself validate schema compatibility. Main-side worker authentication,
-first-start admission, durable healthy resolution and coordinator wiring are
-still required before installation/restart controls can be enabled.
+The receiver alone grants no pre-database admission or schema compatibility.
+The composed path authenticates both channels, transfers kernel ownership,
+and requires Main's actual initialized supported storage schema. Product
+activation/coordinator wiring and real signed positive acceptance are still
+required before installation/restart controls can be enabled.
 
 The native server-lease primitive now reads the actual Windows server PID from
 an already connected pipe and opens that process's kernel handle once, before
@@ -519,9 +521,10 @@ original version's pinned, signed complete runtime. The connected pipe, both
 process leases and immutable runtime locks are retained together; disposal never
 terminates either process. A trusted Microsoft test server can exercise OS
 identity but cannot gain first-party worker authorization. This is an internal
-retained proof, not a diagnostic authorization receipt, a Main-side bridge or a
-completed cross-channel challenge protocol. It does not transfer startup
-admission, clear recovery fences or enable installation/restart.
+retained proof, never a diagnostic authorization receipt. The bundled native
+bridge now consumes it on a second exclusive pipe, binds both pipes with the
+fresh health challenge and an independent authentication challenge, and proves
+its own actual Main creator and target bundled signed runtime to the worker.
 
 Fresh-process admission transfer also has an internal native path: launch Main
 with all handle inheritance disabled while the worker retains exclusion, then
@@ -530,8 +533,30 @@ duplicate noninheritable admission handles directly into the retained
 transfer, partial failures reclaim target copies; afterward Main keeps them
 until physical exit. Windows probes check that private pipes/unlisted files are
 not inherited and that even an explicitly inheriting descendant cannot retain
-Main's transferred admission. This is not yet wired to authenticated first
+Main's transferred admission. This is wired to internal authenticated first
 start; the real installer still uses its separate explicit inherited lease list.
+
+The worker retains exclusion and both signed runtime inventories while launching
+the target Main without inheritance. Its private request preserves the original
+Main user-data directory rather than reopening a default profile. Main's ordinary
+health socket cannot authorize startup by itself: the original bundled bridge
+must verify installed identity and mandatory packaged trust, authenticate the
+pipe server as Main's retained creator, complete the bound exchange, and report
+successful physical closure after direct ownership transfer. Only then can Main
+unlock the local key and initialize SQLite. It reports the actual supported
+schema before constructing background coordinators or a writable window.
+
+Fresh health first flushes the healthy journal, then writes a current-user,
+purpose-separated DPAPI resolution bound to the full outcome, session, runtime
+digest, exact Main identity, target version and storage schema. Confirmation
+follows both durable writes; Main also requires an exact confirmation and clean
+channel closure. Torn writes, edited/copied resolution context, lost confirmation
+and transport failure do not retry an installer, restore a backup or kill Main.
+An unresolved fence remains blocked; a completed sealed resolution permits a
+later normal startup, whose existing SQLite compatibility checks still reject
+unsupported schemas without replacing notes. DPAPI protects persisted context
+within the Windows account; it is not in-memory attestation against arbitrary
+code already running as that same account.
 
 Activation now requires the runtime's physical parent to be the fixed private
 worker root, so recovery cannot miss an installer launched from an arbitrary
@@ -543,7 +568,7 @@ synthetic records and requires a fresh process to reopen.
 
 **Desktop activation remains disconnected.** The activation coordinator must
 use the worker client and this shutdown barrier in its authenticated handoff,
-then integrate restart health and interrupted-install/schema-compatible recovery.
+then use the authenticated first-start and durable health/recovery path.
 A worker's post-load manifest check alone is insufficient. Installation/restart
 controls remain disabled, and real first-party signed update acceptance is still
 a release gate.
@@ -633,8 +658,11 @@ Promotion also independently verifies the embedded runtime inventory with the
 already signature-verified packaged helper before writing either receipt/feed;
 update-enabled receipts record `runtime_provenance_verified=true`. Static signed
 payload provenance is not live process authentication, pre-database admission or
-fresh startup health. Those must still be composed with the retained process and
-one-use restart channel; installation/restart controls remain disabled.
+fresh startup health. The internal first-start path separately requires retained
+processes, both bound channels, ownership transfer and durable health; none of
+these steps is replaced by the producer receipt. Product activation and real
+first-party signed positive acceptance remain pending, so installation/restart
+controls stay disabled.
 
 The ordinary Windows checks verify real first-party installer/uninstaller metadata,
 reject unsigned first-party packages and correctly signed non-installer runtimes,

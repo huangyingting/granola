@@ -408,6 +408,17 @@ export class LocalStore {
       this.search = null;
     }
   }
+  storageSchema(): number {
+    const version = this.database
+      .prepare('PRAGMA user_version')
+      .get()?.user_version;
+    if (version !== 8)
+      throw new LocalError(
+        'local_version_unsupported',
+        'Local storage did not initialize the supported schema.',
+      );
+    return version;
+  }
   atomic(run: () => undefined): void {
     this.transaction(run);
   }

@@ -73,6 +73,14 @@ export async function prepareUpdateWorker(
       parent_pid: process.pid,
       runtime_sha256: guard.runtime.sha256,
     });
+    if (
+      win32.normalize(request.user_data) !== request.user_data ||
+      /[:"<>|?*]/u.test(request.user_data.slice(2))
+    )
+      throw new LocalError(
+        'update_worker_arguments',
+        'The original Main user-data directory must be a canonical local path.',
+      );
     for (const path of [
       request.application,
       request.installer,

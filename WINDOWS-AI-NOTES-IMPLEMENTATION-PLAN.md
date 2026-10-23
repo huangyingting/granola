@@ -552,6 +552,8 @@ request ID 串联 API、job、worker 和 provider request，生产 trace 默认�
 
 首次启动准入转移另增加内部原生子进程路径：worker 连续持有 exclusion 时以完全禁止句柄继承的方式创建新 Main，再直接向 `CreateProcessW` 保留的精确子进程句柄复制不可继承的准入句柄，不重新按 PID 打开；移交前失败回收已复制的目标句柄，移交后 Main 持有至物理退出。Windows 内核样机覆盖部分复制失败、已退出/已释放及借用进程拒绝、私有 pipe/无关文件不继承，以及新 Main 显式开启继承的后代仍不能延长准入寿命。安装器原有显式继承列表保持不变；此路径尚未与认证 first-start 协调接线，不授予健康或恢复清理。
 
+已将双通道认证、首次数据库准入和健康持久化组合进独立 worker：新 Main 通过普通 Node health socket 收到新鲜挑战，原始 bundled native bridge 必须验证实际 Main 创建者、注册安装、必需的打包 pin 与完整目标 runtime，再在独占原生 auth pipe 上核对真实 server/creator 和原版本签名 runtime。worker 同时验证 bridge 是所持新 Main 的真实子进程及目标 bundled helper，将两个通道的 challenge 与独立 auth nonce 绑定，直接移交不可继承的 Main 生命周期准入；Main 必须等待严格绑定响应及 helper 成功物理退出，才解锁密钥/初始化 SQLite。私有 worker 请求保留原 Main 的 user-data 目录，不能静默改为默认 profile。Main 读取实际且受支持的初始化 schema，在后台协调器和可写窗口构造前报告健康；owner 先 flush healthy journal，再以独立用途的当前用户 DPAPI 将完整 outcome/session/runtime digest/精确 Main 身份/目标版本/schema 绑定为持久 resolution，之后才确认。Main 还要求严格确认及通道关闭；torn write、改写/复制 receipt context、丢失确认或断线不自动重试安装、不恢复备份、不杀死 Main。未解决的 commit fence 继续阻断，匹配密封 healthy resolution 才允许后续普通启动，已有 SQLite 兼容检查仍保护新编辑。DPAPI 是 Windows 账户内的持久上下文完整性，不宣称抵御同账户任意代码注入的进程内存证明。真实 Windows 样机验证实际双管道、创建关系、准入生命周期和持久顺序，但合成服务不代替第一方签名更新正例；正式 activation/终止关闭协调接线、已解决 session 的安全清理以及真实签名、部署、物理设备/质量和运行验收仍是未完成门禁，安装/重启 UI 继续禁用。
+
 ## 12. 建议代码组织
 
 以下是未来建项布局，不是已经存在的目录：

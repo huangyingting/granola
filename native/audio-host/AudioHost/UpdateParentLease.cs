@@ -144,12 +144,17 @@ public sealed class UpdateParentLease : IDisposable
     internal bool IsCreatorOf(UpdateParentLease child)
     {
         ObjectDisposedException.ThrowIf(IsDisposed, this);
+        return IsCreatorOf(Identity.Pid, process.StartTime.ToUniversalTime(), () => HasExited, child);
+    }
+
+    internal static bool IsCreatorOf(int pid, DateTime created, Func<bool> hasExited, UpdateParentLease child)
+    {
         ObjectDisposedException.ThrowIf(child.IsDisposed, child);
-        if (HasExited || child.HasExited || Identity.Pid == child.Identity.Pid) return false;
-        var matches = process.StartTime.ToUniversalTime() <= child.process.StartTime.ToUniversalTime() &&
-            ParentPid(child.Identity.Pid) == Identity.Pid;
+        if (hasExited() || child.HasExited || pid == child.Identity.Pid) return false;
+        var matches = created <= child.process.StartTime.ToUniversalTime() &&
+            ParentPid(child.Identity.Pid) == pid;
         // Both cached kernel handles must still be live after the PID-based snapshot.
-        return matches && !HasExited && !child.HasExited;
+        return matches && !hasExited() && !child.HasExited;
     }
 
     public void Dispose()

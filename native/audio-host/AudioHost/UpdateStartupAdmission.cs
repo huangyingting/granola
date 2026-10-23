@@ -42,7 +42,7 @@ public static class UpdateStartupAdmission
         finally { parent?.Dispose(); }
     }
 
-    private static void RequireBundledApplication(string application, string version)
+    internal static void RequireBundledApplication(string application, string version, bool requirePolicy = false)
     {
         var metadata = FileVersionInfo.GetVersionInfo(application);
         var product = metadata.ProductName;
@@ -63,7 +63,7 @@ public static class UpdateStartupAdmission
         // Unsigned, unregistered preview packages remain usable, but never gain installer authorization.
         var policyPath = Path.Combine(directory, "resources", "update-policy.json");
         try { _ = File.GetAttributes(policyPath); }
-        catch (FileNotFoundException) { return; }
+        catch (FileNotFoundException) when (!requirePolicy) { return; }
         var installation = UpdateInstallationVerifier.Verify(application, version, product);
         if (!installation.Registered) throw new UpdateHandoffException(installation.Code);
         var policy = UpdateWorkerPolicy.Read(application);

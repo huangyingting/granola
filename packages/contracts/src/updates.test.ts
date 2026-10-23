@@ -16,6 +16,8 @@ import {
   updateRestartChallengeSchema,
   updateRestartReadySchema,
   updateRestartConfirmedSchema,
+  updateRestartAdmittedSchema,
+  updateRestartFailureSchema,
   updateWorkerFailureSchema,
   updateWorkerOutcomeSchema,
   updateWorkerRequestSchema,
@@ -39,6 +41,68 @@ const feed = {
 };
 
 describe('packaged update and feed contracts', () => {
+  it('requires bound healthy resolution and never treats installed or failure metadata as restart authority', () => {
+    const proof = {
+      session_id: '11111111-1111-4111-8111-111111111111',
+      identity: { pid: 1234, creation_file_time: '134000000000000002' },
+      application_version: '0.1.1',
+      storage_schema: 8,
+    };
+    const healthy = {
+      version: 1,
+      session_id: proof.session_id,
+      current_version: '0.1.0',
+      offered_version: '0.1.1',
+      phase: 'healthy',
+      code: 'update_worker_healthy',
+      installer_started: true,
+      installer_process: {
+        pid: 1233,
+        creation_file_time: '134000000000000001',
+      },
+      installer_exit_code: 0,
+      updated_at: '2026-10-23T00:00:00.1234567Z',
+      restart: proof,
+    };
+    expect(updateWorkerOutcomeSchema.parse(healthy)).toEqual(healthy);
+    for (const change of [
+      { restart: null },
+      { restart: { ...proof, storage_schema: 0 } },
+      { restart: { ...proof, application_version: '0.1.2' } },
+      {
+        restart: {
+          ...proof,
+          session_id: '22222222-2222-4222-8222-222222222222',
+        },
+      },
+      { phase: 'installed' },
+      { phase: 'failed' },
+      { installer_exit_code: 1 },
+    ])
+      expect(
+        updateWorkerOutcomeSchema.safeParse({ ...healthy, ...change }).success,
+      ).toBe(false);
+    const admitted = {
+      version: 1,
+      event: 'update_restart_admitted',
+      session_id: proof.session_id,
+      identity: proof.identity,
+      challenge: 'a'.repeat(64),
+      application_version: proof.application_version,
+    };
+    expect(updateRestartAdmittedSchema.parse(admitted)).toEqual(admitted);
+    expect(
+      updateRestartAdmittedSchema.safeParse({ ...admitted, healthy: true })
+        .success,
+    ).toBe(false);
+    expect(
+      updateRestartFailureSchema.parse({
+        version: 1,
+        event: 'update_restart_failed',
+        code: 'update_restart_protocol',
+      }).code,
+    ).toBe('update_restart_protocol');
+  });
   it('accepts a pinned policy and an exact stable x64 installer descriptor', () => {
     expect(packagedUpdatePolicySchema.parse(policy)).toEqual(policy);
     expect(updateFeedSchema.parse(feed)).toEqual(feed);
@@ -310,6 +374,7 @@ describe('packaged update and feed contracts', () => {
       bytes: feed.bytes,
       sha512: feed.sha512,
       runtime_sha256: 'ab'.repeat(32),
+      user_data: 'C:\\Private user data',
     };
     expect(updateWorkerRequestSchema.parse(request)).toEqual(request);
     for (const extra of [
@@ -320,6 +385,7 @@ describe('packaged update and feed contracts', () => {
       { destination: 'C:\\Other application' },
       { runtime_sha256: 'AB'.repeat(32) },
       { parent_pid: 0 },
+      { user_data: 'relative' },
     ])
       expect(
         updateWorkerRequestSchema.safeParse({ ...request, ...extra }).success,

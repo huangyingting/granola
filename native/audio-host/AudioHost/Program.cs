@@ -39,6 +39,17 @@ if (args.Length > 0 && args[0] is "--seal-update-runtime" or "--verify-update-ru
         return 2;
     }
 }
+if (args.Length > 0 && args[0] == "--claim-update-restart")
+{
+    await using var restartInput = Console.OpenStandardInput();
+    await using var restartOutput = Console.OpenStandardOutput();
+    if (args.Length == 4 && int.TryParse(args[1], System.Globalization.NumberStyles.None,
+        System.Globalization.CultureInfo.InvariantCulture, out var restartParent))
+        return await UpdateRestartBridge.RunAsync(restartParent, args[2], args[3], restartInput, restartOutput);
+    await FrameCodec.WriteJsonAsync(restartOutput,
+        new { Version = 1, Event = "update_restart_failed", Code = "update_worker_arguments" });
+    return 2;
+}
 if (args.Length > 0 && args[0] == "--claim-update-startup")
 {
     await using var startupOutput = Console.OpenStandardOutput();

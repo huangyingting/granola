@@ -1,12 +1,13 @@
 import { _electron as electron, expect, test } from '@playwright/test';
 import { existsSync, readFileSync } from 'node:fs';
-import { cp, mkdtemp, rename, rm } from 'node:fs/promises';
+import { cp, mkdtemp, rename, rm, writeFile } from 'node:fs/promises';
 import { execFile, spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { promisify } from 'node:util';
 import { join } from 'node:path';
 import { audioHostEnvironment } from '@windows-ai-notes/client/audio';
+import { FrameDecoder } from '@windows-ai-notes/contracts';
 import {
   stageUpdateRuntime,
   verifyUpdateInstallation,
@@ -95,6 +96,93 @@ test.skip(
   !executable,
   'Run after packaging with DESKTOP_EXECUTABLE set to the unpacked Windows executable.',
 );
+test('rejects forged restart startup before unlocking or modifying existing local data', async () => {
+  if (!executable) throw new Error('The packaged executable is required.');
+  const root = await mkdtemp(join(tmpdir(), 'notes-forged-first-start-'));
+  const key = Buffer.from('Synthetic protected-key canary, never a real key.');
+  const database = Buffer.from(
+    'Synthetic database canary, never an actual database.',
+  );
+  await writeFile(join(root, 'content-key.protected'), key);
+  await writeFile(join(root, 'notes.sqlite'), database);
+  const session = randomUUID();
+  const nonce = 'a'.repeat(64);
+  const application = await electron.launch({
+    executablePath: executable,
+    args: [
+      `--user-data-dir=${root}`,
+      `--update-restart=${session}`,
+      `--update-health=WindowsAINotes.Restart.${session.replaceAll('-', '')}.${nonce}`,
+      `--update-auth=WindowsAINotes.RestartAuth.${session.replaceAll('-', '')}.${nonce}`,
+    ],
+  });
+  try {
+    const page = await application.firstWindow();
+    await expect(
+      page.getByText(/Restart startup could not be confirmed/u),
+    ).toBeVisible();
+    expect(
+      await application.evaluate(({ app }) => app.getPath('userData')),
+    ).toBe(root);
+    expect(readFileSync(join(root, 'content-key.protected'))).toEqual(key);
+    expect(readFileSync(join(root, 'notes.sqlite'))).toEqual(database);
+    const rejected = await application.evaluate(
+      async ({ app }, environment) => {
+        const { spawn } = process.getBuiltinModule('node:child_process');
+        const { join, dirname } = process.getBuiltinModule('node:path');
+        const helper = join(
+          process.resourcesPath,
+          'audio-host',
+          'AudioHost.exe',
+        );
+        return new Promise<{ code: number | null; stdout: string }>(
+          (resolve, reject) => {
+            const child = spawn(
+              helper,
+              [
+                '--claim-update-restart',
+                String(process.pid),
+                process.execPath,
+                app.getVersion(),
+              ],
+              {
+                cwd: dirname(helper),
+                env: environment,
+                windowsHide: true,
+                stdio: 'pipe',
+              },
+            );
+            const output: Buffer[] = [];
+            const timer = setTimeout(() => child.kill(), 15_000);
+            child.on('error', reject);
+            child.stdout.on('data', (bytes: Buffer) => output.push(bytes));
+            child.once('close', (code) => {
+              clearTimeout(timer);
+              resolve({
+                code,
+                stdout: Buffer.concat(output).toString('base64'),
+              });
+            });
+            child.stdin.end();
+          },
+        );
+      },
+      audioHostEnvironment(process.env),
+    );
+    expect(rejected.code).toBe(2);
+    const decoder = new FrameDecoder();
+    const frames = decoder.push(Buffer.from(rejected.stdout, 'base64'));
+    decoder.finish();
+    expect(frames).toEqual([
+      expect.objectContaining({ version: 1, event: 'update_restart_failed' }),
+    ]);
+    expect(readFileSync(join(root, 'content-key.protected'))).toEqual(key);
+    expect(readFileSync(join(root, 'notes.sqlite'))).toEqual(database);
+  } finally {
+    await application.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
 test('opens the actual packaged sandboxed editor without workspace runtime dependencies', async () => {
   if (!executable) throw new Error('The packaged executable is required.');
   const application = await electron.launch({ executablePath: executable });

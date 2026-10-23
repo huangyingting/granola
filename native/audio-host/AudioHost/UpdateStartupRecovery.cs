@@ -48,6 +48,13 @@ internal static class UpdateStartupRecovery
                 UpdatePrivateDirectory.Require(directory);
                 var state = UpdateRuntimeState.Read(directory);
                 var outcome = UpdateWorkerJournal.Read(directory);
+                if (state.Phase == "healthy")
+                {
+                    if (outcome?.Phase != "healthy" || state.Health != outcome.Restart)
+                        throw new UpdateHandoffException("update_recovery_invalid");
+                    UpdateHealthyResolution.Require(state, outcome);
+                    continue;
+                }
                 if (state.Phase is "committed" or "installing")
                     throw new UpdateHandoffException("update_recovery_required");
                 if (state.Phase == "staged")

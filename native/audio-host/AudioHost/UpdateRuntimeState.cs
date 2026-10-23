@@ -3,7 +3,8 @@ using WindowsAiNotes.Updates;
 
 namespace WindowsAiNotes.AudioHost;
 
-internal sealed record UpdateRuntimeState(int Version, string SessionId, string RuntimeSha256, string Phase, string UpdatedAt)
+internal sealed record UpdateRuntimeState(int Version, string SessionId, string RuntimeSha256, string Phase, string UpdatedAt,
+    UpdateRestartProof? Health = null, string? Resolution = null)
 {
     internal const string Filename = "update-runtime-state.json";
 
@@ -21,7 +22,10 @@ internal sealed record UpdateRuntimeState(int Version, string SessionId, string 
         var state = UpdateStateFile.Read<UpdateRuntimeState>(directory, Filename);
         if (state is null || state.Version != 1 || !UpdateRuntimeLease.ValidDirectoryName(Path.GetFileName(directory)) ||
             state.SessionId != Path.GetFileName(directory)[7..] || !UpdateRuntimeLease.ValidManifest(state.RuntimeSha256) ||
-            state.Phase is not ("staged" or "claimed" or "committed" or "installing") || !ValidTime(state.UpdatedAt))
+            state.Phase is not ("staged" or "claimed" or "committed" or "installing" or "healthy") || !ValidTime(state.UpdatedAt) ||
+            (state.Phase == "healthy" ? state.Health is null || !state.Health.Valid(state.SessionId, state.Health.ApplicationVersion) :
+                state.Health is not null) ||
+            (state.Phase == "healthy" ? state.Resolution is not { Length: > 0 and <= 12_000 } : state.Resolution is not null))
             throw new UpdateHandoffException("update_recovery_invalid");
         return state;
     }
@@ -43,6 +47,18 @@ internal sealed record UpdateRuntimeState(int Version, string SessionId, string 
             throw new UpdateHandoffException("update_recovery_invalid");
         // This fence precedes the outcome and ACK/process creation, and is never erased by a later failure.
         UpdateStateFile.Write(directory, Filename, state with { Phase = phase, UpdatedAt = Now() }, replace: true);
+    }
+
+    internal static void RecordHealthy(string directory, UpdateRestartProof proof)
+    {
+        var state = Read(directory);
+        var outcome = UpdateWorkerJournal.Read(directory);
+        if (state.Phase != "installing" || outcome?.Phase != "healthy" || outcome.Restart != proof ||
+            !proof.Valid(state.SessionId, outcome.OfferedVersion))
+            throw new UpdateHandoffException("update_recovery_invalid");
+        var resolution = UpdateHealthyResolution.Seal(state.RuntimeSha256, outcome);
+        UpdateStateFile.Write(directory, Filename,
+            state with { Phase = "healthy", Health = proof, Resolution = resolution, UpdatedAt = Now() }, replace: true);
     }
 
     internal static bool ValidTime(string value) =>

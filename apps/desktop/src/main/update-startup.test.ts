@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { encodeJsonFrame } from '@windows-ai-notes/contracts';
+import { FrameDecoder, encodeJsonFrame } from '@windows-ai-notes/contracts';
 import { acquireStartupAdmission } from './update-startup.js';
 
 const native = vi.hoisted(() => ({ spawn: vi.fn() }));
@@ -65,6 +65,80 @@ describe('pre-storage Main startup admission', () => {
     ).rejects.toMatchObject({ code: 'update_installation_helper' });
     expect(native.spawn).not.toHaveBeenCalled();
   });
+
+  it('uses a challenge-bound restart bridge and waits for its successful physical closure', async () => {
+    const binding = {
+      version: 1 as const,
+      event: 'update_restart_challenge' as const,
+      session_id: '11111111-1111-4111-8111-111111111111',
+      challenge: 'a'.repeat(64),
+      identity: ready.identity,
+      application_version: '0.1.0',
+    };
+    const endpoint = `WindowsAINotes.RestartAuth.${binding.session_id.replaceAll('-', '')}.${'b'.repeat(64)}`;
+    const sent: unknown[] = [];
+    const decoder = new FrameDecoder();
+    child.stdin.on('data', (chunk: Buffer) =>
+      sent.push(...decoder.push(chunk)),
+    );
+    let finished = false;
+    const pending = acquireStartupAdmission(helper, application, '0.1.0', {
+      binding,
+      endpoint,
+    }).then(() => {
+      finished = true;
+    });
+    child.stdout.write(
+      encodeJsonFrame({ ...binding, event: 'update_restart_admitted' }),
+    );
+    await Promise.resolve();
+    expect(finished).toBe(false);
+    expect(sent).toEqual([
+      { ...binding, event: 'update_restart_authenticate', endpoint },
+    ]);
+    expect(native.spawn.mock.calls[0]![1][0]).toBe('--claim-update-restart');
+    child.emit('close', 0, null);
+    await pending;
+  });
+
+  it.each([
+    'challenge',
+    'creation',
+    'session',
+    'version',
+    'nonzero',
+    'duplicate',
+  ])(
+    'rejects %s restart admission even when the basic startup PID matches',
+    async (mode) => {
+      const binding = {
+        version: 1 as const,
+        event: 'update_restart_challenge' as const,
+        session_id: '11111111-1111-4111-8111-111111111111',
+        challenge: 'a'.repeat(64),
+        identity: ready.identity,
+        application_version: '0.1.0',
+      };
+      const admitted = { ...binding, event: 'update_restart_admitted' };
+      if (mode === 'challenge') admitted.challenge = 'b'.repeat(64);
+      if (mode === 'creation')
+        admitted.identity = {
+          ...ready.identity,
+          creation_file_time: '134000000000000002',
+        };
+      if (mode === 'session')
+        admitted.session_id = '22222222-2222-4222-8222-222222222222';
+      if (mode === 'version') admitted.application_version = '0.1.1';
+      const pending = acquireStartupAdmission(helper, application, '0.1.0', {
+        binding,
+        endpoint: 'Synthetic endpoint rejected by native production validation',
+      });
+      child.stdout.write(encodeJsonFrame(admitted));
+      if (mode === 'duplicate') child.stdout.write(encodeJsonFrame(admitted));
+      child.emit('close', mode === 'nonzero' ? 2 : 0, null);
+      await expect(pending).rejects.toBeInstanceOf(Error);
+    },
+  );
 
   it('uses actual Main identity and OS-only environment and waits for confirmed helper exit after ready', async () => {
     vi.stubEnv('AZURE_OPENAI_API_KEY', 'synthetic-not-a-secret');

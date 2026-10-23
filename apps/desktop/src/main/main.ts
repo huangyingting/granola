@@ -52,6 +52,11 @@ import {
 import { DesktopUpdateController } from './update-controller.js';
 import { DesktopShutdown } from './shutdown.js';
 import { acquireStartupAdmission } from './update-startup.js';
+import {
+  acquireRestartStartup,
+  restartArguments,
+  type RestartStartup,
+} from './update-restart.js';
 
 let store: LocalStore | null = null;
 let controller: WorkspaceController | null = null;
@@ -217,6 +222,7 @@ async function start() {
   dataDirectory = app.getPath('userData');
   mkdirSync(dataDirectory, { recursive: true, mode: 0o700 });
   let startupAdmitted = !app.isPackaged;
+  let restarting: RestartStartup | null = null;
   try {
     if (app.isPackaged) {
       if (process.platform !== 'win32')
@@ -224,16 +230,27 @@ async function start() {
           'platform_unsupported',
           'Packaged startup protection requires Windows.',
         );
-      await acquireStartupAdmission(
-        audioHostExecutable(),
-        process.execPath,
-        app.getVersion(),
-      );
+      const restart = restartArguments(process.argv);
+      if (restart) {
+        restarting = await acquireRestartStartup(
+          audioHostExecutable(),
+          process.execPath,
+          app.getVersion(),
+          restart,
+        );
+      } else {
+        await acquireStartupAdmission(
+          audioHostExecutable(),
+          process.execPath,
+          app.getVersion(),
+        );
+      }
       startupAdmitted = true;
     }
     const key = localKey(dataDirectory);
     try {
       store = new LocalStore(join(dataDirectory, 'notes.sqlite'), key);
+      if (restarting) await restarting.confirm(store.storageSchema());
       delivery = new DesktopDelivery();
       controller = new WorkspaceController(
         store,
@@ -270,6 +287,7 @@ async function start() {
       key.fill(0);
     }
   } catch (error) {
+    if (restarting) startupAdmitted = false;
     failure = safeError(error);
     controller?.dispose();
     delivery?.close();
@@ -278,6 +296,8 @@ async function start() {
     store = null;
     recordings = null;
     console.error(JSON.stringify({ code: failure.code }));
+  } finally {
+    restarting?.close();
   }
   const directory = dirname(fileURLToPath(import.meta.url));
   const page = pathToFileURL(join(directory, '../renderer/index.html')).href;

@@ -82,6 +82,21 @@ describe('encrypted local drafts and durable outbox', () => {
     key.fill(0);
     rmSync(directory, { recursive: true, force: true });
   });
+  it('reports only the actual supported initialized schema for authenticated restart health', () => {
+    const store = open();
+    expect(store.storageSchema()).toBe(8);
+    const corrupt = new DatabaseSync(path);
+    try {
+      corrupt.exec('PRAGMA user_version=9');
+      expect(() => store.storageSchema()).toThrow(
+        'Local storage did not initialize the supported schema.',
+      );
+    } finally {
+      corrupt.exec('PRAGMA user_version=8');
+      corrupt.close();
+    }
+    expect(store.storageSchema()).toBe(8);
+  });
   function savedUpload(store: LocalStore) {
     const draft = store.create(profile, fields('Private upload journal.'));
     const recording = store.beginRecording(profile, draft.id, tracks());

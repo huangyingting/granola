@@ -43,7 +43,7 @@ public sealed class UpdateWorkerPolicyTests
     public async Task ValidatesWorkerInputsBeforeAnyProcessOrFilesystemAccess()
     {
         var request = new UpdateWorkerRequest(1234, @"C:\Synthetic\Application.exe", "0.1.0", "0.1.1",
-            @"C:\Synthetic\installer.exe", 123, Convert.ToBase64String(new byte[64]), new string('a', 64));
+            @"C:\Synthetic\installer.exe", 123, Convert.ToBase64String(new byte[64]), new string('a', 64), @"C:\Synthetic\UserData");
         Assert.True(UpdateInstallerWorker.ValidRequest(request));
         Assert.Equal(request, UpdateWorkerRequest.Parse(JsonSerializer.SerializeToUtf8Bytes(request, AudioJson.Options)));
         foreach (var invalid in new[]
@@ -56,7 +56,8 @@ public sealed class UpdateWorkerPolicyTests
             request with { OfferedVersion = "0.0.1" },
             request with { Bytes = 0 },
             request with { Sha512 = "invalid" },
-            request with { RuntimeSha256 = new string('A', 64) }
+            request with { RuntimeSha256 = new string('A', 64) },
+            request with { UserData = "relative" }
         })
         {
             Assert.False(UpdateInstallerWorker.ValidRequest(invalid));
@@ -75,7 +76,7 @@ public sealed class UpdateWorkerPolicyTests
     public void RejectsAmbiguousOrCallerSelectedAuthorityBeforePreparingTheWorker(string original, string replacement)
     {
         var request = new UpdateWorkerRequest(1234, @"C:\Synthetic\Application.exe", "0.1.0", "0.1.1",
-            @"C:\Synthetic\installer.exe", 123, Convert.ToBase64String(new byte[64]), new string('a', 64));
+            @"C:\Synthetic\installer.exe", 123, Convert.ToBase64String(new byte[64]), new string('a', 64), @"C:\Synthetic\UserData");
         var json = JsonSerializer.Serialize(request, AudioJson.Options);
         Assert.Contains(original, json);
         Assert.Equal("update_worker_arguments", Assert.Throws<UpdateHandoffException>(() =>

@@ -4,7 +4,8 @@ using WindowsAiNotes.Updates;
 namespace WindowsAiNotes.AudioHost;
 
 public sealed record UpdateWorkerOutcome(int Version, string SessionId, string CurrentVersion, string OfferedVersion,
-    string Phase, string Code, bool InstallerStarted, int? InstallerExitCode, UpdateParentIdentity? InstallerProcess, string UpdatedAt);
+    string Phase, string Code, bool InstallerStarted, int? InstallerExitCode, UpdateParentIdentity? InstallerProcess, string UpdatedAt,
+    UpdateRestartProof? Restart = null);
 
 internal sealed class UpdateWorkerJournal
 {
@@ -31,7 +32,7 @@ internal sealed class UpdateWorkerJournal
     }
 
     internal void Write(string phase, string code, bool installerStarted = false, int? exitCode = null,
-        UpdateParentIdentity? installerProcess = null)
+        UpdateParentIdentity? installerProcess = null, UpdateRestartProof? restart = null)
     {
         installerProcess ??= Latest?.InstallerProcess;
         if (!Allowed(Latest?.Phase, phase) || code.Length is 0 or > 100 || code[0] is not (>= 'a' and <= 'z') ||
@@ -44,21 +45,28 @@ internal sealed class UpdateWorkerJournal
                 !long.TryParse(installerProcess.CreationFileTime, NumberStyles.None, CultureInfo.InvariantCulture, out var created) ||
                 created <= 0 || created.ToString(CultureInfo.InvariantCulture) != installerProcess.CreationFileTime)) ||
             (Latest?.InstallerProcess is { } previous && installerProcess != previous) ||
-            (phase == "installed" && (!installerStarted || exitCode != 0 || installerProcess is null)))
+            (phase is "installed" or "healthy" && (!installerStarted || exitCode != 0 || installerProcess is null)) ||
+            (phase == "healthy" ? restart is null || !restart.Valid(Path.GetFileName(directory)[7..], offered) : restart is not null))
             throw new InvalidOperationException("An invalid update outcome transition was requested.");
         var outcome = new UpdateWorkerOutcome(1, Path.GetFileName(directory)[7..], current, offered, phase, code,
-            installerStarted, exitCode, installerProcess, DateTime.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            installerStarted, exitCode, installerProcess, DateTime.UtcNow.ToString("O", CultureInfo.InvariantCulture), restart);
         UpdateRuntimeState.RecordIntent(directory, phase);
         UpdateStateFile.Write(directory, Filename, outcome, replace: Latest is not null);
         Latest = outcome;
     }
 
+    internal void WriteHealthy(UpdateRestartProof proof)
+    {
+        Write("healthy", "update_worker_healthy", true, 0, restart: proof);
+        UpdateRuntimeState.RecordHealthy(directory, proof);
+    }
+
     private static bool Allowed(string? previous, string next) => (previous, next) switch
     {
         (null, "preparing") or ("preparing", "prepared") or ("prepared", "committed") or
-        ("committed", "installing") or ("installing", "installed") => true,
+        ("committed", "installing") or ("installing", "installed") or ("installed", "healthy") => true,
         ("installing", "installing") => true,
-        ("preparing" or "prepared" or "committed" or "installing", "failed") => true,
+        ("preparing" or "prepared" or "committed" or "installing" or "installed", "failed") => true,
         _ => false
     };
 
@@ -79,7 +87,9 @@ internal sealed class UpdateWorkerJournal
                 !long.TryParse(process.CreationFileTime, NumberStyles.None, CultureInfo.InvariantCulture, out var created) ||
                 created <= 0 || created.ToString(CultureInfo.InvariantCulture) != process.CreationFileTime)) ||
             (!outcome.InstallerStarted && (outcome.InstallerExitCode is not null || outcome.InstallerProcess is not null)) ||
-            !ValidPhase(outcome))
+            !ValidPhase(outcome) ||
+            (outcome.Phase == "healthy" ? outcome.Restart is null || !outcome.Restart.Valid(outcome.SessionId, outcome.OfferedVersion) :
+                outcome.Restart is not null))
             throw new UpdateHandoffException("update_recovery_invalid");
         return outcome;
     }
@@ -88,7 +98,7 @@ internal sealed class UpdateWorkerJournal
     {
         "preparing" or "prepared" or "committed" => !outcome.InstallerStarted,
         "installing" => outcome.InstallerExitCode is null,
-        "installed" => outcome.InstallerStarted && outcome.InstallerExitCode == 0 && outcome.InstallerProcess is not null,
+        "installed" or "healthy" => outcome.InstallerStarted && outcome.InstallerExitCode == 0 && outcome.InstallerProcess is not null,
         "failed" => true,
         _ => false
     };

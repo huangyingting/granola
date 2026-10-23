@@ -1,10 +1,14 @@
 import { spawn } from 'node:child_process';
 import { win32 } from 'node:path';
-import { FrameDecoder } from '@windows-ai-notes/contracts';
+import { FrameDecoder, encodeJsonFrame } from '@windows-ai-notes/contracts';
 import {
   updateStartupAdmittedSchema,
   updateStartupFailureSchema,
+  updateRestartAdmittedSchema,
+  updateRestartFailureSchema,
+  updateRestartChallengeSchema,
 } from '@windows-ai-notes/contracts/updates';
+import type { z } from 'zod';
 import { audioHostEnvironment } from '@windows-ai-notes/client/audio';
 import { LocalError } from '@windows-ai-notes/local';
 import { installationArguments } from './update-trust.js';
@@ -13,7 +17,13 @@ export async function acquireStartupAdmission(
   helper: string,
   application: string,
   version: string,
+  restart?: {
+    binding: z.infer<typeof updateRestartChallengeSchema>;
+    endpoint: string;
+  },
+  signal?: AbortSignal,
 ): Promise<void> {
+  signal?.throwIfAborted();
   installationArguments(
     helper,
     application,
@@ -38,7 +48,12 @@ export async function acquireStartupAdmission(
     );
   const child = spawn(
     helper,
-    ['--claim-update-startup', String(process.pid), application, version],
+    [
+      restart ? '--claim-update-restart' : '--claim-update-startup',
+      String(process.pid),
+      application,
+      version,
+    ],
     {
       cwd: win32.dirname(helper),
       env: audioHostEnvironment(process.env),
@@ -71,6 +86,13 @@ export async function acquireStartupAdmission(
       'Startup admission timed out. Close and reopen the app after installation finishes. Local data was not opened.',
     );
   }, 30_000);
+  const abort = () =>
+    fail(
+      'update_startup_cancelled',
+      'Restart startup authentication was cancelled. Local data was not opened.',
+    );
+  signal?.addEventListener('abort', abort, { once: true });
+  if (signal?.aborted) abort();
   child.on('error', () =>
     fail(
       'update_startup_unavailable',
@@ -91,7 +113,9 @@ export async function acquireStartupAdmission(
       for (const frame of decoder.push(chunk)) {
         if (response) throw new Error('Repeated startup response.');
         response = true;
-        const rejected = updateStartupFailureSchema.safeParse(frame);
+        const rejected = (
+          restart ? updateRestartFailureSchema : updateStartupFailureSchema
+        ).safeParse(frame);
         if (rejected.success) {
           fail(
             rejected.data.code,
@@ -103,9 +127,22 @@ export async function acquireStartupAdmission(
           );
           continue;
         }
-        const admitted = updateStartupAdmittedSchema.safeParse(frame);
+        const admitted = (
+          restart ? updateRestartAdmittedSchema : updateStartupAdmittedSchema
+        ).safeParse(frame);
         if (!admitted.success || admitted.data.identity.pid !== process.pid)
           throw new Error('Invalid startup identity.');
+        if (restart) {
+          const bound = updateRestartAdmittedSchema.parse(frame);
+          if (
+            bound.session_id !== restart.binding.session_id ||
+            bound.challenge !== restart.binding.challenge ||
+            bound.identity.creation_file_time !==
+              restart.binding.identity.creation_file_time ||
+            bound.application_version !== restart.binding.application_version
+          )
+            throw new Error('Unbound restart admission.');
+        }
         ready = true;
       }
     } catch {
@@ -123,10 +160,11 @@ export async function acquireStartupAdmission(
         'Startup protection exceeded its diagnostic bound. Close and reopen the app; local data was not opened.',
       );
   });
-  child.once('close', (code, signal) => {
+  child.once('close', (code, exitSignal) => {
     closed = true;
     clearTimeout(timer);
     clearTimeout(killTimer);
+    signal?.removeEventListener('abort', abort);
     try {
       decoder.finish();
     } catch {
@@ -135,14 +173,22 @@ export async function acquireStartupAdmission(
         'Startup protection returned an incomplete response. Close and reopen the app; local data was not opened.',
       );
     }
-    if (code !== 0 || signal !== null || !ready)
+    if (code !== 0 || exitSignal !== null || !ready)
       fail(
         'update_startup_unavailable',
         'Startup admission could not be confirmed. Close and reopen the app; local data was not opened.',
       );
     settle();
   });
-  child.stdin.end();
+  child.stdin.end(
+    restart
+      ? encodeJsonFrame({
+          ...restart.binding,
+          event: 'update_restart_authenticate',
+          endpoint: restart.endpoint,
+        })
+      : undefined,
+  );
   await stopped;
   if (failure !== null) throw failure;
 }

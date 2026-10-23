@@ -27,6 +27,11 @@ internal sealed class UpdateLaunchedProcess : IDisposable
         StartTime.ToUniversalTime().ToFileTimeUtc().ToString(CultureInfo.InvariantCulture));
     internal DateTime StartTime => surrogate?.StartTime ?? CreationTime();
     internal bool HasExited => surrogate?.HasExited ?? Signaled(0);
+    internal bool IsCreatorOf(UpdateParentLease child)
+    {
+        _ = ProcessHandle;
+        return UpdateParentLease.IsCreatorOf(Id, StartTime.ToUniversalTime(), () => HasExited, child);
+    }
     internal int ExitCode
     {
         get

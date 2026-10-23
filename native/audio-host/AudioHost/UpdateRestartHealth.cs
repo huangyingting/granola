@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Globalization;
 using System.IO.Pipes;
 using System.Runtime.InteropServices;
 using System.Security;
@@ -10,7 +11,15 @@ using WindowsAiNotes.Updates;
 
 namespace WindowsAiNotes.AudioHost;
 
-internal sealed record UpdateRestartProof(string SessionId, UpdateParentIdentity Identity, string ApplicationVersion, int StorageSchema);
+public sealed record UpdateRestartProof(string SessionId, UpdateParentIdentity Identity, string ApplicationVersion, int StorageSchema)
+{
+    internal static bool ValidIdentity(UpdateParentIdentity identity) => identity.Pid > 0 &&
+        long.TryParse(identity.CreationFileTime, NumberStyles.None, CultureInfo.InvariantCulture, out var created) &&
+        created > 0 && created.ToString(CultureInfo.InvariantCulture) == identity.CreationFileTime;
+
+    internal bool Valid(string session, string version) => SessionId == session && ApplicationVersion == version &&
+        UpdateTrustVerifier.IsStableVersion(version) && StorageSchema is >= 1 and <= 65_535 && ValidIdentity(Identity);
+}
 internal sealed record UpdateRestartReady(int Version, string Event, string SessionId, string Challenge,
     UpdateParentIdentity Identity, string ApplicationVersion, int StorageSchema);
 
@@ -41,14 +50,15 @@ internal sealed class UpdateRestartHealth : IAsyncDisposable
         this.session = identifier;
         this.version = version;
         this.timeout = timeout;
-        Endpoint = $"WindowsAINotes.Restart.{session:N}.{Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(32))}";
+        Endpoint = UpdateRestartProtocol.Endpoint(session, "Restart");
         pipe = new(Endpoint, PipeDirection.InOut, 1, PipeTransmissionMode.Byte,
             PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly | PipeOptions.FirstPipeInstance,
             MaximumMessageBytes, MaximumMessageBytes);
     }
 
     internal async Task<UpdateRestartProof> RunAsync(UpdateLaunchedProcess main,
-        Func<UpdateRestartProof, CancellationToken, Task> persist, CancellationToken token = default)
+        Func<UpdateRestartProof, CancellationToken, Task> persist, CancellationToken token = default,
+        Func<UpdateRestartChallenge, CancellationToken, Task>? admit = null)
     {
         if (Interlocked.Exchange(ref used, 1) != 0) throw new UpdateHandoffException("update_restart_used");
         ArgumentNullException.ThrowIfNull(persist);
@@ -57,6 +67,7 @@ internal sealed class UpdateRestartHealth : IAsyncDisposable
         deadline.CancelAfter(timeout);
         Task? pending = null;
         Task? writing = null;
+        Task? admitting = null;
         var confirmed = false;
         try
         {
@@ -70,10 +81,14 @@ internal sealed class UpdateRestartHealth : IAsyncDisposable
             if (peer != (uint)main.Id) throw new UpdateHandoffException("update_restart_peer");
             RequireAlive(main);
             var challenge = Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(32));
-            pending = FrameCodec.WriteJsonAsync(pipe,
-                new { Version = 1, Event = "update_restart_challenge", SessionId = session, Challenge = challenge, Identity = identity, ApplicationVersion = version },
-                deadline.Token);
+            var binding = new UpdateRestartChallenge(1, "update_restart_challenge", session, challenge, identity, version);
+            pending = FrameCodec.WriteJsonAsync(pipe, binding, deadline.Token);
             await WhileAlive(pending, main, exited, deadline.Token);
+            if (admit is not null)
+            {
+                admitting = admit(binding, deadline.Token);
+                await WhileAlive(admitting, main, exited, deadline.Token);
+            }
             var reading = FrameCodec.ReadAsync(pipe, MaximumMessageBytes, deadline.Token);
             pending = reading;
             await WhileAlive(reading, main, exited, deadline.Token);
@@ -125,6 +140,7 @@ internal sealed class UpdateRestartHealth : IAsyncDisposable
             deadline.Cancel();
             await pipe.DisposeAsync();
             if (pending is not null) await Drain(pending);
+            if (admitting is not null) await Drain(admitting);
             if (writing is not null)
             {
                 try { await writing; }

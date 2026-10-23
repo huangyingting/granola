@@ -17,6 +17,7 @@ const directory =
   'C:\\Users\\Test\\AppData\\Local\\WindowsAINotes.UpdateWorkers\\worker-71c1213f-45b7-47d4-9a13-3c94b7a7f8ca';
 const candidate = {
   application: 'C:\\Installed app\\Synthetic.exe',
+  user_data: 'C:\\Private user data',
   current_version: '0.1.0',
   offered_version: '0.1.1',
   installer: 'C:\\Private cache\\windows-ai-notes-0.1.1-x64-signed.exe',

@@ -29,6 +29,8 @@ public sealed class UpdateInstallerWorkerTests : IDisposable
     [InlineData("exit-error", "update_installer_failed", false)]
     [InlineData("changed-installed", "update_installation_mismatch", false)]
     [InlineData("signature-error", "update_signature_invalid", false)]
+    [InlineData("restart-failed", "update_restart_timeout", false)]
+    [InlineData("healthy-lost-ack", "update_restart_unavailable", false)]
     public async Task ComposesDurableCommitExactParentExitLockedLaunchAndFreshPostInstallChecks(
         string scenario, string code, bool installed)
     {
@@ -65,7 +67,19 @@ public sealed class UpdateInstallerWorkerTests : IDisposable
             launched = true;
             observations.Add("launch");
             return new(Surrogate(scenario == "exit-error" ? 2 : 0));
-        }, TimeSpan.FromSeconds(10));
+        }, TimeSpan.FromSeconds(10), (_, _) =>
+        {
+            observations.Add("restart");
+            Assert.Throws<UpdateHandoffException>(() => UpdateOperationLock.OpenAdmission());
+            Assert.Equal("installed", journal.Latest!.Phase);
+            if (scenario == "restart-failed") throw new UpdateHandoffException("update_restart_timeout");
+            if (scenario == "healthy-lost-ack")
+            {
+                journal.WriteHealthy(new(Path.GetFileName(runtime)[7..], new(5678, "134000000000000002"), request.OfferedVersion, 8));
+                throw new UpdateHandoffException("update_restart_unavailable");
+            }
+            return Task.CompletedTask;
+        });
         var pending = UpdateInstallerWorker.ExecutePreparedAsync(request, fixture.Parent, prepared, journal,
             fixture.Worker, fixture.Worker, services, fixture.Deadline.Token);
         fixture.Track(pending);
@@ -84,12 +98,14 @@ public sealed class UpdateInstallerWorkerTests : IDisposable
         var result = await pending;
         Assert.Equal(installed, result.Installed);
         Assert.Equal(code, result.Code);
-        Assert.Equal(installed ? "installed" : "failed", journal.Latest!.Phase);
+        Assert.Equal(scenario == "healthy-lost-ack" ? "healthy" : installed ? "installed" : "failed", journal.Latest!.Phase);
+        if (scenario == "healthy-lost-ack")
+            UpdateHealthyResolution.Require(UpdateRuntimeState.Read(runtime), journal.Latest);
         Assert.Equal(scenario is not ("cancel" or "stale" or "changed-current"), launched);
         Assert.False(prepared.IsDisposed);
         if (scenario == "success")
         {
-            Assert.Equal(["registration:0.1.0", "signature:0.1.0", "launch", "registration:0.1.1", "signature:0.1.1"], observations);
+            Assert.Equal(["registration:0.1.0", "signature:0.1.0", "launch", "registration:0.1.1", "signature:0.1.1", "restart"], observations);
             Assert.NotNull(journal.Latest.InstallerProcess);
             Assert.True(journal.Latest.InstallerProcess.Pid > 0);
             Assert.True(long.Parse(journal.Latest.InstallerProcess.CreationFileTime, System.Globalization.CultureInfo.InvariantCulture) > 0);
@@ -114,7 +130,7 @@ public sealed class UpdateInstallerWorkerTests : IDisposable
                 release = process.StandardInput;
                 cancellation.Cancel();
                 return new(process);
-            }, TimeSpan.FromMilliseconds(25));
+            }, TimeSpan.FromMilliseconds(25), (_, _) => Task.CompletedTask);
         var pending = UpdateInstallerWorker.ExecutePreparedAsync(request, fixture.Parent, prepared, journal,
             fixture.Worker, fixture.Worker, services, cancellation.Token);
         fixture.Track(pending);
@@ -145,7 +161,8 @@ public sealed class UpdateInstallerWorkerTests : IDisposable
         var services = new UpdateWorkerServices(
             version => new(1, true, "update_installation_verified", new(root, request.Application, version, "Synthetic", "x64")),
             _ => new(1, true, "update_verified", prepared.Artifact),
-            (_, _) => { File.SetAttributes(pathname, FileAttributes.ReadOnly); return new(Surrogate(0, 500)); }, TimeSpan.FromSeconds(10));
+            (_, _) => { File.SetAttributes(pathname, FileAttributes.ReadOnly); return new(Surrogate(0, 500)); }, TimeSpan.FromSeconds(10),
+            (_, _) => Task.CompletedTask);
         var pending = UpdateInstallerWorker.ExecutePreparedAsync(request, fixture.Parent, prepared, journal,
             fixture.Worker, fixture.Worker, services, fixture.Deadline.Token);
         fixture.Track(pending);
@@ -176,7 +193,7 @@ public sealed class UpdateInstallerWorkerTests : IDisposable
             _ => throw new InvalidOperationException("No application inspection should run before committed parent exit."),
             _ => throw new InvalidOperationException("No trust inspection should run before committed parent exit."),
             (_, _) => throw new InvalidOperationException("No installer may start without a durable acknowledged commit."),
-            TimeSpan.FromSeconds(10));
+            TimeSpan.FromSeconds(10), (_, _) => Task.CompletedTask);
         var pending = UpdateInstallerWorker.ExecutePreparedAsync(request, fixture.Parent, prepared, journal,
             fixture.Worker, fixture.Worker, services, fixture.Deadline.Token);
         fixture.Track(pending);
@@ -206,7 +223,7 @@ public sealed class UpdateInstallerWorkerTests : IDisposable
     }
 
     private UpdateWorkerRequest Request(int parent) => new(parent, Path.Combine(root, "Synthetic.exe"), "0.1.0", "0.1.1",
-        candidate, new FileInfo(candidate).Length, Convert.ToBase64String(SHA512.HashData(File.ReadAllBytes(candidate))), new string('a', 64));
+        candidate, new FileInfo(candidate).Length, Convert.ToBase64String(SHA512.HashData(File.ReadAllBytes(candidate))), new string('a', 64), root);
 
     private UpdateWorkerJournal Journal()
     {
