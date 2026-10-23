@@ -21,8 +21,11 @@ internal sealed class UpdateOperationLock(FileStream file, List<SafeFileHandle> 
 
     internal static UpdateOperationLock Open() => Open(Root, admission: false);
     internal static UpdateOperationLock OpenAdmission() => Open(Root, admission: true);
+    internal static UpdateOperationLock OpenCleanup() => OpenCore(Root, ".cleanup");
 
-    internal static UpdateOperationLock Open(string root, bool admission)
+    internal static UpdateOperationLock Open(string root, bool admission) => OpenCore(root, admission ? ".startup" : "");
+
+    private static UpdateOperationLock OpenCore(string root, string suffix)
     {
         if (!UpdateInstallationVerifier.CanonicalPath(root) || !UpdatePathLock.IsFixedDiskPath(root))
             throw new UpdateRuntimeException("update_worker_location");
@@ -33,7 +36,7 @@ internal sealed class UpdateOperationLock(FileStream file, List<SafeFileHandle> 
             if (!Directory.Exists(root)) new DirectoryInfo(root).Create(UpdatePrivateDirectory.Security());
             directories.Add(UpdatePathLock.OpenDirectory(root));
             UpdatePrivateDirectory.Require(root);
-            file = OpenFile(Path.Combine(root, $"{UpdateInstallationVerifier.ApplicationGuid}{(admission ? ".startup" : "")}.lock"));
+            file = OpenFile(Path.Combine(root, $"{UpdateInstallationVerifier.ApplicationGuid}{suffix}.lock"));
             UpdatePrivateDirectory.RequireFile(file);
             return new(file, directories);
         }

@@ -76,6 +76,14 @@ internal sealed class UpdateWorkerJournal
             throw new UpdateHandoffException("update_recovery_invalid");
         var outcome = UpdateStateFile.Read<UpdateWorkerOutcome>(directory, Filename);
         if (outcome is null) return null;
+        RequireValid(outcome, directory);
+        return outcome;
+    }
+
+    internal static void RequireValid(UpdateWorkerOutcome outcome, string directory)
+    {
+        if (!UpdateRuntimeLease.ValidDirectoryName(Path.GetFileName(directory)))
+            throw new UpdateHandoffException("update_recovery_invalid");
         if (outcome.Version != 1 || outcome.SessionId != Path.GetFileName(directory)[7..] ||
             !UpdateTrustVerifier.IsStableVersion(outcome.CurrentVersion) ||
             !UpdateTrustVerifier.IsStableVersion(outcome.OfferedVersion) ||
@@ -91,7 +99,6 @@ internal sealed class UpdateWorkerJournal
             (outcome.Phase == "healthy" ? outcome.Restart is null || !outcome.Restart.Valid(outcome.SessionId, outcome.OfferedVersion) :
                 outcome.Restart is not null))
             throw new UpdateHandoffException("update_recovery_invalid");
-        return outcome;
     }
 
     private static bool ValidPhase(UpdateWorkerOutcome outcome) => outcome.Phase switch

@@ -70,6 +70,7 @@ public static class UpdateRuntimeStager
             staged = destination;
             directories.Add(UpdatePathLock.OpenDirectory(destination));
             using var manifest = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+            var members = new List<WindowsAiNotes.Updates.UpdateRuntimeMember>();
             foreach (var (relative, stream) in inventory.Files)
             {
                 var target = Path.Combine(destination, relative);
@@ -99,9 +100,14 @@ public static class UpdateRuntimeStager
                     !CryptographicOperations.FixedTimeEquals(hash, SHA256.HashData(copied)))
                     throw new UpdateRuntimeException("update_worker_source");
                 UpdateRuntimeInventory.Append(manifest, relative, stream.Length, hash);
+                members.Add(new(relative, stream.Length, Convert.ToHexStringLower(hash)));
             }
             var result = new StagedUpdateRuntime(destination, Path.Combine(destination, "AudioHost.exe"),
                 inventory.Files.Count, inventory.Bytes, Convert.ToHexStringLower(manifest.GetHashAndReset()));
+            var index = new UpdateRuntimeFiles(1, members.ToArray());
+            if (index.Manifest() != result.Sha256) throw new UpdateRuntimeException("update_worker_source");
+            UpdateStateFile.Write(destination, UpdateRuntimeFiles.Filename, index, replace: false,
+                maximumBytes: WindowsAiNotes.Updates.UpdateRuntimeSeal.MaximumBytes);
             UpdateRuntimeState.Stage(destination, result.Sha256);
             retain?.Invoke(result);
             succeeded = true;

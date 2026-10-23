@@ -46,9 +46,10 @@ public sealed record UpdateRuntimeSeal(int Version, string ApplicationVersion, U
 
     public static bool IsOperationalFile(string path) =>
         path.Equals("update-runtime-state.json", StringComparison.OrdinalIgnoreCase) ||
-        path.Equals("update-outcome.json", StringComparison.OrdinalIgnoreCase);
+        path.Equals("update-outcome.json", StringComparison.OrdinalIgnoreCase) ||
+        path.Equals("update-runtime-files.json", StringComparison.OrdinalIgnoreCase);
 
-    private static bool ValidPath(string? path)
+    public static bool ValidPath(string? path)
     {
         if (path is not { Length: > 0 and <= 240 } || path.Any(c => c < ' ' || c > '~' || c is '\\' or ':' or '"' or '<' or '>' or '|' or '?' or '*'))
             return false;

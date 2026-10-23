@@ -50,6 +50,7 @@ public sealed class UpdateRuntimeSealTests
     [InlineData("audiohost.EXE")]
     [InlineData("update-outcome.json")]
     [InlineData("UPDATE-RUNTIME-STATE.JSON")]
+    [InlineData("update-runtime-files.json")]
     public void RejectsAmbiguousPathsSelfReferenceAndMutableMetadata(string path)
     {
         var seal = Valid with { Files = [new(path, 1, new('a', 64))] };

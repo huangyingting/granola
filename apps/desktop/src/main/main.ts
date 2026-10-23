@@ -51,7 +51,10 @@ import {
 } from './update-downloads.js';
 import { DesktopUpdateController } from './update-controller.js';
 import { DesktopShutdown } from './shutdown.js';
-import { acquireStartupAdmission } from './update-startup.js';
+import {
+  acquireStartupAdmission,
+  cleanupRetiredUpdateSessions,
+} from './update-startup.js';
 import {
   acquireRestartStartup,
   restartArguments,
@@ -317,9 +320,11 @@ async function start() {
     },
   });
   const current = window;
+  const updateMaintenance = new AbortController();
   const closing = new DesktopShutdown({
     cancel: () => {
       closingAudio = true;
+      updateMaintenance.abort();
       controller?.dispose();
     },
     drain: async () => {
@@ -912,6 +917,38 @@ async function start() {
   audioTimer.unref();
   current.once('closed', () => clearInterval(audioTimer));
   controller?.start();
+  if (app.isPackaged && startupAdmitted && controller)
+    void maintenance.track(
+      cleanupRetiredUpdateSessions(
+        audioHostExecutable(),
+        process.execPath,
+        app.getVersion(),
+        updateMaintenance.signal,
+      )
+        .then((report) => {
+          if (report.status === 'pending')
+            console.error(
+              JSON.stringify({
+                code: 'update_cleanup_pending',
+                retired: report.retired,
+                removed: report.removed,
+                incomplete: report.incomplete,
+                rejected: report.rejected,
+              }),
+            );
+        })
+        .catch((error: unknown) => {
+          console.error(
+            JSON.stringify({
+              code:
+                error instanceof LocalError
+                  ? error.code
+                  : 'update_cleanup_failed',
+              kind: error instanceof Error ? error.name : 'unknown',
+            }),
+          );
+        }),
+    );
 }
 if (!app.requestSingleInstanceLock()) app.quit();
 else {

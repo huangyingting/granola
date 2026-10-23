@@ -21,6 +21,7 @@ import {
   updateWorkerFailureSchema,
   updateWorkerOutcomeSchema,
   updateWorkerRequestSchema,
+  updateCleanupReportSchema,
 } from './updates.js';
 
 const policy = {
@@ -41,6 +42,39 @@ const feed = {
 };
 
 describe('packaged update and feed contracts', () => {
+  it('keeps bounded maintenance reports distinct from admission and never labels pending work complete', () => {
+    const report = {
+      version: 1,
+      event: 'update_cleanup_report',
+      identity: { pid: 1234, creation_file_time: '134000000000000002' },
+      status: 'complete',
+      retired: 4,
+      removed: 2,
+      incomplete: 0,
+      rejected: 0,
+    };
+    expect(updateCleanupReportSchema.parse(report)).toEqual(report);
+    expect(
+      updateCleanupReportSchema.parse({
+        ...report,
+        status: 'pending',
+        rejected: 1,
+      }).status,
+    ).toBe('pending');
+    for (const change of [
+      { retired: 5 },
+      { removed: 3 },
+      { rejected: -1 },
+      { incomplete: 129 },
+      { rejected: 1 },
+      { status: 'pending' },
+      { event: 'update_startup_admitted' },
+      { files: ['notes.sqlite'] },
+    ])
+      expect(
+        updateCleanupReportSchema.safeParse({ ...report, ...change }).success,
+      ).toBe(false);
+  });
   it('requires bound healthy resolution and never treats installed or failure metadata as restart authority', () => {
     const proof = {
       session_id: '11111111-1111-4111-8111-111111111111',

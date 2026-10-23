@@ -29,13 +29,18 @@ public static class UpdateRuntimeGuard
             if (!Directory.Exists(root)) new DirectoryInfo(root).Create(UpdatePrivateDirectory.Security());
             directories.Add(UpdatePathLock.OpenDirectory(root));
             UpdatePrivateDirectory.Require(root);
-            var runtime = UpdateRuntimeStager.Copy(Path.TrimEndingDirectorySeparator(AppContext.BaseDirectory),
-                installation.Installation.Directory, root, UpdateRuntimeStager.RequiredFiles, staged =>
-                {
-                    using var local = UpdateRuntimeLease.Open(staged.Directory, installation.Installation.Directory,
-                        staged.Sha256, UpdateRuntimeStager.RequiredFiles);
-                    retained = local.RetainForParent(parent);
-                });
+            StagedUpdateRuntime runtime;
+            using (UpdateOperationLock.Open())
+            {
+                _ = UpdateSessionRetention.Retire(root, UpdateSessionRetention.RetiredRoot);
+                runtime = UpdateRuntimeStager.Copy(Path.TrimEndingDirectorySeparator(AppContext.BaseDirectory),
+                    installation.Installation.Directory, root, UpdateRuntimeStager.RequiredFiles, staged =>
+                    {
+                        using var local = UpdateRuntimeLease.Open(staged.Directory, installation.Installation.Directory,
+                            staged.Sha256, UpdateRuntimeStager.RequiredFiles);
+                        retained = local.RetainForParent(parent);
+                    });
+            }
             await FrameCodec.WriteJsonAsync(output,
                 new { Version = 1, Event = "update_runtime_held", parent.Identity, Runtime = runtime });
             using var stopping = new CancellationTokenSource();

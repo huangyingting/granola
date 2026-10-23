@@ -7,6 +7,8 @@ import {
   updateRestartAdmittedSchema,
   updateRestartFailureSchema,
   updateRestartChallengeSchema,
+  updateCleanupReportSchema,
+  updateCleanupFailureSchema,
 } from '@windows-ai-notes/contracts/updates';
 import type { z } from 'zod';
 import { audioHostEnvironment } from '@windows-ai-notes/client/audio';
@@ -23,6 +25,42 @@ export async function acquireStartupAdmission(
   },
   signal?: AbortSignal,
 ): Promise<void> {
+  await invokeStartupHelper(helper, application, version, restart, signal);
+}
+
+export async function cleanupRetiredUpdateSessions(
+  helper: string,
+  application: string,
+  version: string,
+  signal?: AbortSignal,
+): Promise<z.infer<typeof updateCleanupReportSchema>> {
+  const report = await invokeStartupHelper(
+    helper,
+    application,
+    version,
+    undefined,
+    signal,
+    true,
+  );
+  if (report === null)
+    throw new LocalError(
+      'update_cleanup_protocol',
+      'Update session maintenance returned no report.',
+    );
+  return report;
+}
+
+async function invokeStartupHelper(
+  helper: string,
+  application: string,
+  version: string,
+  restart?: {
+    binding: z.infer<typeof updateRestartChallengeSchema>;
+    endpoint: string;
+  },
+  signal?: AbortSignal,
+  maintenance = false,
+): Promise<z.infer<typeof updateCleanupReportSchema> | null> {
   signal?.throwIfAborted();
   installationArguments(
     helper,
@@ -49,7 +87,11 @@ export async function acquireStartupAdmission(
   const child = spawn(
     helper,
     [
-      restart ? '--claim-update-restart' : '--claim-update-startup',
+      maintenance
+        ? '--cleanup-update-sessions'
+        : restart
+          ? '--claim-update-restart'
+          : '--claim-update-startup',
       String(process.pid),
       application,
       version,
@@ -63,6 +105,7 @@ export async function acquireStartupAdmission(
   );
   const decoder = new FrameDecoder();
   let ready = false;
+  let report: z.infer<typeof updateCleanupReportSchema> | null = null;
   let response = false;
   let failure: LocalError | null = null;
   let outputBytes = 0;
@@ -74,18 +117,26 @@ export async function acquireStartupAdmission(
   });
   let killTimer: ReturnType<typeof setTimeout> | undefined;
   const fail = (code: string, message: string) => {
+    if (maintenance) {
+      code = code.replace(/^update_startup_/u, 'update_cleanup_');
+      message =
+        'Update session maintenance could not be confirmed. Unresolved update records and notes were not changed.';
+    }
     failure ??= new LocalError(code, message);
     if (!closed && killTimer === undefined)
       killTimer = setTimeout(() => {
         child.kill();
       }, 1_000);
   };
-  const timer = setTimeout(() => {
-    fail(
-      'update_startup_timeout',
-      'Startup admission timed out. Close and reopen the app after installation finishes. Local data was not opened.',
-    );
-  }, 30_000);
+  const timer = setTimeout(
+    () => {
+      fail(
+        'update_startup_timeout',
+        'Startup admission timed out. Close and reopen the app after installation finishes. Local data was not opened.',
+      );
+    },
+    maintenance ? 60_000 : 30_000,
+  );
   const abort = () =>
     fail(
       'update_startup_cancelled',
@@ -113,6 +164,22 @@ export async function acquireStartupAdmission(
       for (const frame of decoder.push(chunk)) {
         if (response) throw new Error('Repeated startup response.');
         response = true;
+        if (maintenance) {
+          const rejected = updateCleanupFailureSchema.safeParse(frame);
+          if (rejected.success) {
+            fail(
+              rejected.data.code,
+              'Update session maintenance was rejected.',
+            );
+            continue;
+          }
+          const parsed = updateCleanupReportSchema.parse(frame);
+          if (parsed.identity.pid !== process.pid)
+            throw new Error('Invalid maintenance identity.');
+          report = parsed;
+          ready = true;
+          continue;
+        }
         const rejected = (
           restart ? updateRestartFailureSchema : updateStartupFailureSchema
         ).safeParse(frame);
@@ -191,4 +258,5 @@ export async function acquireStartupAdmission(
   );
   await stopped;
   if (failure !== null) throw failure;
+  return report;
 }

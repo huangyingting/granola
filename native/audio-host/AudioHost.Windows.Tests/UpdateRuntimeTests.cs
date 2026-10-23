@@ -49,6 +49,10 @@ public sealed class UpdateRuntimeTests : IDisposable
         }
         Assert.Equal(bytes, result.Bytes);
         Assert.Equal(Convert.ToHexStringLower(manifest.GetHashAndReset()), result.Sha256);
+        var files = UpdateStateFile.Read<UpdateRuntimeFiles>(result.Directory, UpdateRuntimeFiles.Filename,
+            WindowsAiNotes.Updates.UpdateRuntimeSeal.MaximumBytes);
+        Assert.NotNull(files);
+        Assert.Equal(result.Sha256, files.Manifest());
         using var identity = WindowsIdentity.GetCurrent();
         var security = new DirectoryInfo(result.Directory).GetAccessControl(AccessControlSections.Access | AccessControlSections.Owner);
         Assert.True(security.AreAccessRulesProtected);

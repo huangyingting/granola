@@ -17,7 +17,7 @@ internal static class UpdateStateFile
         MaxDepth = 8
     };
 
-    internal static T? Read<T>(string directory, string filename) where T : class
+    internal static T? Read<T>(string directory, string filename, int maximumBytes = 16_384) where T : class
     {
         var path = Path.Combine(directory, filename);
         try { _ = File.GetAttributes(path); }
@@ -25,8 +25,15 @@ internal static class UpdateStateFile
         using var handle = UpdatePathLock.OpenFile(path);
         UpdatePathLock.RequireSingleRegularFile(handle);
         using var stream = new FileStream(handle, FileAccess.Read);
+        return Read<T>(stream, maximumBytes);
+    }
+
+    internal static T Read<T>(FileStream stream, int maximumBytes = 16_384) where T : class
+    {
+        if (maximumBytes is <= 0 or > UpdateRuntimeSeal.MaximumBytes) throw new ArgumentOutOfRangeException(nameof(maximumBytes));
         UpdatePrivateDirectory.RequireFile(stream);
-        if (stream.Length is <= 0 or > 16_384) throw new UpdateHandoffException("update_recovery_invalid");
+        if (stream.Length <= 0 || stream.Length > maximumBytes) throw new UpdateHandoffException("update_recovery_invalid");
+        stream.Position = 0;
         try
         {
             return JsonSerializer.Deserialize<T>(stream, Options)
@@ -35,8 +42,9 @@ internal static class UpdateStateFile
         catch (JsonException) { throw new UpdateHandoffException("update_recovery_invalid"); }
     }
 
-    internal static void Write<T>(string directory, string filename, T value, bool replace)
+    internal static void Write<T>(string directory, string filename, T value, bool replace, int maximumBytes = 16_384)
     {
+        if (maximumBytes is <= 0 or > UpdateRuntimeSeal.MaximumBytes) throw new ArgumentOutOfRangeException(nameof(maximumBytes));
         var temporary = Path.Combine(directory, $".state-{Guid.NewGuid():N}.tmp");
         try
         {
@@ -44,6 +52,7 @@ internal static class UpdateStateFile
                 FileShare.Read, 4096, FileOptions.WriteThrough, UpdatePrivateDirectory.LockSecurity()))
             {
                 JsonSerializer.Serialize(stream, value, AudioJson.Options);
+                if (stream.Position > maximumBytes) throw new UpdateHandoffException("update_recovery_invalid");
                 stream.Flush(flushToDisk: true);
             }
             if (!MoveFile(temporary, Path.Combine(directory, filename), 8u | (replace ? 1u : 0u)))

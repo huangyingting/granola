@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Runtime.InteropServices;
+using System.Text;
 using Microsoft.Win32.SafeHandles;
 
 namespace WindowsAiNotes.AudioHost;
@@ -16,6 +17,40 @@ internal static class UpdatePathLock
 
     internal static SafeFileHandle OpenFile(string path)
         => Open(path, directory: false);
+
+    internal static SafeFileHandle OpenForRemoval(string path, bool directory)
+    {
+        var handle = Open(path, directory, remove: true);
+        try
+        {
+            if (!directory) RequireSingleRegularFile(handle);
+            return handle;
+        }
+        catch { handle.Dispose(); throw; }
+    }
+
+    internal static void Rename(SafeFileHandle directory, string destination)
+    {
+        if (!UpdateInstallationVerifier.CanonicalPath(destination)) throw new UpdatePathInvalidException();
+        var name = Encoding.Unicode.GetBytes(destination);
+        var offset = Marshal.OffsetOf<RenameInformation>(nameof(RenameInformation.FirstCharacter)).ToInt32();
+        var bytes = checked(offset + name.Length + 2);
+        var buffer = Marshal.AllocHGlobal(bytes);
+        try
+        {
+            Marshal.StructureToPtr(new RenameInformation { Length = (uint)name.Length }, buffer, false);
+            Marshal.Copy(name, 0, buffer + offset, name.Length);
+            Marshal.WriteInt16(buffer + offset + name.Length, 0);
+            if (!SetInformation(directory, 3, buffer, (uint)bytes)) throw new Win32Exception(Marshal.GetLastPInvokeError());
+        }
+        finally { Marshal.FreeHGlobal(buffer); }
+    }
+
+    internal static void Delete(SafeFileHandle handle)
+    {
+        byte remove = 1;
+        if (!SetDisposition(handle, 4, ref remove, 1)) throw new Win32Exception(Marshal.GetLastPInvokeError());
+    }
 
     internal static List<SafeFileHandle> OpenAncestors(string path)
     {
@@ -45,10 +80,10 @@ internal static class UpdatePathLock
             throw new UpdatePathInvalidException();
     }
 
-    private static SafeFileHandle Open(string path, bool directory)
+    private static SafeFileHandle Open(string path, bool directory, bool remove = false)
     {
         // Do not follow reparse points or share DELETE access.
-        var handle = CreateFile(path, directory ? 0x80u : 0x80000000u, directory ? 1u | 2u : 1u,
+        var handle = CreateFile(path, (directory ? 0x80u : 0x80000000u) | (remove ? 0x10000u : 0u), directory ? 1u | 2u : 1u,
             IntPtr.Zero, 3, (directory ? 0x02000000u : 0u) | 0x00200000u, IntPtr.Zero);
         try
         {
@@ -105,6 +140,21 @@ internal static class UpdatePathLock
         public ulong High;
     }
 
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct RenameInformation
+    {
+        public uint Flags;
+        public nint Root;
+        public uint Length;
+        public char FirstCharacter;
+    }
+
+    [DllImport("kernel32.dll", EntryPoint = "SetFileInformationByHandle", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetInformation(SafeFileHandle handle, int informationClass, nint information, uint size);
+    [DllImport("kernel32.dll", EntryPoint = "SetFileInformationByHandle", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetDisposition(SafeFileHandle handle, int informationClass, ref byte information, uint size);
     [DllImport("kernel32.dll", EntryPoint = "CreateFileW", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern SafeFileHandle CreateFile(string path, uint access, uint share, IntPtr security,
         uint creation, uint flags, IntPtr template);

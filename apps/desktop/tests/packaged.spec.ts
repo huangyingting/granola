@@ -126,49 +126,51 @@ test('rejects forged restart startup before unlocking or modifying existing loca
     ).toBe(root);
     expect(readFileSync(join(root, 'content-key.protected'))).toEqual(key);
     expect(readFileSync(join(root, 'notes.sqlite'))).toEqual(database);
-    const rejected = await application.evaluate(
-      async ({ app }, environment) => {
-        const { spawn } = process.getBuiltinModule('node:child_process');
-        const { join, dirname } = process.getBuiltinModule('node:path');
-        const helper = join(
-          process.resourcesPath,
-          'audio-host',
-          'AudioHost.exe',
-        );
-        return new Promise<{ code: number | null; stdout: string }>(
-          (resolve, reject) => {
-            const child = spawn(
-              helper,
-              [
-                '--claim-update-restart',
-                String(process.pid),
-                process.execPath,
-                app.getVersion(),
-              ],
-              {
-                cwd: dirname(helper),
-                env: environment,
-                windowsHide: true,
-                stdio: 'pipe',
-              },
-            );
-            const output: Buffer[] = [];
-            const timer = setTimeout(() => child.kill(), 15_000);
-            child.on('error', reject);
-            child.stdout.on('data', (bytes: Buffer) => output.push(bytes));
-            child.once('close', (code) => {
-              clearTimeout(timer);
-              resolve({
-                code,
-                stdout: Buffer.concat(output).toString('base64'),
+    const invoke = (operation: string) =>
+      application.evaluate(
+        async ({ app }, input) => {
+          const { spawn } = process.getBuiltinModule('node:child_process');
+          const { join, dirname } = process.getBuiltinModule('node:path');
+          const helper = join(
+            process.resourcesPath,
+            'audio-host',
+            'AudioHost.exe',
+          );
+          return new Promise<{ code: number | null; stdout: string }>(
+            (resolve, reject) => {
+              const child = spawn(
+                helper,
+                [
+                  input.operation,
+                  String(process.pid),
+                  process.execPath,
+                  app.getVersion(),
+                ],
+                {
+                  cwd: dirname(helper),
+                  env: input.environment,
+                  windowsHide: true,
+                  stdio: 'pipe',
+                },
+              );
+              const output: Buffer[] = [];
+              const timer = setTimeout(() => child.kill(), 15_000);
+              child.on('error', reject);
+              child.stdout.on('data', (bytes: Buffer) => output.push(bytes));
+              child.once('close', (code) => {
+                clearTimeout(timer);
+                resolve({
+                  code,
+                  stdout: Buffer.concat(output).toString('base64'),
+                });
               });
-            });
-            child.stdin.end();
-          },
-        );
-      },
-      audioHostEnvironment(process.env),
-    );
+              child.stdin.end();
+            },
+          );
+        },
+        { operation, environment: audioHostEnvironment(process.env) },
+      );
+    const rejected = await invoke('--claim-update-restart');
     expect(rejected.code).toBe(2);
     const decoder = new FrameDecoder();
     const frames = decoder.push(Buffer.from(rejected.stdout, 'base64'));
@@ -176,6 +178,26 @@ test('rejects forged restart startup before unlocking or modifying existing loca
     expect(frames).toEqual([
       expect.objectContaining({ version: 1, event: 'update_restart_failed' }),
     ]);
+    const maintenance = await invoke('--cleanup-update-sessions');
+    expect(maintenance.code).toBe(0);
+    const maintenanceDecoder = new FrameDecoder();
+    expect(
+      maintenanceDecoder.push(Buffer.from(maintenance.stdout, 'base64')),
+    ).toEqual([
+      expect.objectContaining({
+        version: 1,
+        event: 'update_cleanup_report',
+        status: 'complete',
+        retired: 0,
+        removed: 0,
+        incomplete: 0,
+        rejected: 0,
+      }),
+    ]);
+    maintenanceDecoder.finish();
+    await expect(
+      page.getByText(/Restart startup could not be confirmed/u),
+    ).toBeVisible();
     expect(readFileSync(join(root, 'content-key.protected'))).toEqual(key);
     expect(readFileSync(join(root, 'notes.sqlite'))).toEqual(database);
   } finally {

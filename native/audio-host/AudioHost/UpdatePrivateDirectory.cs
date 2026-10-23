@@ -19,7 +19,7 @@ internal static class UpdatePrivateDirectory
         return security;
     }
 
-    internal static void Require(string path)
+    internal static void Require(string path, bool requireProtected = true)
     {
         UpdateInstallationVerifier.RequireRegularPath(path, directory: true);
         using var identity = WindowsIdentity.GetCurrent();
@@ -27,7 +27,7 @@ internal static class UpdatePrivateDirectory
         var security = new DirectoryInfo(path).GetAccessControl(AccessControlSections.Access | AccessControlSections.Owner);
         var rules = security.GetAccessRules(true, true, typeof(SecurityIdentifier)).Cast<FileSystemAccessRule>().ToArray();
         var system = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
-        if (!security.AreAccessRulesProtected || !owner.Equals(security.GetOwner(typeof(SecurityIdentifier))) ||
+        if ((requireProtected && !security.AreAccessRulesProtected) || !owner.Equals(security.GetOwner(typeof(SecurityIdentifier))) ||
             rules.Length != 2 || !rules.Any(rule => rule.IdentityReference.Equals(owner)) ||
             !rules.Any(rule => rule.IdentityReference.Equals(system)) ||
             rules.Any(rule => rule.AccessControlType != AccessControlType.Allow ||

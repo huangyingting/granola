@@ -558,6 +558,35 @@ unsupported schemas without replacing notes. DPAPI protects persisted context
 within the Windows account; it is not in-memory attestation against arbitrary
 code already running as that same account.
 
+Healthy-session retention keeps the two newest sealed healthy records. Under
+the native operation lock (and startup admission when opening Main), at most four
+older resolved sessions are atomically renamed by their original kernel directory
+handles into a separate, private `WindowsAINotes.RetiredUpdates` queue. No payload
+hashing or recursive deletion runs on the pre-database startup path. Unknown,
+corrupt, claimed or unresolved post-commit records are never retired, retried,
+rewritten as unused or restored from snapshots.
+
+Newly staged runtimes carry a bounded plain file index, excluded from executable
+provenance just like lifecycle metadata. This index is **not authorization**:
+retirement requires its canonical path/size/hash aggregate to match the runtime
+digest inside the existing DPAPI-sealed healthy outcome. The retained retirement
+receipt preserves that exact healthy state/outcome before the directory moves;
+an interrupted move leaves the original healthy record intact. Legacy healthy
+records without a matching index stay retained and report pending maintenance.
+
+After the writable window initializes, a bundled Main-child helper drains at
+most two retired sessions outside the note-startup critical path. It uses a
+separate native maintenance lock so deletion cannot contend with activation,
+rejects unexpected files, links, aliases and permissions,
+checks each remaining payload against the sealed aggregate's index, and deletes
+through the same retained kernel handles. Original journals, the index and the
+retirement receipt are removed last; interrupted payload/metadata deletion or an
+empty final directory can be resumed without reactivating a session. Queue size
+is capped at 128; busy, read-only, invalid or full queues remain explicitly
+pending rather than evicting unknown data. Main aborts and waits for the helper's
+physical closure during terminal shutdown. Counts are body-free and do not grant
+database admission, process-exit ownership or installer authorization.
+
 Activation now requires the runtime's physical parent to be the fixed private
 worker root, so recovery cannot miss an installer launched from an arbitrary
 diagnostic staging directory. `--stage-update-runtime` still supports copy/

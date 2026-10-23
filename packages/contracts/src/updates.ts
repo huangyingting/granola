@@ -136,6 +136,27 @@ export const updateStartupFailureSchema = z.strictObject({
   event: z.literal('update_startup_failed'),
   code: z.string().regex(/^[a-z][a-z0-9_]{0,99}$/u),
 });
+export const updateCleanupReportSchema = z
+  .strictObject({
+    version: z.literal(1),
+    event: z.literal('update_cleanup_report'),
+    identity: updateParentIdentitySchema,
+    status: z.enum(['complete', 'pending']),
+    retired: z.number().int().min(0).max(4),
+    removed: z.number().int().min(0).max(2),
+    incomplete: z.number().int().min(0).max(128),
+    rejected: z.number().int().min(0).max(128),
+  })
+  .refine((value) =>
+    value.status === 'complete'
+      ? value.incomplete === 0 && value.rejected === 0
+      : value.incomplete > 0 || value.rejected > 0,
+  );
+export const updateCleanupFailureSchema = z.strictObject({
+  version: z.literal(1),
+  event: z.literal('update_cleanup_failed'),
+  code: z.string().regex(/^[a-z][a-z0-9_]{0,99}$/u),
+});
 export const updateRuntimeFailureSchema = z.strictObject({
   version: z.literal(1),
   event: z.literal('update_runtime_failed'),

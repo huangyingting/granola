@@ -2,7 +2,10 @@ import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FrameDecoder, encodeJsonFrame } from '@windows-ai-notes/contracts';
-import { acquireStartupAdmission } from './update-startup.js';
+import {
+  acquireStartupAdmission,
+  cleanupRetiredUpdateSessions,
+} from './update-startup.js';
 
 const native = vi.hoisted(() => ({ spawn: vi.fn() }));
 vi.mock('node:child_process', async (original) => ({
@@ -34,6 +37,137 @@ beforeEach(() => {
 afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllEnvs();
+});
+
+describe('Main-only retired-session maintenance transport', () => {
+  const report = {
+    version: 1,
+    event: 'update_cleanup_report',
+    identity: ready.identity,
+    status: 'complete',
+    retired: 1,
+    removed: 1,
+    incomplete: 0,
+    rejected: 0,
+  };
+  const cleanup = (signal?: AbortSignal) =>
+    cleanupRetiredUpdateSessions(helper, application, '0.1.0', signal);
+
+  it.each(['complete', 'pending'])(
+    'waits for physical closure and preserves the explicit %s report',
+    async (status) => {
+      let finished = false;
+      const pending = cleanup().then((value) => {
+        finished = true;
+        return value;
+      });
+      const frame = {
+        ...report,
+        status,
+        incomplete: status === 'pending' ? 1 : 0,
+      };
+      child.stdout.write(encodeJsonFrame(frame));
+      await Promise.resolve();
+      expect(finished).toBe(false);
+      expect(native.spawn.mock.calls[0]![1]).toEqual([
+        '--cleanup-update-sessions',
+        String(process.pid),
+        application,
+        '0.1.0',
+      ]);
+      expect(child.stdin.writableEnded).toBe(true);
+      child.emit('close', 0, null);
+      await expect(pending).resolves.toEqual(frame);
+    },
+  );
+
+  it.each([
+    'identity',
+    'counts',
+    'status',
+    'extra',
+    'duplicate',
+    'truncated',
+    'nonzero',
+  ])(
+    'rejects %s reports without treating maintenance as startup admission',
+    async (fault) => {
+      const pending = cleanup();
+      const frame = {
+        ...report,
+        ...(fault === 'identity'
+          ? { identity: { ...ready.identity, pid: process.pid + 1 } }
+          : {}),
+        ...(fault === 'counts' ? { retired: 5 } : {}),
+        ...(fault === 'status' ? { incomplete: 1 } : {}),
+        ...(fault === 'extra' ? { path: 'C:\\arbitrary\\notes.sqlite' } : {}),
+      };
+      const bytes = encodeJsonFrame(frame);
+      child.stdout.write(fault === 'truncated' ? bytes.subarray(0, -1) : bytes);
+      if (fault === 'duplicate') child.stdout.write(bytes);
+      child.emit('close', fault === 'nonzero' ? 2 : 0, null);
+      await expect(pending).rejects.toBeInstanceOf(Error);
+    },
+  );
+
+  it('cannot accept an ordinary startup success as a maintenance report', async () => {
+    const pending = cleanup();
+    child.stdout.write(encodeJsonFrame(ready));
+    child.emit('close', 0, null);
+    await expect(pending).rejects.toMatchObject({
+      code: 'update_cleanup_protocol',
+    });
+  });
+
+  it('propagates native recovery rejection rather than returning empty successful cleanup', async () => {
+    const pending = cleanup();
+    child.stdout.write(
+      encodeJsonFrame({
+        version: 1,
+        event: 'update_cleanup_failed',
+        code: 'update_recovery_required',
+      }),
+    );
+    child.emit('close', 2, null);
+    await expect(pending).rejects.toMatchObject({
+      code: 'update_recovery_required',
+    });
+  });
+
+  it('cancels and physically drains the maintenance helper before shutdown can finish', async () => {
+    vi.useFakeTimers();
+    const cancellation = new AbortController();
+    let stopped = false;
+    const result = cleanup(cancellation.signal).catch((error: unknown) => {
+      stopped = true;
+      return error;
+    });
+    cancellation.abort();
+    await vi.advanceTimersByTimeAsync(1001);
+    expect(child.kill).toHaveBeenCalledOnce();
+    expect(stopped).toBe(false);
+    child.emit('close', null, 'SIGTERM');
+    await expect(result).resolves.toMatchObject({
+      code: 'update_cleanup_cancelled',
+    });
+  });
+
+  it('bounds maintenance time without returning before the child closes', async () => {
+    vi.useFakeTimers();
+    let stopped = false;
+    const result = cleanup().catch((error: unknown) => {
+      stopped = true;
+      return error;
+    });
+    await vi.advanceTimersByTimeAsync(60_001);
+    expect(stopped).toBe(false);
+    await vi.advanceTimersByTimeAsync(1001);
+    expect(child.kill).toHaveBeenCalledOnce();
+    child.emit('close', null, 'SIGTERM');
+    await expect(result).resolves.toMatchObject({
+      code: 'update_cleanup_timeout',
+    });
+  });
 });
 
 describe('pre-storage Main startup admission', () => {

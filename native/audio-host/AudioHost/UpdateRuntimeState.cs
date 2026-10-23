@@ -19,15 +19,21 @@ internal sealed record UpdateRuntimeState(int Version, string SessionId, string 
 
     internal static UpdateRuntimeState Read(string directory)
     {
-        var state = UpdateStateFile.Read<UpdateRuntimeState>(directory, Filename);
-        if (state is null || state.Version != 1 || !UpdateRuntimeLease.ValidDirectoryName(Path.GetFileName(directory)) ||
+        var state = UpdateStateFile.Read<UpdateRuntimeState>(directory, Filename)
+            ?? throw new UpdateHandoffException("update_recovery_invalid");
+        RequireValid(state, directory);
+        return state;
+    }
+
+    internal static void RequireValid(UpdateRuntimeState state, string directory)
+    {
+        if (state.Version != 1 || !UpdateRuntimeLease.ValidDirectoryName(Path.GetFileName(directory)) ||
             state.SessionId != Path.GetFileName(directory)[7..] || !UpdateRuntimeLease.ValidManifest(state.RuntimeSha256) ||
             state.Phase is not ("staged" or "claimed" or "committed" or "installing" or "healthy") || !ValidTime(state.UpdatedAt) ||
             (state.Phase == "healthy" ? state.Health is null || !state.Health.Valid(state.SessionId, state.Health.ApplicationVersion) :
                 state.Health is not null) ||
             (state.Phase == "healthy" ? state.Resolution is not { Length: > 0 and <= 12_000 } : state.Resolution is not null))
             throw new UpdateHandoffException("update_recovery_invalid");
-        return state;
     }
 
     internal static void Claim(string directory, string manifest)
