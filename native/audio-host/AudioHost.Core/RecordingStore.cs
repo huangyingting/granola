@@ -78,6 +78,19 @@ public sealed class RecordingStore
         }
     }
 
+    public void RecordCaptureBuild(CaptureBuildProvenance build, double clockMs)
+    {
+        var events = build.Timeline(clockMs);
+        lock (gate)
+        {
+            if (manifest.State != "recording" || manifest.Events.Count != 0
+                || manifest.Tracks.Any(track => track.SavedSamples != 0 || track.ChunkIds.Count != 0))
+                throw new AudioException("invalid_state", "Capture build identity must precede capture and saved audio.");
+            manifest.Events.AddRange(events);
+            SaveManifest();
+        }
+    }
+
     public void Commit(ChunkMetadata metadata, ReadOnlySpan<byte> pcm)
     {
         lock (gate)

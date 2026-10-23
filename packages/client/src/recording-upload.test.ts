@@ -1,5 +1,5 @@
 import { randomBytes, randomUUID } from 'node:crypto';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -101,6 +101,51 @@ describe('authenticated native recording upload preflight', () => {
       ]);
     },
   );
+  it('preserves component provenance unchanged in the validated upload seal', async () => {
+    const { client, recording } = context('archive-build');
+    const { plan } = await prepareRecordingUpload(
+      client,
+      recording,
+      false,
+      () => {},
+    );
+    const vector: {
+      components: { role: string; sha256: string }[];
+      expected_sha256: string;
+    } = JSON.parse(
+      readFileSync(
+        new URL('../../contracts/fixtures/capture-build.json', import.meta.url),
+        'utf8',
+      ),
+    )[0];
+    expect(plan.seal.events).toHaveLength(8);
+    expect(plan.seal.events.slice(0, 5)).toEqual([
+      ...vector.components.map(({ role, sha256 }) => ({
+        event_type: `capture.component.${role}`,
+        clock_ms: 0,
+        capture_epoch: null,
+        code: sha256,
+      })),
+      {
+        event_type: 'capture.build',
+        clock_ms: 0,
+        capture_epoch: null,
+        code: vector.expected_sha256,
+      },
+    ]);
+    expect(plan.seal.events[5]).toMatchObject({
+      event_type: 'capture.started',
+      code: 'wasapi_qpc_v1',
+    });
+    expect(plan.seal.gaps).toEqual([
+      {
+        track_id: recording.tracks[0]!.spec.track_id,
+        start_ms: 2048,
+        end_ms: 3048,
+        reason: 'paused',
+      },
+    ]);
+  });
   it('requires separate consent for interrupted capture and preserves its real native state', async () => {
     const { client, recording } = context('archive-incomplete');
     await expect(

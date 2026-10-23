@@ -10,5 +10,6 @@
     <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" PrivateAssets="all" />
     <ProjectReference Include="../AudioHost.Core/AudioHost.Core.csproj" />
     <Content Include="../../../packages/contracts/fixtures/requests.json" Link="requests.json" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="../../../packages/contracts/fixtures/capture-build.json" Link="capture-build.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

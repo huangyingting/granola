@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import {
   audioRequestSchema,
   encodeFrame,
@@ -129,12 +130,40 @@ const archiveChunks = Array.from(
     },
   }),
 );
+const captureBuild =
+  mode === 'archive-build'
+    ? JSON.parse(
+        readFileSync(
+          new URL(
+            '../../contracts/fixtures/capture-build.json',
+            import.meta.url,
+          ),
+          'utf8',
+        ),
+      )[0]
+    : null;
 const archiveEvents = [
+  ...(captureBuild
+    ? [
+        ...captureBuild.components.map(({ role, sha256 }) => ({
+          event_type: `capture.component.${role}`,
+          clock_ms: 0,
+          capture_epoch: null,
+          code: sha256,
+        })),
+        {
+          event_type: 'capture.build',
+          clock_ms: 0,
+          capture_epoch: null,
+          code: captureBuild.expected_sha256,
+        },
+      ]
+    : []),
   {
     event_type: 'capture.started',
     clock_ms: 0,
     capture_epoch: upload.chunk.capture_epoch,
-    code: null,
+    code: captureBuild ? 'wasapi_qpc_v1' : null,
   },
   ...(mode === 'archive-pages'
     ? Array.from({ length: 50 }, (_, index) => ({

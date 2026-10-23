@@ -24,6 +24,7 @@ internal sealed class CaptureSession
         this.specs = specs;
         this.storage = storage;
         this.captureClock = captureClock;
+        var build = CaptureBuildIdentity.ForProfile(captureClock);
         storage.EnsureCaptureCapacity();
         foreach (var spec in specs)
         {
@@ -31,6 +32,7 @@ internal sealed class CaptureSession
             endpoints.Add(spec.TrackId, endpoint.ID);
         }
         Store = new RecordingStore(root, recordingId, specs, protector, endpoints, storage);
+        if (build is not null) Store.RecordCaptureBuild(build, clock.Elapsed.TotalMilliseconds);
         foreach (var spec in specs)
             writers.Add(spec.TrackId, new PcmChunkWriter(Store, spec.TrackId));
     }

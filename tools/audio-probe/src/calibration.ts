@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import type { AudioHostClient } from './client.js';
 import type { UploadChunk } from '@windows-ai-notes/contracts';
 import { canonicalJson } from '@windows-ai-notes/contracts/content';
+import { readCaptureBuild } from './capture-build.js';
 import {
   calibration,
   calibrationPcm,
@@ -123,13 +124,14 @@ export async function measureCalibration(
   )
     throw new Error('Calibration received an inconsistent recording manifest.');
   const manifest = described.payload;
-  const [started, stopped] = manifest.events;
+  const started = manifest.events.at(-2);
+  const stopped = manifest.events.at(-1);
   if (
     manifest.state !== 'sealed' ||
     manifest.event_offset !== 0 ||
     manifest.has_more ||
-    manifest.event_count !== 2 ||
-    manifest.events.length !== 2 ||
+    manifest.event_count !== manifest.events.length ||
+    ![2, 7].includes(manifest.event_count) ||
     started?.event_type !== 'capture.started' ||
     started.code !== 'wasapi_qpc_v1' ||
     !started.capture_epoch ||
@@ -152,6 +154,10 @@ export async function measureCalibration(
     throw new Error(
       'Calibration requires two tracks and one uninterrupted wasapi_qpc_v1 epoch.',
     );
+  const captureBuild = readCaptureBuild(
+    manifest.events.slice(0, -2),
+    started.clock_ms,
+  );
   const chunkIds = new Set<string>();
   const archiveHash = createHash('sha256').update(canonicalJson(manifest));
   const tracks = [];
@@ -281,6 +287,8 @@ export async function measureCalibration(
       tracks,
     ),
     archive_descriptor_sha256: archiveHash.digest('hex'),
+    capture_build_provenance: captureBuild,
+    capture_build_provenance_recorded: captureBuild !== null,
   };
 }
 

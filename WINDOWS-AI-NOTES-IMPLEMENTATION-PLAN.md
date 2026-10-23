@@ -369,6 +369,8 @@ sequenceDiagram
 
 探针另提供固定一小时 `calibration-audio` 合成 WAV 与只读 `calibrate RECORDING_UUID`：在真实双路可接收同一信号的受控条件下，播放带静弱 carrier 和十三个带编号/校验 tone marker 的固定样本；分析仅接受 authenticated sealed、单一连续 `wasapi_qpc_v1` epoch，复用既有有界且完整校验的 WAV range，不导出录音明文文件或打印媒体/base64/设备名，并清零自有 range buffer。报告给出描述符指纹、缺失/重复/异常 marker、逐点双路偏移及相对首点的变化；按 chunk 已认证 clock endpoint 线性插值，不冒充逐采样硬件时钟。至少 3,550 秒媒体和 marker clock span、3,590 秒 capture span，以及含固定分析窗口 margin 的 200 ms sampled offset/change 检查全部满足才返回零状态；五分钟预算在 native 请求/range 之间核对。固定窗口 margin 不是任意声学/硬件精度保证，连续对齐及 production acceptance 始终为 false。真实一小时 capture build、声学连接、播放设置及设备矩阵仍须独立保存和人工验收；加速生成/解码测试不解除实机门禁，不默认启用实验后端。
 
+实验采集现于设备启动前，为 AudioHost、AudioHost.Core、NAudio.Core 和 NAudio.Wasapi 四个固定组件文件检查其 managed module ID 与已加载 assembly 的一致性，计算完整有界文件的 SHA-256，并把组件及 canonical aggregate 写入加密时间线；无法确认身份则拒绝实验采集，默认 callback 后端不变。只读校准验证并报告该绑定，旧录音明确报告缺失，部分或错误绑定不能降级为旧格式；上传 seal 原样保留这些事件。此信息仅标识当时读取的组件文件，不证明 publisher、源码 commit 或完整进程/已加载代码，亦不持续锁定文件或覆盖 runtime/OS；对应 trust evaluation 始终为 false，不解除实机、签名或生产门禁。
+
 ## 8. AI 服务端设计
 
 ### 8.1 供应商适配与模型路由

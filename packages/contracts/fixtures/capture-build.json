@@ -1,0 +1,46 @@
+[
+  {
+    "name": "distinct-components",
+    "components": [
+      {
+        "role": "audio_host",
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      {
+        "role": "audio_core",
+        "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      {
+        "role": "naudio_core",
+        "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      {
+        "role": "naudio_wasapi",
+        "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      }
+    ],
+    "expected_sha256": "32acf515f7ab4051e82dc2f8edbddc9fe996844cda9cbe06c6cc23666cfa53f3"
+  },
+  {
+    "name": "zero-digests-are-data-not-trust",
+    "components": [
+      {
+        "role": "audio_host",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      {
+        "role": "audio_core",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      {
+        "role": "naudio_core",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      {
+        "role": "naudio_wasapi",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    ],
+    "expected_sha256": "6a193da1d5e4abcbe5e42113a1b4c9dec26ff0aa8d53137e2c336e96bd112d86"
+  }
+]

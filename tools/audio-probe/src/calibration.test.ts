@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { mkdtemp, open, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -31,6 +32,19 @@ type Inspection = Extract<
   AudioEvent,
   { event_type: 'recording.inspected' | 'recording.recovered' }
 >['payload'];
+
+const buildVector: {
+  components: { role: string; sha256: string }[];
+  expected_sha256: string;
+} = JSON.parse(
+  readFileSync(
+    new URL(
+      '../../../packages/contracts/fixtures/capture-build.json',
+      import.meta.url,
+    ),
+    'utf8',
+  ),
+)[0];
 
 class NativeFixture {
   readonly id = randomUUID();
@@ -131,6 +145,24 @@ class NativeFixture {
       ),
       issues: [],
     };
+  }
+
+  withCaptureBuild() {
+    this.manifest.events.unshift(
+      ...buildVector.components.map(({ role, sha256 }) => ({
+        event_type: `capture.component.${role}`,
+        clock_ms: 0,
+        capture_epoch: null,
+        code: sha256,
+      })),
+      {
+        event_type: 'capture.build',
+        clock_ms: 0,
+        capture_epoch: null,
+        code: buildVector.expected_sha256,
+      },
+    );
+    this.manifest.event_count = this.manifest.events.length;
   }
 
   async request(
@@ -243,6 +275,7 @@ function reportTracks(offset = 25, change = 0) {
 describe('calibration archive measurement', () => {
   it('streams both complete one-hour fixtures through bounded authenticated archive primitives', async () => {
     const native = new NativeFixture(3600);
+    native.withCaptureBuild();
     native.retainBuffers = false;
     const report = await measureCalibration(
       native,
@@ -263,6 +296,19 @@ describe('calibration archive measurement', () => {
     expect(report.continuous_alignment_evaluated).toBe(false);
     expect(report.production_accepted).toBe(false);
     expect(report.archive_descriptor_sha256).toMatch(/^[a-f0-9]{64}$/u);
+    expect(report.capture_build_provenance_recorded).toBe(true);
+    expect(report.capture_build_provenance?.sha256).toBe(
+      buildVector.expected_sha256,
+    );
+    expect(report.capture_build_provenance?.publisher_trust_evaluated).toBe(
+      false,
+    );
+    expect(report.capture_build_provenance?.source_commit_evaluated).toBe(
+      false,
+    );
+    expect(
+      report.capture_build_provenance?.loaded_process_attestation_evaluated,
+    ).toBe(false);
     expect(JSON.stringify(report)).not.toContain('synthetic-microphone');
     expect(JSON.stringify(report)).not.toContain('data_base64');
   }, 30_000);
@@ -276,6 +322,8 @@ describe('calibration archive measurement', () => {
     );
     expect(report.pairs).toEqual([{ index: 0, offset_ms: 25 }]);
     expect(report.complete_fixture_detected).toBe(false);
+    expect(report.capture_build_provenance_recorded).toBe(false);
+    expect(report.capture_build_provenance).toBeNull();
     expect(report.sampled_landmarks_within_target).toBe(false);
     expect(report.tracks[0]!.missing_marker_ids).toHaveLength(12);
     expect(
@@ -283,6 +331,25 @@ describe('calibration archive measurement', () => {
     ).toBe(true);
   });
 
+  it.each(['partial', 'changed-digest', 'unbound-epoch'])(
+    'rejects %s component provenance before exposing recorded media',
+    async (scenario) => {
+      const native = new NativeFixture();
+      native.withCaptureBuild();
+      if (scenario === 'partial') {
+        native.manifest.events.shift();
+        native.manifest.event_count--;
+      }
+      if (scenario === 'changed-digest')
+        native.manifest.events[0]!.code = '0'.repeat(64);
+      if (scenario === 'unbound-epoch')
+        native.manifest.events[0]!.capture_epoch = native.epoch;
+      await expect(
+        measureCalibration(native, native.id, new AbortController().signal),
+      ).rejects.toThrow();
+      expect(native.exports).toBe(0);
+    },
+  );
   it('measures actual waveform displacement as well as the authenticated chunk clock offset', async () => {
     const native = new NativeFixture();
     native.microphoneDelaySamples = 640;

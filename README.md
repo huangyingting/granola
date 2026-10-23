@@ -2850,10 +2850,27 @@ offset and maximum relative change fit the 200 ms target with those margins.
 **A zero exit status applies only to these sampled checks.**
 `continuous_alignment_evaluated` and `production_accepted` remain `false`, even
 then. Preserve the report together with the exact capture build and controlled
-hardware/playback setup for human review; the archive's profile identifier alone
-does not establish capture-build provenance. Synthetic accelerated tests of this
+hardware/playback setup for human review. Synthetic accelerated tests of this
 tool are not physical one-hour evidence and do not enable experimental capture
 or clear any release gate.
+
+New experimental captures record SHA-256 identities for four component files:
+AudioHost, AudioHost.Core, NAudio.Core and NAudio.Wasapi. Before device capture,
+the host checks each file's managed module ID against the corresponding loaded
+assembly, hashes the complete bounded file, and records the four digests plus
+a canonical aggregate in the encrypted timeline. Unavailable or inconsistent
+identity prevents experimental capture; default callback capture is unchanged.
+`calibrate` validates this binding and includes `capture_build_provenance`.
+Older archives remain measurable but explicitly report a null identity and
+`capture_build_provenance_recorded: false`; partial or malformed provenance is
+rejected rather than treated as legacy.
+
+These are diagnostic component-file identities, not publisher verification,
+source-commit proof or loaded-process attestation. Matching module IDs do not
+prove the loaded code matches every hashed byte, files are not pinned for the
+whole recording, and the runtime/OS/other modules are outside this fingerprint.
+All three corresponding trust-evaluation fields remain `false`. The profile
+identifier alone still does not establish which component files were present.
 
 `record` prints the recording UUID and typed JSON events. Status reports
 `saved_samples`, not merely received audio: short tails are not committed until a
