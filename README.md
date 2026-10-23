@@ -2835,6 +2835,18 @@ lifetime. Desktop saved-audio uploads use these authenticated exports. Request-o
 bounded native PCM; their desktop cloud orchestration remains later work.
 Native validation and Zod validation share checked-in request fixtures.
 
+Capture normalization reuses one fixed 192,000-byte PCM16 staging buffer per track,
+derived from the converter's existing six-second source limit; the capture queue
+still admits at most five seconds of source bytes. Owned source packets and the
+entire staging capacity are cleared after processing, including conversion,
+encrypted-storage and live-consumer failures. A failed processor cannot be
+reused. Consumer termination closes the queue before clearing unread packets, and
+late rejected copies are cleared rather than retained. Converter output and
+downmix scratch are also cleared after use. Saved samples, clock ranges and
+encrypted-chunk recovery semantics are unchanged. This is owned-buffer lifecycle
+cleanup, not a claim to erase SDK-private buffers/DSP state, OS/device memory or memory
+dumps; it does not establish acoustic alignment or device-clock fidelity.
+
 Recording directories contain an encrypted `manifest.enc`, UUID-named `.chunk`
 files, and possibly uncommitted `.partial` files after a crash. The new
 `WNOTE001` envelope is specific to this project, not Granola's format. Each

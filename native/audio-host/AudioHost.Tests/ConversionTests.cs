@@ -52,4 +52,25 @@ public sealed class ConversionTests
         BinaryPrimitives.WriteSingleLittleEndian(invalid, float.NaN);
         Assert.Equal("invalid_audio", Assert.Throws<AudioException>(() => converter.Convert(invalid, (_, _) => { })).Code);
     }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void BorrowedConversionScratchIsClearedAfterSuccessOrCallbackFailure(bool fail)
+    {
+        var converter = new PcmConverter(new WaveFormat(16_000, 16, 1));
+        var source = Enumerable.Repeat((byte)0x31, 1600).ToArray();
+        byte[]? borrowed = null;
+        void Consume(byte[] pcm, int count)
+        {
+            borrowed = pcm;
+            Assert.Contains(pcm.AsSpan(0, count).ToArray(), value => value != 0);
+            if (fail) throw new IOException("Synthetic callback failure.");
+        }
+        if (fail) Assert.Throws<IOException>(() => converter.Convert(source, Consume));
+        else converter.Convert(source, Consume);
+        Assert.NotNull(borrowed);
+        Assert.All(borrowed, value => Assert.Equal(0, value));
+        Assert.Contains(source, value => value != 0);
+    }
 }

@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Security.Cryptography;
 using System.Threading.Channels;
 using NAudio.CoreAudioApi;
 using NAudio.Wave;
@@ -8,7 +9,7 @@ namespace WindowsAiNotes.AudioHost;
 
 internal sealed class CaptureTrack : IDisposable
 {
-    private sealed record Packet(byte[] Bytes, double StartMs, double EndMs);
+    internal sealed record Packet(byte[] Bytes, double StartMs, double EndMs);
     private readonly MMDevice endpoint;
     private readonly WasapiCapture capture;
     private readonly Channel<Packet> packets = Channel.CreateBounded<Packet>(new BoundedChannelOptions(64)
@@ -37,10 +38,10 @@ internal sealed class CaptureTrack : IDisposable
         this.failure = failure;
         capture = kind == "microphone" ? new WasapiCapture(endpoint) : new WasapiLoopbackCapture(endpoint);
         maxQueuedBytes = checked(capture.WaveFormat.AverageBytesPerSecond * 5);
-        PcmConverter converter;
+        CapturePcmProcessor processor;
         try
         {
-            converter = new PcmConverter(capture.WaveFormat);
+            processor = new CapturePcmProcessor(capture.WaveFormat);
         }
         catch
         {
@@ -57,18 +58,25 @@ internal sealed class CaptureTrack : IDisposable
         };
         consumer = Task.Run(async () =>
         {
+            using var ownedProcessor = processor;
             try
             {
                 await foreach (var packet in packets.Reader.ReadAllAsync())
                 {
-                    using var normalized = new MemoryStream();
-                    converter.Convert(packet.Bytes, (bytes, count) => normalized.Write(bytes, 0, count));
-                    var pcm = normalized.GetBuffer().AsSpan(0, (int)normalized.Length);
-                    var sampleStart = writer.TotalSamples;
-                    writer.Append(pcm, packet.StartMs, packet.EndMs);
-                    levels.Append(pcm, packet.EndMs);
-                    live(sampleStart, pcm, packet.StartMs, packet.EndMs);
-                    Interlocked.Add(ref queuedBytes, -packet.Bytes.Length);
+                    try
+                    {
+                        ownedProcessor.Process(packet.Bytes, packet.StartMs, packet.EndMs, (pcm, startMs, endMs) =>
+                        {
+                            var sampleStart = writer.TotalSamples;
+                            writer.Append(pcm.Span, startMs, endMs);
+                            levels.Append(pcm.Span, endMs);
+                            live(sampleStart, pcm.Span, startMs, endMs);
+                        });
+                    }
+                    finally
+                    {
+                        Interlocked.Add(ref queuedBytes, -packet.Bytes.Length);
+                    }
                 }
                 writer.Flush();
             }
@@ -79,19 +87,41 @@ internal sealed class CaptureTrack : IDisposable
                 failure.TrySetResult(audioError);
                 throw audioError;
             }
+            finally
+            {
+                Interlocked.Add(ref queuedBytes, -CompleteAndClear(packets));
+            }
         });
     }
 
     public delegate void LivePcmConsumer(long sampleStart, ReadOnlySpan<byte> bytes, double startMs, double endMs);
     public TrackLevel ReadLevel() => new(TrackId, levels.Read());
 
+    internal static long CompleteAndClear(Channel<Packet> packets)
+    {
+        packets.Writer.TryComplete();
+        long cleared = 0;
+        while (packets.Reader.TryRead(out var packet))
+        {
+            CryptographicOperations.ZeroMemory(packet.Bytes);
+            cleared += packet.Bytes.Length;
+        }
+        return cleared;
+    }
+
     private void OnData(object? sender, WaveInEventArgs args)
     {
         if (args.BytesRecorded == 0 || failure.Task.IsCompleted) return;
         if (args.BytesRecorded > 1024 * 1024
-            || args.BytesRecorded % capture.WaveFormat.BlockAlign != 0
-            || Interlocked.Add(ref queuedBytes, args.BytesRecorded) > maxQueuedBytes)
+            || args.BytesRecorded < 0 || args.BytesRecorded > args.Buffer.Length
+            || args.BytesRecorded % capture.WaveFormat.BlockAlign != 0)
         {
+            failure.TrySetResult(new AudioException("capture_overrun", "The bounded capture queue overflowed or received invalid audio. Recording must stop."));
+            return;
+        }
+        if (Interlocked.Add(ref queuedBytes, args.BytesRecorded) > maxQueuedBytes)
+        {
+            Interlocked.Add(ref queuedBytes, -args.BytesRecorded);
             failure.TrySetResult(new AudioException("capture_overrun", "The bounded capture queue overflowed or received invalid audio. Recording must stop."));
             return;
         }
@@ -100,6 +130,7 @@ internal sealed class CaptureTrack : IDisposable
         var startMs = Math.Max(0, endMs - 1000.0 * bytes.Length / capture.WaveFormat.AverageBytesPerSecond);
         if (!packets.Writer.TryWrite(new Packet(bytes, startMs, endMs)))
         {
+            CryptographicOperations.ZeroMemory(bytes);
             Interlocked.Add(ref queuedBytes, -bytes.Length);
             failure.TrySetResult(new AudioException("capture_overrun", "The bounded capture queue is full. Recording must stop."));
         }
