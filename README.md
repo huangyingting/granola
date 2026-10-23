@@ -2353,7 +2353,12 @@ stopped instead. Schema upgrades also require the documented backup/migration
 procedure, not merely restarting containers.
 
 Both health commands consume no response body and report only fixed failure
-codes. The API checks real database-backed readiness. The Worker has an optional
+codes. The API checks real database-backed readiness.
+API readiness also checks the drain state before starting SQL and after a pending
+query completes: an already-admitted probe cannot report success after shutdown
+starts, and one waiting in the handler pipeline cannot start a new readiness query.
+Already-admitted liveness remains SQL-free; the listener still closes normally.
+The Worker has an optional
 `WORKER_HEALTH_PORT` (canonical integer 1–65535), absent/disabled for standalone
 runs; this manifest enables port 4412 **only inside the Worker**, always bound to
 `127.0.0.1`, never published. `/health/live` checks HTTP/event-loop liveness without

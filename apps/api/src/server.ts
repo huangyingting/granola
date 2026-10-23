@@ -76,6 +76,15 @@ export async function createServer(
   const authenticate = createAuthenticator(config, db);
   const streams = new Map<string, number>();
   const shutdown = new AbortController();
+  const assertNotStopping = () => {
+    if (shutdown.signal.aborted)
+      throw new ServiceError(
+        'service_unavailable',
+        'The API is shutting down.',
+        503,
+        true,
+      );
+  };
   app.addHook('onReady', async () => db.assertReady(shutdown.signal));
   app.addHook('preClose', async () => shutdown.abort());
   app.addHook('onSend', async (_request, reply, payload) => {
@@ -184,9 +193,9 @@ export async function createServer(
     '/health',
     { config: { rateLimit: { groupId: 'health/readiness' } } },
     async () => {
+      assertNotStopping();
       try {
         await db.checkHealth();
-        return { status: 'ok' };
       } catch {
         throw new ServiceError(
           'database_unavailable',
@@ -195,6 +204,8 @@ export async function createServer(
           true,
         );
       }
+      assertNotStopping();
+      return { status: 'ok' };
     },
   );
   app.get(

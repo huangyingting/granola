@@ -143,3 +143,85 @@ it.each([false, true])(
     );
   },
 );
+
+it.each([
+  { method: 'GET', path: '/health', phase: 'handler', status: 503, queries: 0 },
+  { method: 'GET', path: '/health', phase: 'sql', status: 503, queries: 1 },
+  { method: 'HEAD', path: '/health', phase: 'sql', status: 503, queries: 1 },
+  {
+    method: 'GET',
+    path: '/health/live',
+    phase: 'handler',
+    status: 200,
+    queries: 0,
+  },
+])(
+  'drains actual HTTP $method $path held at $phase with status $status',
+  async ({ method, path, phase, status, queries }) => {
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let entered = false,
+      stopping = false,
+      closed = false;
+    if (phase === 'sql') {
+      vi.mocked(db.pool.query).mockImplementation(async () => {
+        entered = true;
+        await blocked;
+        return result;
+      });
+    } else {
+      app.addHook('preHandler', async (request) => {
+        if (request.routeOptions.url === path) {
+          entered = true;
+          await blocked;
+        }
+      });
+    }
+    app.addHook('preClose', async () => {
+      stopping = true;
+    });
+    app.addHook('onClose', async () => {
+      closed = true;
+    });
+    const url = await app.listen({ host: '127.0.0.1', port: 0 });
+    const pending = fetch(url + path, {
+      method,
+      signal: AbortSignal.timeout(5000),
+    }).then(async (response) => ({
+      status: response.status,
+      headers: response.headers,
+      body: await response.text(),
+    }));
+    let closing: Promise<void> | undefined;
+    try {
+      await vi.waitFor(() => expect(entered).toBe(true));
+      closing = app.close();
+      await vi.waitFor(() => expect(stopping).toBe(true));
+      expect(closed).toBe(false);
+      expect(db.pool.query).toHaveBeenCalledTimes(queries);
+    } finally {
+      release();
+      await pending;
+      await closing;
+    }
+    const response = await pending;
+    expect(response.status).toBe(status);
+    expect(response.headers.get('connection')).toBe('close');
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(response.headers.get('x-content-type-options')).toBe('nosniff');
+    if (method === 'HEAD') expect(response.body).toBe('');
+    else if (status === 503)
+      expect(JSON.parse(response.body)).toMatchObject({
+        code: 'service_unavailable',
+        message: 'The API is shutting down.',
+        retryable: true,
+        request_id: expect.any(String),
+      });
+    else expect(JSON.parse(response.body)).toEqual({ status: 'ok' });
+    expect(db.pool.query).toHaveBeenCalledTimes(queries);
+    expect(db.identify).not.toHaveBeenCalled();
+    expect(closed).toBe(true);
+  },
+);
