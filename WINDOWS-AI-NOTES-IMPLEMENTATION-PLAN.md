@@ -556,6 +556,8 @@ request ID 串联 API、job、worker 和 provider request，生产 trace 默认�
 
 已增加只针对密封 healthy session 的有界保留与退休队列：在现有 native operation 锁下（普通启动同时持 admission）保留最新两个经 DPAPI 绑定 outcome 时间的健康记录，每次最多将四个较旧已解决 session 通过原始目录内核句柄原子移到同卷、当前用户/SYSTEM 专属的 `WindowsAINotes.RetiredUpdates`。原始 state/outcome 不改写，未解决、损坏或不明确记录绝不退休。新的 staging 写入有界纯文件索引；它只在 path/size/hash 聚合与现有密封 healthy receipt 的 runtime digest 完全一致时才可用于清理，不能自称来源、首次准入或安装授权。移动前保留严格原始健康上下文的退休 receipt，不能用名称或普通 JSON 删除安装 fence；旧健康记录缺失索引仍保留并明确提示 pending。启动门禁不执行递归删除/大文件 hash，Main 可写窗口建立后才启动真实 bundled 子 helper，每次最多清理两个退休 session；逐文件 hash 与原始删除句柄一致，拒绝额外文件、重解析、hard-link、别名及异常权限，最后才删除日志、索引和 receipt，部分清理及空最终目录可继续。队列最多 128，锁定/只读/损坏/满额都报告 pending，不自动丢弃不确定内容。终止式关闭取消并等待 helper 物理退出，所有报告只含计数、不含正文，也不授予数据库准入或 Main 退出权。尚未 commit 的遗留记录仍保留，恢复检查 UX 和正式 activation 协调及真实签名/部署/设备验收继续是门禁，安装与重启入口仍禁用。
 
+已增加打包 Windows Main 的只读恢复检查及页内 UX：启动被阻断时仍可从错误页进入 About & updates，原始 bundled 子 helper 验证实际 Main 创建者，在 operation 与 cleanup 锁下只读取固定私有 active/retired 根中的严格元数据。每根最多检查 128 项并额外观察一项以明确报告越界，最多返回 32 个优先呈现的未解决/不可验证 session 摘要；不暴露路径、pins、原始进程句柄或正文。健康记录沿用 DPAPI 绑定校验，退休记录沿用保留的健康 receipt 及仍存在的原日志；未知、损坏、重放及 busy 均显式呈现，不伪装为空成功。检查不解锁内容密钥、不打开 SQLite、不 hash payload、不退休/删除记录、不解除 fence、不重试安装或恢复快照；已记录健康不代表当前 payload 完整性或数据库准入。刷新失败保留带时间戳的旧观察，不改变原本禁用、失败或已下载的更新状态，终止关闭取消并等待 helper 物理结束。正式 activation/退出权协调、授权恢复与第一方签名正向更新、部署/物理设备/质量和运行验收仍是门禁，安装与重启继续禁用。
+
 ## 12. 建议代码组织
 
 以下是未来建项布局，不是已经存在的目录：

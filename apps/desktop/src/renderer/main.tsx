@@ -455,6 +455,11 @@ function App() {
             {state && (
               <button onClick={() => void flush.current()}>Retry save</button>
             )}
+            {!state && (
+              <button onClick={() => setPage('updates')}>
+                Inspect update recovery
+              </button>
+            )}
             <button
               onClick={() => void invoke({ operation: 'openRecoveryFolder' })}
             >

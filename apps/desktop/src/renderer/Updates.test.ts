@@ -5,7 +5,7 @@ import {
   desktopUpdateStateSchema,
   type DesktopUpdateState,
 } from '@windows-ai-notes/contracts/updates';
-import { UpdateCard } from './Updates.js';
+import { RecoveryRecords, UpdateCard } from './Updates.js';
 
 const state = desktopUpdateStateSchema.parse({
   version: 1,
@@ -17,6 +17,8 @@ const state = desktopUpdateStateSchema.parse({
   can_check: false,
   can_download: false,
   can_cancel: false,
+  can_inspect: false,
+  inspection: null,
   installation_enabled: false,
   cache: null,
   error: null,
@@ -31,6 +33,91 @@ function render(change: Partial<DesktopUpdateState> = {}, pending = false) {
   );
 }
 describe('desktop update cards', () => {
+  it('offers only read-only inspection after blocked startup without enabling installation', () => {
+    const html = render({
+      phase: 'failed',
+      can_inspect: true,
+      error: {
+        code: 'update_recovery_required',
+        message: 'Storage stays blocked.',
+      },
+    });
+    expect(html).toContain('Inspect recovery records');
+    expect(html).toContain('Storage stays blocked.');
+    expect(html).not.toContain('Restart to update');
+    expect(html).not.toContain('Clear recovery');
+  });
+  it('distinguishes an empty inspection from permission to start storage', () => {
+    const html = renderToStaticMarkup(
+      createElement(RecoveryRecords, {
+        report: {
+          checked_at: '2026-01-01T00:00:00.000Z',
+          status: 'complete',
+          active: 0,
+          retired: 0,
+          unverifiable: 0,
+          limited: false,
+          omitted: 0,
+          sessions: [],
+        },
+      }),
+    );
+    expect(html).toContain('No update session records were found');
+    expect(html).toContain('This does not authorize startup');
+    expect(html).toContain('verify current payload files');
+    expect(html).not.toContain('<button');
+  });
+  it('surfaces unresolved, unverifiable and truncated records without repair or deletion controls', () => {
+    const html = renderToStaticMarkup(
+      createElement(RecoveryRecords, {
+        report: {
+          checked_at: '2026-01-01T00:00:00.000Z',
+          status: 'partial',
+          active: 129,
+          retired: 0,
+          unverifiable: 1,
+          limited: true,
+          omitted: 97,
+          sessions: [
+            {
+              location: 'active',
+              session_id: '00000000-0000-4000-8000-000000000001',
+              status: 'recovery_required',
+              current_version: '0.1.0',
+              offered_version: '0.1.1',
+              updated_at: '2026-01-01T00:00:00.000Z',
+              code: 'update_recovery_required',
+            },
+            {
+              location: 'active',
+              session_id: null,
+              status: 'unverifiable',
+              current_version: null,
+              offered_version: null,
+              updated_at: null,
+              code: 'update_recovery_invalid',
+            },
+            ...Array.from({ length: 30 }, (_, index) => ({
+              location: 'active' as const,
+              session_id: `00000000-0000-4000-8000-${(index + 2).toString().padStart(12, '0')}`,
+              status: 'uncommitted' as const,
+              current_version: null,
+              offered_version: null,
+              updated_at: '2026-01-01T00:00:00.000Z',
+              code: 'update_runtime_staged',
+            })),
+          ],
+        },
+      }),
+    );
+    expect(html).toContain('Startup stays blocked');
+    expect(html).toContain('Record not verified');
+    expect(html).toContain('Uncertain records were preserved');
+    expect(html).toContain('safety limit');
+    expect(html).toContain('97 additional record(s)');
+    expect(html).toContain('<details>');
+    expect(html).not.toContain('<button');
+  });
   it('explains an unconfigured package without offering update or installation controls', () => {
     const html = render();
     expect(html).toContain('Installed version 0.1.0');

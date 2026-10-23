@@ -48,23 +48,7 @@ internal static class UpdateStartupRecovery
                 UpdatePrivateDirectory.Require(directory);
                 var state = UpdateRuntimeState.Read(directory);
                 var outcome = UpdateWorkerJournal.Read(directory);
-                if (state.Phase == "healthy")
-                {
-                    if (outcome?.Phase != "healthy" || state.Health != outcome.Restart)
-                        throw new UpdateHandoffException("update_recovery_invalid");
-                    UpdateHealthyResolution.Require(state, outcome);
-                    continue;
-                }
-                if (state.Phase is "committed" or "installing")
-                    throw new UpdateHandoffException("update_recovery_required");
-                if (state.Phase == "staged")
-                {
-                    if (outcome is not null) throw new UpdateHandoffException("update_recovery_invalid");
-                    continue;
-                }
-                if (outcome is null) throw new UpdateHandoffException("update_recovery_required");
-                if (outcome.InstallerStarted || outcome.Phase is not ("preparing" or "prepared" or "failed"))
-                    throw new UpdateHandoffException("update_recovery_invalid");
+                RequireSafe(state, outcome);
             }
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or SecurityException or
@@ -77,5 +61,26 @@ internal static class UpdateStartupRecovery
         {
             for (var index = directories.Count - 1; index >= 0; index--) directories[index].Dispose();
         }
+    }
+
+    internal static void RequireSafe(UpdateRuntimeState state, UpdateWorkerOutcome? outcome)
+    {
+        if (state.Phase == "healthy")
+        {
+            if (outcome?.Phase != "healthy" || state.Health != outcome.Restart)
+                throw new UpdateHandoffException("update_recovery_invalid");
+            UpdateHealthyResolution.Require(state, outcome);
+            return;
+        }
+        if (state.Phase is "committed" or "installing")
+            throw new UpdateHandoffException("update_recovery_required");
+        if (state.Phase == "staged")
+        {
+            if (outcome is not null) throw new UpdateHandoffException("update_recovery_invalid");
+            return;
+        }
+        if (outcome is null) throw new UpdateHandoffException("update_recovery_required");
+        if (outcome.InstallerStarted || outcome.Phase is not ("preparing" or "prepared" or "failed"))
+            throw new UpdateHandoffException("update_recovery_invalid");
     }
 }

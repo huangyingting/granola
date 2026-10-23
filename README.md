@@ -587,6 +587,27 @@ pending rather than evicting unknown data. Main aborts and waits for the helper'
 physical closure during terminal shutdown. Counts are body-free and do not grant
 database admission, process-exit ownership or installer authorization.
 
+**About & updates** provides explicit, read-only recovery inspection in packaged
+Windows builds, including a shortcut from the blocked-startup screen. Its original
+bundled Main-child helper authenticates the actual creator and reads only the fixed
+private active/retired namespaces while holding the operation and maintenance
+locks. A busy lock is an explicit inspection error, not an empty successful report.
+The scan checks at most 128 entries per root plus one overflow sentinel, returns
+at most 32 prioritized session summaries, and reports limits, omitted records and
+unverifiable metadata without exposing paths, trust pins, raw process handles or
+note contents. Healthy summaries require the existing DPAPI-bound resolution;
+retired metadata requires the preserved healthy receipt and matching remaining
+journals, including interrupted deletion. An empty final directory is shown only
+as cleanup pending, without a health claim.
+
+Inspection never opens the content key or SQLite, hashes payloads, retires or
+deletes sessions, clears fences, retries installation or restores a backup. It
+describes recorded health, **not current payload integrity or startup permission**.
+The UI retains the last observation and its timestamp when refreshing fails;
+inspection cannot turn a failed or disabled package into an update-ready one.
+Cancellation and terminal shutdown wait for the helper's physical closure.
+Installation/restart controls remain disabled.
+
 Activation now requires the runtime's physical parent to be the fixed private
 worker root, so recovery cannot miss an installer launched from an arbitrary
 diagnostic staging directory. `--stage-update-runtime` still supports copy/

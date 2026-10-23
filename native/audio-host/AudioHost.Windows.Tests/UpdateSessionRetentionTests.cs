@@ -377,6 +377,153 @@ public sealed class UpdateSessionRetentionTests : IDisposable
         Assert.Empty(Directory.EnumerateFileSystemEntries(Retired));
     }
 
+    [Fact]
+    public void InspectionReadsOnlyRecoveryMetadataAndDoesNotResolveAnInstalledFenceOrOpenLockedPayload()
+    {
+        var healthy = Healthy();
+        Stage();
+        Installed(Stage());
+        var before = Directory.GetDirectories(Workers).ToDictionary(directory => directory, Snapshot);
+        using (File.Open(Path.Combine(healthy, "AudioHost.Core.dll"), FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+        {
+            var report = UpdateSessionInspection.Read(Workers, Retired);
+            Assert.Equal("complete", report.Status);
+            Assert.Equal(3, report.Active);
+            Assert.Equal(0, report.Retired);
+            Assert.Equal(0, report.Unverifiable);
+            Assert.Equal("recovery_required", report.Sessions[0].Status);
+            Assert.Contains(report.Sessions, item => item.Status == "healthy");
+            Assert.Contains(report.Sessions, item => item.Status == "uncommitted");
+            Assert.DoesNotContain(Path.GetFileName(root), System.Text.Json.JsonSerializer.Serialize(report));
+        }
+        foreach (var (directory, files) in before) AssertSnapshot(directory, files);
+        Assert.Throws<UpdateHandoffException>(() => UpdateStartupRecovery.RequireSafe(Workers));
+        Assert.False(Directory.Exists(Retired));
+    }
+
+    [Theory]
+    [InlineData("state")]
+    [InlineData("outcome")]
+    [InlineData("resolution")]
+    [InlineData("unknown")]
+    public void InspectionReportsUnverifiableRecordsExplicitlyAndPreservesAllOriginalBytes(string fault)
+    {
+        var healthy = Healthy();
+        if (fault == "unknown") File.WriteAllText(Path.Combine(Workers, "notes.sqlite"), "Synthetic unexpected root entry.");
+        else if (fault == "state") File.WriteAllText(Path.Combine(healthy, UpdateRuntimeState.Filename), "{invalid");
+        else
+        {
+            var path = Path.Combine(healthy, fault == "outcome" ? UpdateWorkerJournal.Filename : UpdateRuntimeState.Filename);
+            var node = JsonNode.Parse(File.ReadAllText(path))!;
+            if (fault == "outcome") node["version"] = 2;
+            else node["resolution"] = "not a protected receipt";
+            File.WriteAllText(path, node.ToJsonString());
+        }
+        var before = Snapshot(Workers);
+        var report = UpdateSessionInspection.Read(Workers, Retired);
+        Assert.Equal("partial", report.Status);
+        Assert.Equal(1, report.Unverifiable);
+        var entry = report.Sessions.First();
+        Assert.Equal("unverifiable", entry.Status);
+        Assert.Null(entry.CurrentVersion);
+        Assert.Null(entry.OfferedVersion);
+        Assert.Null(entry.UpdatedAt);
+        if (fault == "unknown") Assert.Null(entry.SessionId);
+        AssertSnapshot(Workers, before);
+        Assert.Throws<UpdateHandoffException>(() => UpdateStartupRecovery.RequireSafe(Workers));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void InspectionDoesNotTreatAMissingClaimedJournalAsPermissionToOpenStorage(bool committed)
+    {
+        var runtime = Stage();
+        UpdateRuntimeState.Claim(runtime.Directory, runtime.Sha256);
+        if (committed) UpdateRuntimeState.RecordIntent(runtime.Directory, "committed");
+        var before = Snapshot(runtime.Directory);
+        var report = UpdateSessionInspection.Read(Workers, Retired);
+        Assert.Equal("recovery_required", Assert.Single(report.Sessions).Status);
+        AssertSnapshot(runtime.Directory, before);
+        Assert.Throws<UpdateHandoffException>(() => UpdateStartupRecovery.RequireSafe(Workers));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void InspectionPreservesRetiredFilesAndAcceptsAResumableMissingOriginalJournal(bool partial)
+    {
+        var directory = RetireOldest();
+        if (partial)
+        {
+            File.Delete(Path.Combine(directory, UpdateRuntimeState.Filename));
+            File.Delete(Path.Combine(directory, "AudioHost.Core.dll"));
+        }
+        var before = Snapshot(directory);
+        var report = UpdateSessionInspection.Read(Workers, Retired);
+        Assert.Equal("complete", report.Status);
+        Assert.Equal(2, report.Active);
+        Assert.Equal(1, report.Retired);
+        Assert.Equal("retired", report.Sessions[0].Status);
+        Assert.Equal("update_cleanup_pending", report.Sessions[0].Code);
+        AssertSnapshot(directory, before);
+        UpdateStartupRecovery.RequireSafe(Workers);
+    }
+
+    [Fact]
+    public void InspectionRejectsRetiredSessionReplayAndNeverFollowsAnActiveDirectoryLink()
+    {
+        var retired = RetireOldest();
+        var replay = Path.Combine(Retired, $"worker-{Guid.NewGuid():D}");
+        Directory.Move(retired, replay);
+        var linked = Path.Combine(Workers, $"worker-{Guid.NewGuid():D}");
+        Directory.CreateSymbolicLink(linked, Source);
+        var before = Snapshot(replay);
+        var canary = File.ReadAllBytes(Path.Combine(root, "notes.sqlite"));
+        var report = UpdateSessionInspection.Read(Workers, Retired);
+        Assert.Equal(2, report.Unverifiable);
+        Assert.Equal("partial", report.Status);
+        AssertSnapshot(replay, before);
+        Assert.Equal(canary, File.ReadAllBytes(Path.Combine(root, "notes.sqlite")));
+        Assert.True(Directory.Exists(linked));
+    }
+
+    [Fact]
+    public void InspectionBoundsBothNamespaceScansAndReturnedEntriesWithoutHidingTheLimit()
+    {
+        new DirectoryInfo(Retired).Create(UpdatePrivateDirectory.Security());
+        for (var index = 0; index < 129; index++)
+        {
+            new DirectoryInfo(Path.Combine(Workers, $"worker-{Guid.NewGuid():D}")).Create(UpdatePrivateDirectory.Security());
+            new DirectoryInfo(Path.Combine(Retired, $"worker-{Guid.NewGuid():D}")).Create(UpdatePrivateDirectory.Security());
+        }
+        var report = UpdateSessionInspection.Read(Workers, Retired);
+        Assert.Equal("partial", report.Status);
+        Assert.True(report.Limited);
+        Assert.Equal(129, report.Active);
+        Assert.Equal(129, report.Retired);
+        Assert.Equal(128, report.Unverifiable);
+        Assert.Equal(32, report.Sessions.Length);
+        Assert.Equal(226, report.Omitted);
+        Assert.All(report.Sessions, item => Assert.Equal("unverifiable", item.Status));
+        Assert.Equal(129, Directory.GetDirectories(Workers).Length);
+        Assert.Equal(129, Directory.GetDirectories(Retired).Length);
+    }
+
+    [Fact]
+    public void InspectionOfAbsentRootsCreatesNothingAndCancellationIsNotAnEmptySuccessfulReport()
+    {
+        Directory.Delete(Workers);
+        var report = UpdateSessionInspection.Read(Workers, Retired);
+        Assert.Equal("complete", report.Status);
+        Assert.Empty(report.Sessions);
+        Assert.False(Directory.Exists(Workers));
+        Assert.False(Directory.Exists(Retired));
+        using var cancelled = new CancellationTokenSource();
+        cancelled.Cancel();
+        Assert.Throws<OperationCanceledException>(() => UpdateSessionInspection.Read(Workers, Retired, cancelled.Token));
+    }
+
     private string RetireOldest()
     {
         var oldest = ThreeHealthy();

@@ -22,6 +22,9 @@ import {
   updateWorkerOutcomeSchema,
   updateWorkerRequestSchema,
   updateCleanupReportSchema,
+  updateSessionInspectionSchema,
+  updateInspectionReportSchema,
+  updateStartupAdmittedSchema,
 } from './updates.js';
 
 const policy = {
@@ -40,6 +43,109 @@ const feed = {
   bytes: 100,
   sha512: Buffer.alloc(64).toString('base64'),
 };
+
+describe('read-only update inspection contracts', () => {
+  const entry = {
+    location: 'active',
+    session_id: '00000000-0000-4000-8000-000000000001',
+    status: 'recovery_required',
+    current_version: '0.1.0',
+    offered_version: '0.1.1',
+    updated_at: '2026-01-01T00:00:00.000Z',
+    code: 'update_recovery_required',
+  };
+  const report = {
+    checked_at: '2026-01-01T00:00:01.000Z',
+    status: 'complete',
+    active: 1,
+    retired: 0,
+    unverifiable: 0,
+    limited: false,
+    omitted: 0,
+    sessions: [entry],
+  };
+  it('distinguishes complete inspection of an unresolved fence from startup authority', () => {
+    expect(updateSessionInspectionSchema.parse(report)).toEqual(report);
+    const envelope = {
+      version: 1,
+      event: 'update_inspection_report',
+      identity: { pid: 1234, creation_file_time: '134000000000000001' },
+      report,
+    };
+    expect(updateInspectionReportSchema.parse(envelope)).toEqual(envelope);
+    expect(updateStartupAdmittedSchema.safeParse(envelope).success).toBe(false);
+  });
+  it('accepts an explicit partial result with no version claims for corrupt records', () => {
+    expect(
+      updateSessionInspectionSchema.parse({
+        ...report,
+        status: 'partial',
+        unverifiable: 1,
+        sessions: [
+          {
+            ...entry,
+            status: 'unverifiable',
+            session_id: null,
+            current_version: null,
+            offered_version: null,
+            updated_at: null,
+          },
+        ],
+      }).unverifiable,
+    ).toBe(1);
+  });
+  it('bounds both scans, returned entries and explicit omitted counts', () => {
+    const limited = {
+      ...report,
+      status: 'partial',
+      active: 129,
+      retired: 129,
+      limited: true,
+      omitted: 226,
+      sessions: Array.from({ length: 32 }, (_, index) => ({
+        ...entry,
+        session_id: `00000000-0000-4000-8000-${index.toString().padStart(12, '0')}`,
+      })),
+    };
+    expect(updateSessionInspectionSchema.parse(limited)).toEqual(limited);
+  });
+  it.each([
+    { ...report, directory: 'C:\\private\\notes' },
+    { ...report, active: 130 },
+    { ...report, active: 2 },
+    { ...report, status: 'partial' },
+    { ...report, limited: true },
+    { ...report, unverifiable: 1 },
+    { ...report, sessions: [] },
+    { ...report, active: 2, sessions: [entry, entry] },
+    { ...report, sessions: [{ ...entry, location: 'retired' }] },
+    { ...report, sessions: [{ ...entry, status: 'retired' }] },
+    { ...report, sessions: [{ ...entry, session_id: null }] },
+    { ...report, sessions: [{ ...entry, current_version: null }] },
+    {
+      ...report,
+      sessions: [{ ...entry, status: 'healthy', updated_at: null }],
+    },
+    {
+      ...report,
+      status: 'partial',
+      unverifiable: 1,
+      sessions: [{ ...entry, status: 'unverifiable' }],
+    },
+    {
+      ...report,
+      active: 33,
+      sessions: Array.from({ length: 33 }, () => entry),
+    },
+  ])(
+    'rejects misleading, unbounded or authority-shaped reports %#',
+    (invalid) => {
+      expect(updateSessionInspectionSchema.safeParse(invalid).success).toBe(
+        false,
+      );
+    },
+  );
+});
 
 describe('packaged update and feed contracts', () => {
   it('keeps bounded maintenance reports distinct from admission and never labels pending work complete', () => {
@@ -157,10 +263,12 @@ describe('packaged update and feed contracts', () => {
       can_download: false,
       can_cancel: false,
       installation_enabled: false,
+      can_inspect: false,
+      inspection: null,
       cache: null,
       error: null,
     };
-    it.each(['getState', 'check', 'download', 'cancel'])(
+    it.each(['getState', 'check', 'download', 'cancel', 'inspect'])(
       'accepts only a named action without renderer-supplied update authority: %s',
       (operation) => {
         expect(desktopUpdateCommandSchema.parse({ operation })).toEqual({

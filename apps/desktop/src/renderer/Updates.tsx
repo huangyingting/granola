@@ -17,6 +17,8 @@ function status(state: DesktopUpdateState) {
       return 'Check when you are ready. Updates are not checked automatically.';
     case 'checking':
       return 'Checking for updates...';
+    case 'inspecting':
+      return 'Inspecting update recovery records without opening local notes...';
     case 'current':
       return 'No newer update is available.';
     case 'available':
@@ -74,6 +76,21 @@ export function UpdateCard({
         </p>
       )}
       <div className="inline-actions">
+        {(state.can_inspect ||
+          state.phase === 'inspecting' ||
+          state.inspection) && (
+          <button
+            className="secondary"
+            disabled={pending || !state.can_inspect}
+            onClick={() => onAction({ operation: 'inspect' })}
+          >
+            {state.phase === 'inspecting'
+              ? 'Inspecting recovery records...'
+              : state.inspection
+                ? 'Refresh recovery records'
+                : 'Inspect recovery records'}
+          </button>
+        )}
         {state.phase !== 'disabled' && (
           <button
             className="secondary"
@@ -106,7 +123,81 @@ export function UpdateCard({
         Installation is not available in this build. Downloading an update does
         not install it or restart the app.
       </p>
+      {state.inspection && <RecoveryRecords report={state.inspection} />}
     </article>
+  );
+}
+
+export function RecoveryRecords({
+  report,
+}: {
+  report: NonNullable<DesktopUpdateState['inspection']>;
+}) {
+  const labels = {
+    healthy: 'Recorded storage health',
+    uncommitted: 'Not committed',
+    recovery_required: 'Startup blocked',
+    retired: 'Cleanup pending',
+    unverifiable: 'Record not verified',
+  };
+  return (
+    <section aria-label="Update recovery records">
+      <h3>Update recovery records</h3>
+      <p className="quiet-note">
+        {report.limited ? 'At least ' : ''}
+        {report.active} active and {report.retired} retired sessions. Checked{' '}
+        <time dateTime={report.checked_at}>
+          {new Date(report.checked_at).toLocaleString()}
+        </time>
+        .
+      </p>
+      {report.status === 'partial' && (
+        <p className="account-alert" role="status">
+          {report.unverifiable} record(s) could not be verified.
+          {report.limited && ' The scan reached its safety limit.'} Uncertain
+          records were preserved.
+        </p>
+      )}
+      {report.sessions.some((item) => item.status === 'recovery_required') && (
+        <p className="account-alert" role="status">
+          An update still requires recovery. Startup stays blocked until it is
+          resolved; do not delete its records or retry the installer.
+        </p>
+      )}
+      {report.sessions.length === 0 && (
+        <p>
+          No update session records were found. This does not authorize startup.
+        </p>
+      )}
+      {report.sessions.length > 0 && (
+        <details>
+          <summary>View recorded sessions</summary>
+          <ul>
+            {report.sessions.map((item, index) => (
+              <li key={`${item.location}:${item.session_id ?? index}`}>
+                <strong>{labels[item.status]}</strong>{' '}
+                {item.session_id
+                  ? `Session ${item.session_id.slice(0, 8)}`
+                  : 'Unrecognized entry'}
+                {item.current_version &&
+                  ` | ${item.current_version} to ${item.offered_version}`}{' '}
+                <code>{item.code}</code>
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
+      {report.omitted > 0 && (
+        <p className="quiet-note">
+          {report.limited ? 'At least ' : ''}
+          {report.omitted} additional record(s) are not shown.
+        </p>
+      )}
+      <p className="quiet-note">
+        Record inspection does not open notes, verify current payload files,
+        clear recovery blocks, install updates, or restore backups.
+      </p>
+    </section>
   );
 }
 

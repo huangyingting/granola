@@ -185,7 +185,7 @@ internal static class UpdateSessionRetention
             yield return relative[..offset];
     }
 
-    private static void RequireReceipt(UpdateRetiredReceipt receipt, string directory)
+    internal static void RequireReceipt(UpdateRetiredReceipt receipt, string directory)
     {
         if (receipt.Version != 1) throw new UpdateHandoffException("update_cleanup_invalid");
         UpdateRuntimeState.RequireValid(receipt.State, directory);
@@ -205,7 +205,7 @@ internal static class UpdateSessionRetention
         return entries.Order(StringComparer.Ordinal).ToArray();
     }
 
-    private static bool OpenRoot(string root, List<SafeFileHandle> held, bool create)
+    internal static bool OpenRoot(string root, List<SafeFileHandle> held, bool create)
     {
         if (!UpdateInstallationVerifier.CanonicalPath(root) || !UpdatePathLock.IsFixedDiskPath(root))
             throw new UpdateHandoffException("update_cleanup_location");

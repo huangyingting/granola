@@ -9,6 +9,8 @@ import {
   updateRestartChallengeSchema,
   updateCleanupReportSchema,
   updateCleanupFailureSchema,
+  updateInspectionReportSchema,
+  updateInspectionFailureSchema,
 } from '@windows-ai-notes/contracts/updates';
 import type { z } from 'zod';
 import { audioHostEnvironment } from '@windows-ai-notes/client/audio';
@@ -40,14 +42,36 @@ export async function cleanupRetiredUpdateSessions(
     version,
     undefined,
     signal,
-    true,
+    'cleanup',
   );
-  if (report === null)
+  if (report?.event !== 'update_cleanup_report')
     throw new LocalError(
       'update_cleanup_protocol',
       'Update session maintenance returned no report.',
     );
   return report;
+}
+
+export async function inspectUpdateSessions(
+  helper: string,
+  application: string,
+  version: string,
+  signal?: AbortSignal,
+): Promise<z.infer<typeof updateInspectionReportSchema>['report']> {
+  const response = await invokeStartupHelper(
+    helper,
+    application,
+    version,
+    undefined,
+    signal,
+    'inspection',
+  );
+  if (response?.event !== 'update_inspection_report')
+    throw new LocalError(
+      'update_inspection_protocol',
+      'Update recovery inspection returned no report.',
+    );
+  return response.report;
 }
 
 async function invokeStartupHelper(
@@ -59,8 +83,12 @@ async function invokeStartupHelper(
     endpoint: string;
   },
   signal?: AbortSignal,
-  maintenance = false,
-): Promise<z.infer<typeof updateCleanupReportSchema> | null> {
+  maintenance?: 'cleanup' | 'inspection',
+): Promise<
+  | z.infer<typeof updateCleanupReportSchema>
+  | z.infer<typeof updateInspectionReportSchema>
+  | null
+> {
   signal?.throwIfAborted();
   installationArguments(
     helper,
@@ -87,11 +115,13 @@ async function invokeStartupHelper(
   const child = spawn(
     helper,
     [
-      maintenance
-        ? '--cleanup-update-sessions'
-        : restart
-          ? '--claim-update-restart'
-          : '--claim-update-startup',
+      maintenance === 'inspection'
+        ? '--inspect-update-sessions'
+        : maintenance === 'cleanup'
+          ? '--cleanup-update-sessions'
+          : restart
+            ? '--claim-update-restart'
+            : '--claim-update-startup',
       String(process.pid),
       application,
       version,
@@ -105,7 +135,10 @@ async function invokeStartupHelper(
   );
   const decoder = new FrameDecoder();
   let ready = false;
-  let report: z.infer<typeof updateCleanupReportSchema> | null = null;
+  let report:
+    | z.infer<typeof updateCleanupReportSchema>
+    | z.infer<typeof updateInspectionReportSchema>
+    | null = null;
   let response = false;
   let failure: LocalError | null = null;
   let outputBytes = 0;
@@ -118,9 +151,13 @@ async function invokeStartupHelper(
   let killTimer: ReturnType<typeof setTimeout> | undefined;
   const fail = (code: string, message: string) => {
     if (maintenance) {
-      code = code.replace(/^update_startup_/u, 'update_cleanup_');
+      code = code.replace(/^update_startup_/u, `update_${maintenance}_`);
       message =
-        'Update session maintenance could not be confirmed. Unresolved update records and notes were not changed.';
+        maintenance === 'cleanup'
+          ? 'Update session maintenance could not be confirmed. Unresolved update records and notes were not changed.'
+          : code === 'update_worker_busy'
+            ? 'Update records are busy. Wait for installation or maintenance to finish, then inspect again. No notes were opened.'
+            : 'Update recovery records could not be inspected. No recovery blocks were cleared and no notes were opened.';
     }
     failure ??= new LocalError(code, message);
     if (!closed && killTimer === undefined)
@@ -135,7 +172,7 @@ async function invokeStartupHelper(
         'Startup admission timed out. Close and reopen the app after installation finishes. Local data was not opened.',
       );
     },
-    maintenance ? 60_000 : 30_000,
+    maintenance === 'cleanup' ? 60_000 : 30_000,
   );
   const abort = () =>
     fail(
@@ -165,7 +202,11 @@ async function invokeStartupHelper(
         if (response) throw new Error('Repeated startup response.');
         response = true;
         if (maintenance) {
-          const rejected = updateCleanupFailureSchema.safeParse(frame);
+          const rejected = (
+            maintenance === 'cleanup'
+              ? updateCleanupFailureSchema
+              : updateInspectionFailureSchema
+          ).safeParse(frame);
           if (rejected.success) {
             fail(
               rejected.data.code,
@@ -173,7 +214,11 @@ async function invokeStartupHelper(
             );
             continue;
           }
-          const parsed = updateCleanupReportSchema.parse(frame);
+          const parsed = (
+            maintenance === 'cleanup'
+              ? updateCleanupReportSchema
+              : updateInspectionReportSchema
+          ).parse(frame);
           if (parsed.identity.pid !== process.pid)
             throw new Error('Invalid maintenance identity.');
           report = parsed;

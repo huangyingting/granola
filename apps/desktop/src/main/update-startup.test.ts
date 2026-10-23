@@ -5,6 +5,7 @@ import { FrameDecoder, encodeJsonFrame } from '@windows-ai-notes/contracts';
 import {
   acquireStartupAdmission,
   cleanupRetiredUpdateSessions,
+  inspectUpdateSessions,
 } from './update-startup.js';
 
 const native = vi.hoisted(() => ({ spawn: vi.fn() }));
@@ -37,6 +38,130 @@ beforeEach(() => {
 afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllEnvs();
+});
+
+describe('Main-only read-only update inspection transport', () => {
+  const report = {
+    checked_at: '2026-01-01T00:00:00.000Z',
+    status: 'complete',
+    active: 0,
+    retired: 0,
+    unverifiable: 0,
+    limited: false,
+    omitted: 0,
+    sessions: [],
+  };
+  const frame = {
+    version: 1,
+    event: 'update_inspection_report',
+    identity: ready.identity,
+    report,
+  };
+  const inspect = (signal?: AbortSignal) =>
+    inspectUpdateSessions(helper, application, '0.1.0', signal);
+  it('uses fixed native inspection with no caller paths and waits for physical exit', async () => {
+    let finished = false;
+    const result = inspect().then((value) => {
+      finished = true;
+      return value;
+    });
+    child.stdout.write(encodeJsonFrame(frame));
+    await Promise.resolve();
+    expect(finished).toBe(false);
+    expect(native.spawn.mock.calls[0]![1]).toEqual([
+      '--inspect-update-sessions',
+      String(process.pid),
+      application,
+      '0.1.0',
+    ]);
+    expect(child.stdin.writableEnded).toBe(true);
+    child.emit('close', 0, null);
+    await expect(result).resolves.toEqual(report);
+  });
+  it.each([
+    'startup',
+    'cleanup',
+    'identity',
+    'counts',
+    'status',
+    'path',
+    'duplicate',
+    'truncated',
+    'exit',
+  ])(
+    'rejects %s without returning an empty successful inspection',
+    async (fault) => {
+      const result = inspect();
+      const value =
+        fault === 'startup'
+          ? ready
+          : fault === 'cleanup'
+            ? { ...frame, event: 'update_cleanup_report' }
+            : {
+                ...frame,
+                ...(fault === 'identity'
+                  ? { identity: { ...ready.identity, pid: process.pid + 1 } }
+                  : {}),
+                report: {
+                  ...report,
+                  ...(fault === 'counts' ? { active: 1 } : {}),
+                  ...(fault === 'status' ? { status: 'partial' } : {}),
+                  ...(fault === 'path'
+                    ? { directory: 'C:\\private\\notes' }
+                    : {}),
+                },
+              };
+      const bytes = encodeJsonFrame(value);
+      child.stdout.write(fault === 'truncated' ? bytes.subarray(0, -1) : bytes);
+      if (fault === 'duplicate') child.stdout.write(bytes);
+      child.emit('close', fault === 'exit' ? 2 : 0, null);
+      await expect(result).rejects.toMatchObject({
+        code:
+          fault === 'exit'
+            ? 'update_inspection_unavailable'
+            : 'update_inspection_protocol',
+      });
+    },
+  );
+  it('reports a busy native lock without interpreting it as no unresolved records', async () => {
+    const result = inspect();
+    child.stdout.write(
+      encodeJsonFrame({
+        version: 1,
+        event: 'update_inspection_failed',
+        code: 'update_worker_busy',
+      }),
+    );
+    child.emit('close', 2, null);
+    await expect(result).rejects.toMatchObject({
+      code: 'update_worker_busy',
+      message: expect.stringContaining('records are busy'),
+    });
+  });
+  it.each(['cancel', 'timeout'])(
+    'physically drains on %s before shutdown can continue',
+    async (reason) => {
+      vi.useFakeTimers();
+      const cancellation = new AbortController();
+      let stopped = false;
+      const result = inspect(cancellation.signal).catch((error: unknown) => {
+        stopped = true;
+        return error;
+      });
+      if (reason === 'cancel') cancellation.abort();
+      else await vi.advanceTimersByTimeAsync(30_001);
+      await vi.advanceTimersByTimeAsync(1001);
+      expect(child.kill).toHaveBeenCalledOnce();
+      expect(stopped).toBe(false);
+      child.emit('close', null, 'SIGTERM');
+      await expect(result).resolves.toMatchObject({
+        code:
+          reason === 'cancel'
+            ? 'update_inspection_cancelled'
+            : 'update_inspection_timeout',
+      });
+    },
+  );
 });
 
 describe('Main-only retired-session maintenance transport', () => {

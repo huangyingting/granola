@@ -157,6 +157,93 @@ export const updateCleanupFailureSchema = z.strictObject({
   event: z.literal('update_cleanup_failed'),
   code: z.string().regex(/^[a-z][a-z0-9_]{0,99}$/u),
 });
+export const updateSessionInspectionSchema = z
+  .strictObject({
+    checked_at: z.iso.datetime(),
+    status: z.enum(['complete', 'partial']),
+    active: z.number().int().min(0).max(129),
+    retired: z.number().int().min(0).max(129),
+    unverifiable: z.number().int().min(0).max(256),
+    limited: z.boolean(),
+    omitted: z.number().int().min(0).max(258),
+    sessions: z
+      .array(
+        z.strictObject({
+          location: z.enum(['active', 'retired']),
+          session_id: z.uuidv4().nullable(),
+          status: z.enum([
+            'healthy',
+            'uncommitted',
+            'recovery_required',
+            'retired',
+            'unverifiable',
+          ]),
+          current_version: updateVersionSchema.nullable(),
+          offered_version: updateVersionSchema.nullable(),
+          updated_at: z.iso.datetime().nullable(),
+          code: z.string().regex(/^[a-z][a-z0-9_]{0,99}$/u),
+        }),
+      )
+      .max(32),
+  })
+  .refine(
+    (value) =>
+      value.sessions.length + value.omitted === value.active + value.retired &&
+      value.sessions.length ===
+        Math.min(
+          32,
+          value.active +
+            value.retired -
+            (value.active > 128 ? 1 : 0) -
+            (value.retired > 128 ? 1 : 0),
+        ) &&
+      value.unverifiable <=
+        value.active +
+          value.retired -
+          (value.active > 128 ? 1 : 0) -
+          (value.retired > 128 ? 1 : 0) &&
+      value.unverifiable >=
+        value.sessions.filter((item) => item.status === 'unverifiable')
+          .length &&
+      value.status ===
+        (value.limited || value.unverifiable > 0 ? 'partial' : 'complete') &&
+      value.limited === (value.active > 128 || value.retired > 128) &&
+      value.sessions.filter((item) => item.location === 'active').length <=
+        value.active &&
+      value.sessions.filter((item) => item.location === 'retired').length <=
+        value.retired &&
+      new Set(
+        value.sessions
+          .filter((item) => item.session_id !== null)
+          .map((item) => `${item.location}:${item.session_id}`),
+      ).size ===
+        value.sessions.filter((item) => item.session_id !== null).length &&
+      value.sessions.every((item) =>
+        item.status === 'unverifiable'
+          ? item.current_version === null &&
+            item.offered_version === null &&
+            item.updated_at === null
+          : item.session_id !== null &&
+            (item.location === 'retired'
+              ? item.status === 'retired'
+              : item.status !== 'retired') &&
+            (item.current_version === null) ===
+              (item.offered_version === null) &&
+            (item.status !== 'healthy' ||
+              (item.current_version !== null && item.updated_at !== null)),
+      ),
+  );
+export const updateInspectionReportSchema = z.strictObject({
+  version: z.literal(1),
+  event: z.literal('update_inspection_report'),
+  identity: updateParentIdentitySchema,
+  report: updateSessionInspectionSchema,
+});
+export const updateInspectionFailureSchema = z.strictObject({
+  version: z.literal(1),
+  event: z.literal('update_inspection_failed'),
+  code: z.string().regex(/^[a-z][a-z0-9_]{0,99}$/u),
+});
 export const updateRuntimeFailureSchema = z.strictObject({
   version: z.literal(1),
   event: z.literal('update_runtime_failed'),
@@ -287,7 +374,7 @@ export const cachedUpdateSchema = z.strictObject({
   verified_at: z.iso.datetime(),
 });
 export const desktopUpdateCommandSchema = z.strictObject({
-  operation: z.enum(['getState', 'check', 'download', 'cancel']),
+  operation: z.enum(['getState', 'check', 'download', 'cancel', 'inspect']),
 });
 const updateError = z.strictObject({
   code: z.string().regex(/^[a-z][a-z0-9_]{0,99}$/u),
@@ -303,6 +390,7 @@ export const desktopUpdateStateSchema = z.strictObject({
     'recovering',
     'idle',
     'checking',
+    'inspecting',
     'current',
     'available',
     'downloading',
@@ -316,6 +404,8 @@ export const desktopUpdateStateSchema = z.strictObject({
   can_check: z.boolean(),
   can_download: z.boolean(),
   can_cancel: z.boolean(),
+  can_inspect: z.boolean(),
+  inspection: updateSessionInspectionSchema.nullable(),
   installation_enabled: z.literal(false),
   cache: z
     .strictObject({

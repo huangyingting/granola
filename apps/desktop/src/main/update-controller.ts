@@ -1,6 +1,7 @@
 import {
   compareUpdateVersions,
   desktopUpdateStateSchema,
+  updateSessionInspectionSchema,
   type DesktopUpdateCommand,
   type DesktopUpdateState,
   type UpdateFeed,
@@ -23,6 +24,7 @@ export class DesktopUpdateController {
   private feed: UpdateFeed | null = null;
   private ready: ReadyUpdate | null = null;
   private cache: DesktopUpdateState['cache'] = null;
+  private inspection: DesktopUpdateState['inspection'] = null;
   private phase: DesktopUpdateState['phase'] = 'initializing';
   private error: DesktopUpdateState['error'] = null;
   private revision = 0;
@@ -34,6 +36,9 @@ export class DesktopUpdateController {
     private readonly installedVersion: string,
     private readonly load: () => Promise<Downloads | null>,
     private readonly observe: (state: DesktopUpdateState) => void,
+    private readonly inspect?: (
+      signal: AbortSignal,
+    ) => Promise<NonNullable<DesktopUpdateState['inspection']>>,
   ) {}
 
   start() {
@@ -56,6 +61,8 @@ export class DesktopUpdateController {
         !this.closed && !this.active && !!this.feed && !this.hasReadyFeed(),
       can_cancel:
         !this.closed && !!this.active && !this.active.abort.signal.aborted,
+      can_inspect: !this.closed && !this.active && !!this.inspect,
+      inspection: this.inspection,
       installation_enabled: false,
       cache: this.cache,
       error: this.error,
@@ -82,6 +89,29 @@ export class DesktopUpdateController {
         'update_busy',
         'Wait for the current update operation to finish.',
       );
+    if (command.operation === 'inspect') {
+      const inspect = this.inspect;
+      if (!inspect)
+        throw new LocalError(
+          'update_inspection_disabled',
+          'Recovery inspection requires a complete Windows application package.',
+        );
+      const previous = { phase: this.phase, error: this.error };
+      this.begin(
+        'inspecting',
+        async (signal) => {
+          const report = updateSessionInspectionSchema.parse(
+            await inspect(signal),
+          );
+          signal.throwIfAborted();
+          this.inspection = report;
+          this.phase = previous.phase;
+          this.error = previous.error;
+        },
+        previous,
+      );
+      return this.snapshot();
+    }
     if (this.phase === 'disabled')
       throw new LocalError(
         'update_disabled',
@@ -173,6 +203,7 @@ export class DesktopUpdateController {
   private begin(
     phase: DesktopUpdateState['phase'],
     task: (signal: AbortSignal) => Promise<void>,
+    resume?: Pick<DesktopUpdateState, 'phase' | 'error'>,
   ) {
     const active: Operation = {
       abort: new AbortController(),
@@ -186,8 +217,10 @@ export class DesktopUpdateController {
         active.abort.signal.throwIfAborted();
         await task(active.abort.signal);
       } catch (error) {
-        if (active.abort.signal.aborted) this.phase = 'cancelled';
-        else {
+        if (active.abort.signal.aborted) {
+          this.phase = resume?.phase ?? 'cancelled';
+          this.error = resume?.error ?? null;
+        } else {
           const failure =
             error instanceof LocalError
               ? { code: error.code, message: error.message }
@@ -202,7 +235,7 @@ export class DesktopUpdateController {
               kind: error instanceof Error ? error.name : 'unknown',
             }),
           );
-          this.phase = 'failed';
+          this.phase = resume?.phase ?? 'failed';
           this.error = failure;
         }
       } finally {

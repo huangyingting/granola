@@ -39,6 +39,16 @@ if (args.Length > 0 && args[0] is "--seal-update-runtime" or "--verify-update-ru
         return 2;
     }
 }
+if (args.Length > 0 && args[0] == "--inspect-update-sessions")
+{
+    await using var inspectionOutput = Console.OpenStandardOutput();
+    if (args.Length == 4 && int.TryParse(args[1], System.Globalization.NumberStyles.None,
+        System.Globalization.CultureInfo.InvariantCulture, out var inspectionParent))
+        return await UpdateSessionInspection.RunAsync(inspectionParent, args[2], args[3], inspectionOutput);
+    await FrameCodec.WriteJsonAsync(inspectionOutput,
+        new { Version = 1, Event = "update_inspection_failed", Code = "update_worker_arguments" });
+    return 2;
+}
 if (args.Length > 0 && args[0] == "--cleanup-update-sessions")
 {
     await using var cleanupOutput = Console.OpenStandardOutput();

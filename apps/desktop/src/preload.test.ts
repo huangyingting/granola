@@ -34,6 +34,8 @@ const state = desktopUpdateStateSchema.parse({
   can_check: true,
   can_download: false,
   can_cancel: false,
+  can_inspect: false,
+  inspection: null,
   installation_enabled: false,
   cache: null,
   error: null,

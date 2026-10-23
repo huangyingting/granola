@@ -195,8 +195,54 @@ test('rejects forged restart startup before unlocking or modifying existing loca
       }),
     ]);
     maintenanceDecoder.finish();
+    const inspection = await invoke('--inspect-update-sessions');
+    expect(inspection.code).toBe(0);
+    const inspectionDecoder = new FrameDecoder();
+    expect(
+      inspectionDecoder.push(Buffer.from(inspection.stdout, 'base64')),
+    ).toEqual([
+      expect.objectContaining({
+        version: 1,
+        event: 'update_inspection_report',
+        report: expect.objectContaining({
+          status: 'complete',
+          active: 0,
+          retired: 0,
+          unverifiable: 0,
+          limited: false,
+          omitted: 0,
+          sessions: [],
+        }),
+      }),
+    ]);
+    inspectionDecoder.finish();
+    await page
+      .getByRole('button', { name: 'Inspect update recovery', exact: true })
+      .click();
     await expect(
-      page.getByText(/Restart startup could not be confirmed/u),
+      page.getByRole('heading', { name: 'About & updates.' }),
+    ).toBeVisible();
+    await page
+      .getByRole('button', { name: 'Inspect recovery records', exact: true })
+      .click();
+    await expect(
+      page.getByText('No update session records were found.', { exact: false }),
+    ).toBeVisible();
+    expect(
+      await page.evaluate(() =>
+        window.notes.invokeUpdate({ operation: 'getState' }),
+      ),
+    ).toMatchObject({
+      ok: true,
+      state: {
+        phase: 'failed',
+        can_inspect: true,
+        installation_enabled: false,
+        inspection: { status: 'complete', active: 0, retired: 0, sessions: [] },
+      },
+    });
+    await expect(
+      page.getByText(/Restart startup could not be confirmed/u).first(),
     ).toBeVisible();
     expect(readFileSync(join(root, 'content-key.protected'))).toEqual(key);
     expect(readFileSync(join(root, 'notes.sqlite'))).toEqual(database);

@@ -54,7 +54,10 @@ function deferred<T>(fallback: T) {
   releases.push(() => resolve(fallback));
   return { promise, resolve };
 }
-function fixture(recovered: Partial<RecoveredUpdates> = {}) {
+function fixture(
+  recovered: Partial<RecoveredUpdates> = {},
+  inspect?: ConstructorParameters<typeof DesktopUpdateController>[3],
+) {
   const ready = candidate();
   const downloads = {
     recover: vi.fn<UpdateDownloads['recover']>(async () => ({
@@ -74,7 +77,12 @@ function fixture(recovered: Partial<RecoveredUpdates> = {}) {
     > | null>
   >(async () => downloads);
   const observe = vi.fn<(state: DesktopUpdateState) => void>();
-  const controller = new DesktopUpdateController('0.1.0', load, observe);
+  const controller = new DesktopUpdateController(
+    '0.1.0',
+    load,
+    observe,
+    inspect,
+  );
   controllers.push(controller);
   return { controller, load, observe, downloads, ready };
 }
@@ -92,6 +100,109 @@ async function started(f: ReturnType<typeof fixture>) {
 }
 
 describe('Main-owned desktop update operations', () => {
+  const inspection = (): NonNullable<DesktopUpdateState['inspection']> => ({
+    checked_at: '2026-01-01T00:00:00.000Z',
+    status: 'complete',
+    active: 0,
+    retired: 0,
+    unverifiable: 0,
+    limited: false,
+    omitted: 0,
+    sessions: [],
+  });
+  it.each(['disabled', 'failed', 'ready'] as const)(
+    'inspects independently of %s startup and preserves the original update state',
+    async (initial) => {
+      const inspect = vi.fn(async () => inspection());
+      const f = fixture(
+        initial === 'ready' ? { ready: candidate() } : {},
+        inspect,
+      );
+      if (initial === 'disabled') f.load.mockResolvedValue(null);
+      if (initial === 'failed') {
+        vi.spyOn(console, 'error').mockImplementation(() => {});
+        f.load.mockRejectedValue(
+          new LocalError('update_recovery_required', 'Storage stays blocked.'),
+        );
+      }
+      f.controller.start();
+      await phase(f.controller, initial);
+      const previous = f.controller.snapshot();
+      expect(f.controller.execute({ operation: 'inspect' }).phase).toBe(
+        'inspecting',
+      );
+      await phase(f.controller, initial);
+      expect(inspect).toHaveBeenCalledWith(expect.any(AbortSignal));
+      expect(f.controller.snapshot()).toMatchObject({
+        phase: previous.phase,
+        error: previous.error,
+        available_version: previous.available_version,
+        installation_enabled: false,
+        inspection: inspection(),
+        can_inspect: true,
+      });
+      expect(f.downloads.check).not.toHaveBeenCalled();
+      expect(f.downloads.download).not.toHaveBeenCalled();
+      f.controller.snapshot().inspection!.active = 8;
+      expect(f.controller.snapshot().inspection!.active).toBe(0);
+    },
+  );
+  it('keeps the previous observation and disabled policy after a failed inspection', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const inspect = vi.fn(async () => inspection());
+    const f = fixture({}, inspect);
+    f.load.mockResolvedValue(null);
+    f.controller.start();
+    await phase(f.controller, 'disabled');
+    f.controller.execute({ operation: 'inspect' });
+    await phase(f.controller, 'disabled');
+    inspect.mockRejectedValueOnce(
+      new LocalError('update_worker_busy', 'Records are busy.'),
+    );
+    f.controller.execute({ operation: 'inspect' });
+    await phase(f.controller, 'disabled');
+    expect(f.controller.snapshot()).toMatchObject({
+      can_check: false,
+      can_download: false,
+      can_inspect: true,
+      inspection: inspection(),
+      error: { code: 'update_worker_busy' },
+    });
+  });
+  it('single-flights inspection and waits for its physical cancellation during close', async () => {
+    const delayed = deferred(inspection());
+    let signal: AbortSignal | undefined;
+    const f = fixture({}, async (value) => {
+      signal = value;
+      return delayed.promise;
+    });
+    await started(f);
+    f.controller.execute({ operation: 'inspect' });
+    await vi.waitFor(() => expect(signal).toBeDefined());
+    expect(() => f.controller.execute({ operation: 'check' })).toThrow(
+      'current update operation',
+    );
+    expect(f.controller.snapshot().can_inspect).toBe(false);
+    let closed = false;
+    const closing = f.controller.close().then(() => {
+      closed = true;
+    });
+    await Promise.resolve();
+    expect(signal?.aborted).toBe(true);
+    expect(closed).toBe(false);
+    delayed.resolve(inspection());
+    await closing;
+    expect(f.controller.snapshot().inspection).toBeNull();
+    expect(f.controller.snapshot().can_inspect).toBe(false);
+  });
+  it('does not expose inspection when no bundled native implementation is configured', async () => {
+    const f = fixture();
+    await started(f);
+    expect(f.controller.snapshot().can_inspect).toBe(false);
+    expect(() => f.controller.execute({ operation: 'inspect' })).toThrow(
+      'complete Windows application package',
+    );
+  });
   it('loads once, recovers locally and never checks or downloads automatically', async () => {
     const f = fixture();
     f.controller.start();

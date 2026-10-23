@@ -54,6 +54,7 @@ import { DesktopShutdown } from './shutdown.js';
 import {
   acquireStartupAdmission,
   cleanupRetiredUpdateSessions,
+  inspectUpdateSessions,
 } from './update-startup.js';
 import {
   acquireRestartStartup,
@@ -392,6 +393,15 @@ async function start() {
       if (!current.isDestroyed())
         current.webContents.send('notes:update-state', state);
     },
+    app.isPackaged && process.platform === 'win32'
+      ? async (signal) =>
+          inspectUpdateSessions(
+            audioHostExecutable(),
+            process.execPath,
+            app.getVersion(),
+            signal,
+          )
+      : undefined,
   );
   updates.start();
   ipcMain.handle(
