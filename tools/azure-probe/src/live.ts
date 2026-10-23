@@ -7,18 +7,41 @@ import {
   type RealtimeSession,
 } from '@windows-ai-notes/ai/realtime';
 import { validateWav } from '@windows-ai-notes/ai/wav';
-import { ServiceError } from '@windows-ai-notes/contracts/server';
+import {
+  locale as speechLocale,
+  ServiceError,
+} from '@windows-ai-notes/contracts/server';
 import {
   SEGMENTED_LIVE_PROFILE,
   SEGMENTED_LIVE_LIMITS,
 } from '@windows-ai-notes/contracts/realtime';
+
+const syntheticSpeechFixtures = {
+  'en-US': {
+    voice: 'en-US-JennyNeural',
+    short: 'Orion launch approved.',
+    long: 'Orion launch planning brings the research team and the engineering team together to review the mission timeline and confirm every readiness requirement while the operations group checks the remaining instrumentation and the communications group prepares clear messages for the control room so every participant can understand the expected sequence and complete the final review before the scheduled launch',
+    subject: [/orion/i, /launch/i],
+  },
+  'zh-CN': {
+    voice: 'zh-CN-XiaoxiaoNeural',
+    short: '猎户座发射计划已获批准。',
+    long: '猎户座发射规划让研究团队和工程团队共同检查任务时间安排并确认每项准备要求同时运营小组检查仪器状态而通信小组为控制中心准备清晰的信息让每位参与者了解预期顺序并在计划发射之前完成最后检查',
+    subject: [/猎户座/u, /发射/u],
+  },
+};
 
 async function readSyntheticWav(
   response: Response,
   maximum: number,
 ): Promise<Buffer> {
   const reader = response.body?.getReader();
-  if (!reader) throw new Error('Synthetic speech returned no audio.');
+  if (!reader)
+    throw new ServiceError(
+      'synthetic_audio_missing',
+      'Synthetic speech returned no audio.',
+      502,
+    );
   const chunks: Uint8Array[] = [];
   let size = 0;
   try {
@@ -29,8 +52,10 @@ async function readSyntheticWav(
       if (size > maximum) {
         next.value.fill(0);
         await reader.cancel();
-        throw new Error(
+        throw new ServiceError(
+          'synthetic_audio_too_large',
           'Synthetic speech exceeded the controlled input limit.',
+          502,
         );
       }
       chunks.push(next.value);
@@ -48,7 +73,9 @@ async function syntheticSpeech(
   config: AzureConfig,
   signal: AbortSignal,
   long: boolean,
+  locale: keyof typeof syntheticSpeechFixtures,
 ) {
+  const fixture = syntheticSpeechFixtures[locale];
   const response = await fetch(
     `https://${config.AZURE_SPEECH_REGION}.tts.speech.microsoft.com/cognitiveservices/v1`,
     {
@@ -61,11 +88,7 @@ async function syntheticSpeech(
         'X-Microsoft-OutputFormat': 'riff-16khz-16bit-mono-pcm',
         'User-Agent': 'windows-ai-notes-synthetic-live-probe',
       },
-      body: `<speak version="1.0" xml:lang="en-US"><voice name="en-US-JennyNeural">${
-        long
-          ? 'Orion launch planning brings the research team and the engineering team together to review the mission timeline and confirm every readiness requirement while the operations group checks the remaining instrumentation and the communications group prepares clear messages for the control room so every participant can understand the expected sequence and complete the final review before the scheduled launch'
-          : 'Orion launch approved.'
-      }</voice></speak>`,
+      body: `<speak version="1.0" xml:lang="${locale}"><voice name="${fixture.voice}">${long ? fixture.long : fixture.short}</voice></speak>`,
     },
   );
   if (!response.ok) {
@@ -79,17 +102,36 @@ async function syntheticSpeech(
   return readSyntheticWav(response, long ? 960_044 : 128_044);
 }
 
-async function main() {
+export async function runLiveProbe(args = process.argv.slice(2)) {
   const { values } = parseArgs({
+    args,
     options: {
       'env-file': { type: 'string' },
       scenario: { type: 'string', default: 'short' },
+      locale: { type: 'string', default: 'en-US' },
     },
   });
   if (process.env.NODE_ENV === 'production')
-    throw new Error('Synthetic probe is disabled in production mode.');
+    throw new ServiceError(
+      'synthetic_probe_disabled',
+      'Synthetic probe is disabled in production mode.',
+      403,
+    );
   if (!['short', 'long-phrase', 'silence'].includes(values.scenario))
-    throw new Error('Select a supported synthetic live scenario.');
+    throw new ServiceError(
+      'synthetic_scenario_unsupported',
+      'Select a supported synthetic live scenario.',
+      400,
+    );
+  const selectedLocale = speechLocale.safeParse(values.locale);
+  if (!selectedLocale.success)
+    throw new ServiceError(
+      'synthetic_locale_unsupported',
+      'Select a supported synthetic Speech locale. Use en-US or zh-CN.',
+      400,
+    );
+  const locale = selectedLocale.data;
+  const fixture = syntheticSpeechFixtures[locale];
   const config = loadAzureConfig({
     ...process.env,
     ...(values['env-file'] ? { AZURE_ENV_FILE: values['env-file'] } : {}),
@@ -99,7 +141,7 @@ async function main() {
   const signal = AbortSignal.timeout(segmented ? 75_000 : 30_000);
   const wav = silence
     ? Buffer.alloc(0)
-    : await syntheticSpeech(config, signal, segmented);
+    : await syntheticSpeech(config, signal, segmented, locale);
   const leading = segmented ? 64_000 : 0;
   const pcm = silence
     ? Buffer.alloc(8 * 32_000)
@@ -122,13 +164,14 @@ async function main() {
   let partials = 0;
   let events = 0;
   let subject = false;
+  const matchedSubjectTerms = fixture.subject.map(() => false);
   let progress = 0;
   let maximumUnfinalized = 0;
   let session: RealtimeSession | undefined;
   try {
     session = await createAzureRealtimeProvider(config).open(
       source,
-      'en-US',
+      locale,
       signal,
       (event) => {
         if (
@@ -142,15 +185,20 @@ async function main() {
           ) ||
           event.version <= (versions.get(event.segment_id) ?? 0)
         ) {
-          throw new Error(
+          throw new ServiceError(
+            'synthetic_live_result_invalid',
             'Invalid synthetic recognition identity or sample range.',
+            502,
           );
         }
         versions.set(event.segment_id, event.version);
         if (event.event_type === 'transcript.partial') partials++;
         if (event.event_type === 'transcript.final') {
           finals++;
-          subject ||= /orion/i.test(event.text) && /launch/i.test(event.text);
+          const matches = fixture.subject.map((term) => term.test(event.text));
+          subject ||= matches.every(Boolean);
+          for (const [index, matched] of matches.entries())
+            matchedSubjectTerms[index] ||= matched;
         }
         return undefined;
       },
@@ -172,8 +220,10 @@ async function main() {
           SEGMENTED_LIVE_LIMITS.client_window_samples
       ) {
         if (performance.now() >= blockedUntil)
-          throw new Error(
+          throw new ServiceError(
+            'synthetic_live_backpressure',
             'Synthetic audio exceeded the bounded native reservation.',
+            502,
           );
         await delay(25, undefined, { signal });
       }
@@ -198,22 +248,39 @@ async function main() {
       );
     }
     const completed = await session.finish();
+    if (silence && (finals !== 0 || partials !== 0 || progress === 0))
+      throw new ServiceError(
+        'synthetic_silence_invalid',
+        'Synthetic silence produced text or no finalization progress.',
+        502,
+      );
+    if (!silence && (!subject || !finals))
+      throw new ServiceError(
+        'synthetic_subject_missing',
+        `Synthetic recognition did not finalize the expected subject (finals: ${finals}; matched terms: ${matchedSubjectTerms.map(Number).join(',')}; audio ms: ${samples / 16}).`,
+        502,
+      );
+    if (values.scenario === 'long-phrase' && maximumUnfinalized <= 80_000)
+      throw new ServiceError(
+        'synthetic_long_phrase_insufficient',
+        'Synthetic recognition did not exceed the legacy unresolved-audio bound.',
+        502,
+      );
     if (
-      (silence
-        ? finals !== 0 || partials !== 0 || progress === 0
-        : !subject || !finals) ||
-      (values.scenario === 'long-phrase' && maximumUnfinalized <= 80_000) ||
       completed.samples !== samples ||
       completed.usage.audio_ms !== samples / 16 ||
       completed.provider_epoch !== session.providerEpoch
     )
-      throw new Error(
-        'Synthetic live recognition or measured receipt was incomplete.',
+      throw new ServiceError(
+        'synthetic_live_receipt_invalid',
+        'Synthetic recognition returned an incomplete measured receipt.',
+        502,
       );
     console.log(
       JSON.stringify({
         live_speech: 'passed',
         scenario: values.scenario,
+        locale,
         profile: segmented ? SEGMENTED_LIVE_PROFILE : 'legacy',
         partial_events: partials,
         final_events: finals,
@@ -222,6 +289,7 @@ async function main() {
         maximum_unfinalized_ms: maximumUnfinalized / 16,
         finalization_progress_events: progress,
         credentials_logged: false,
+        real_meeting_quality_evaluated: false,
       }),
     );
   } finally {
@@ -230,11 +298,12 @@ async function main() {
     pcm.fill(0);
   }
 }
-main().catch((error: unknown) => {
-  console.error(
-    error instanceof ServiceError
-      ? `${error.code}: ${error.message}`
-      : 'Azure live probe failed. Check the streaming service and Azure configuration; credentials and provider bodies were not logged.',
-  );
-  process.exitCode = 1;
-});
+if (import.meta.main)
+  runLiveProbe().catch((error: unknown) => {
+    console.error(
+      error instanceof ServiceError
+        ? `${error.code}: ${error.message}`
+        : 'Azure live probe failed. Check the streaming service and Azure configuration; credentials and provider bodies were not logged.',
+    );
+    process.exitCode = 1;
+  });

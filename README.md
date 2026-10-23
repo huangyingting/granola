@@ -2672,7 +2672,17 @@ neither PostgreSQL nor OpenAI requests:
 pnpm azure:live-probe --env-file ../ReadWise/.env
 pnpm azure:live-probe --env-file ../ReadWise/.env --scenario long-phrase
 pnpm azure:live-probe --env-file ../ReadWise/.env --scenario silence
+pnpm azure:live-probe --env-file ../ReadWise/.env --locale zh-CN
+pnpm azure:live-probe --env-file ../ReadWise/.env --locale zh-CN --scenario long-phrase
+pnpm azure:live-probe --env-file ../ReadWise/.env --locale zh-CN --scenario silence
 ```
+
+The locale defaults to `en-US`; only the existing `en-US` and `zh-CN` contract
+values are accepted, before configuration or provider access. Each uses a fixed
+synthetic text and matching Azure voice/recognition language, never caller-supplied
+SSML, voice names or text. There is no automatic locale fallback or request retry.
+Recognition must finalize both expected subject terms in the same result; a
+missing proper name cannot pass merely because some transcript text arrived.
 
 The default scenario streams only a synthetic “Orion launch approved” sample plus trailing silence,
 at most five seconds in total, paced in 50 ms frames. It bounds the TTS response
@@ -2686,14 +2696,26 @@ of unresolved audio plus normal finalization/receipt. The silence scenario
 sends only eight seconds of zero PCM, with no TTS request, and requires
 provider finalization without transcript text. Both use a 75-second overall
 deadline and still wait for worker cleanup.
+Failure codes distinguish oversized/missing synthetic audio, invalid results,
+backpressure, missing subject, insufficient unresolved audio, invalid silence and
+invalid measured receipts. Subject-failure diagnostics contain only fixed
+counters/term-match booleans and media duration, never recognized text. Success
+metadata identifies the locale and explicitly reports
+`real_meeting_quality_evaluated=false`.
 
 An approved real English long-phrase run passed with 25,400 ms of media,
 20,750 ms peak unresolved input, 70 partials and two finals. Eight seconds of
 real-provider silent input passed without transcript text and with seven
-finalization progress events. The legacy short English probe previously passed
-with 3,200 ms. This is
-not acceptance evidence for uninterrupted meetings, Chinese, acoustic conditions
-or production reliability. These probes import only the six approved Azure fields
+finalization progress events. The legacy short English probe passed again with
+3,200 ms. The Chinese short probe passed with 4,050 ms, and Chinese silence passed
+with 8,000 ms, no transcript text and eight finalization progress events.
+**Chinese long-phrase recognition is not accepted:** a controlled 24,450 ms run
+produced a final result but failed the exact expected proper-name check. The check
+and original fixture remain unchanged; neither a received final nor successful
+transport is substituted for that failed content assertion. These are narrow
+synthetic observations, not acceptance evidence for uninterrupted meetings,
+Chinese/real-meeting quality, acoustic conditions or production reliability.
+These probes import only the six approved Azure fields
 from the specified file and are disabled in production mode. Direct-provider
 diagnostics bypass account quotas; `--chat-only` exercises the authenticated API
 and application usage ledger with an isolated synthetic account. Neither provides
