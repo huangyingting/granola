@@ -72,6 +72,34 @@ export const updateFeedSchema = z
       value.installer ===
       `windows-ai-notes-${value.application_version}-x64-signed.exe`,
   );
+export const signedUpdateAcceptancePairSchema = z
+  .strictObject({
+    version: z.literal(1),
+    kind: z.literal('signed_activation_pair'),
+    scope: z.literal('same_source_compatible_patch'),
+    source_commit: z.string().regex(/^[0-9a-f]{40}$/u),
+    production_accepted: z.literal(false),
+    policy: packagedUpdatePolicySchema,
+    current: updateFeedSchema,
+    offered: updateFeedSchema,
+  })
+  .refine((value) => {
+    const parts = value.current.application_version.split('.');
+    return (
+      value.offered.application_version ===
+      `${parts[0]}.${parts[1]}.${Number(parts[2]) + 1}`
+    );
+  });
+export const signedUpdateAcceptanceReceiptSchema = z.strictObject({
+  version: z.literal(1),
+  kind: z.literal('signed_activation_acceptance'),
+  pair: signedUpdateAcceptancePairSchema,
+  verified_at: z.iso.datetime(),
+  session_id: z.uuidv4(),
+  storage_schema: z.number().int().min(1).max(65_535),
+  delivery: z.literal('preseeded_cache'),
+  production_accepted: z.literal(false),
+});
 export const updateExpectationSchema = z.strictObject({
   current_version: updateVersionSchema,
   version: updateVersionSchema,

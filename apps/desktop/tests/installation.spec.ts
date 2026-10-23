@@ -6,7 +6,7 @@ import {
   type Page,
 } from '@playwright/test';
 import type { Configuration } from 'electron-builder';
-import { execFile, spawn } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import {
@@ -31,6 +31,7 @@ import {
   verifyUpdateInstallation,
   verifyUpdateParent,
 } from '../src/main/update-trust.js';
+import { closeInstalled as close, runInstaller } from './installer-support.js';
 
 test.skip(
   process.platform !== 'win32' ||
@@ -39,33 +40,6 @@ test.skip(
     process.env.DESKTOP_INSTALLATION_PROBE !== '1',
   'Installation changes are restricted to an explicitly enabled, isolated hosted Windows runner.',
 );
-
-async function runInstaller(executable: string, args: string[]) {
-  await new Promise<void>((resolve, reject) => {
-    const child = spawn(executable, args, {
-      // NSIS requires /D= and _?= last and unquoted, even for paths with spaces.
-      argv0: `"${executable}"`,
-      windowsVerbatimArguments: true,
-      windowsHide: true,
-      stdio: 'ignore',
-      timeout: 90_000,
-    });
-    child.once('error', reject);
-    child.once('close', (code, signal) => {
-      if (code === 0) resolve();
-      else
-        reject(new Error(`Installer failed: exit=${code}, signal=${signal}.`));
-    });
-  });
-}
-
-async function close(application: ElectronApplication) {
-  const closed = application.waitForEvent('close');
-  await application.evaluate(({ BrowserWindow }) => {
-    BrowserWindow.getAllWindows()[0]?.close();
-  });
-  await closed;
-}
 
 async function selectedId(page: Page) {
   return page.evaluate(async () => {

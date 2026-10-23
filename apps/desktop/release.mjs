@@ -681,12 +681,34 @@ async function cleanSource(environment) {
     );
   return commit;
 }
-async function main() {
-  if (process.argv.length !== 2)
+export async function acceptanceVersions(version) {
+  const { updateVersionSchema } =
+    await import('@windows-ai-notes/contracts/updates');
+  const parts = String(version).split('.');
+  const offered = `${parts[0]}.${parts[1]}.${Number(parts[2]) + 1}`;
+  if (
+    !updateVersionSchema.safeParse(version).success ||
+    !updateVersionSchema.safeParse(offered).success
+  )
     throw new ReleaseError(
-      'release_arguments',
-      'The signed-candidate command does not accept options.',
+      'release_acceptance_version',
+      'Signed activation acceptance requires a stable Windows-compatible version with an available next patch.',
     );
+  return [version, offered];
+}
+function packageManager(environment) {
+  const manager = process.env.npm_execpath;
+  if (!manager || !isAbsolute(manager))
+    throw new ReleaseError(
+      'release_package_manager',
+      'Run this command through the pinned pnpm package manager.',
+    );
+  return (args) =>
+    /\.[cm]?js$/i.test(manager)
+      ? run(process.execPath, [manager, ...args], repository, environment)
+      : run(manager, args, repository, environment);
+}
+async function buildCandidate(acceptanceVersion, expectedCommit) {
   const policy = signingPolicy();
   await requireVerifier(process.env);
   const certificate = await lstat(policy.certificate);
@@ -702,26 +724,22 @@ async function main() {
     );
   const environment = childEnvironment();
   const commit = await cleanSource(environment);
+  if (expectedCommit !== undefined && commit !== expectedCommit)
+    throw new ReleaseError(
+      'release_source_changed',
+      'The source changed after preparing the signed acceptance pair.',
+    );
   const manifest = JSON.parse(
     await readFile(new URL('./package.json', import.meta.url), 'utf8'),
   );
-  const version = versionSchema.parse(manifest.version);
+  const version = versionSchema.parse(acceptanceVersion ?? manifest.version);
   const base = JSON.parse(
     await readFile(
       new URL('./electron-builder.unsigned.json', import.meta.url),
       'utf8',
     ),
   );
-  const manager = process.env.npm_execpath;
-  if (!manager || !isAbsolute(manager))
-    throw new ReleaseError(
-      'release_package_manager',
-      'Run this command through the pinned pnpm package manager.',
-    );
-  const pnpm = (args) =>
-    /\.[cm]?js$/i.test(manager)
-      ? run(process.execPath, [manager, ...args], repository, environment)
-      : run(manager, args, repository, environment);
+  const pnpm = packageManager(environment);
   const parent = join(repository, 'artifacts', 'desktop-signed');
   await mkdir(parent, { recursive: true });
   const destination = join(parent, version);
@@ -730,8 +748,13 @@ async function main() {
   try {
     const native = join(stage, 'native'),
       output = join(stage, 'output');
-    await pnpm(['build', '--force']);
+    if (expectedCommit === undefined) await pnpm(['build', '--force']);
     const updates = await updatePolicy(process.env, base.productName, policy);
+    if (acceptanceVersion !== undefined && !updates)
+      throw new ReleaseError(
+        'release_acceptance_policy',
+        'Signed activation acceptance requires an explicitly configured update policy.',
+      );
     let updatePolicyFile;
     if (updates) {
       const { updateVersionSchema } =
@@ -799,13 +822,10 @@ async function main() {
       projectDir: desktop,
       targets: Platform.WINDOWS.createTarget('nsis', Arch.x64),
       publish: 'never',
-      config: signedConfiguration(
-        base,
-        output,
-        native,
-        policy,
-        updatePolicyFile,
-      ),
+      config: {
+        ...signedConfiguration(base, output, native, policy, updatePolicyFile),
+        extraMetadata: { ...base.extraMetadata, version },
+      },
     });
     if ((await cleanSource(environment)) !== commit)
       throw new ReleaseError(
@@ -829,9 +849,122 @@ async function main() {
         production_accepted: false,
       }),
     );
+    return { receipt, updates };
   } finally {
     await rm(stage, { recursive: true, force: true });
   }
+}
+async function main() {
+  const args = process.argv.slice(2);
+  if (args.length === 0) {
+    await buildCandidate();
+    return;
+  }
+  if (args.length !== 1 || args[0] !== '--acceptance-pair')
+    throw new ReleaseError(
+      'release_arguments',
+      'The signed-candidate command accepts only the opt-in --acceptance-pair option.',
+    );
+  const policy = signingPolicy();
+  const environment = childEnvironment();
+  const commit = await cleanSource(environment);
+  await packageManager(environment)(['build', '--force']);
+  const manifest = JSON.parse(
+    await readFile(new URL('./package.json', import.meta.url), 'utf8'),
+  );
+  const versions = await acceptanceVersions(manifest.version);
+  const base = JSON.parse(
+    await readFile(
+      new URL('./electron-builder.unsigned.json', import.meta.url),
+      'utf8',
+    ),
+  );
+  const updates = await updatePolicy(process.env, base.productName, policy);
+  if (!updates)
+    throw new ReleaseError(
+      'release_acceptance_policy',
+      'Signed activation acceptance requires an explicitly configured update policy.',
+    );
+  const parent = join(repository, 'artifacts', 'desktop-signed');
+  const pairFile = join(parent, 'activation-pair.json');
+  await destinationAvailable(pairFile);
+  for (const version of versions)
+    await destinationAvailable(join(parent, version));
+  const candidates = [];
+  for (const version of versions)
+    candidates.push(await buildCandidate(version, commit));
+  if (
+    candidates.some(
+      (candidate) =>
+        JSON.stringify(candidate.updates) !== JSON.stringify(updates),
+    )
+  )
+    throw new ReleaseError(
+      'release_acceptance_source',
+      'Both signed acceptance candidates must use the same source and update policy.',
+    );
+  await promoteAcceptancePair(candidates, updates, pairFile);
+}
+export async function promoteAcceptancePair(candidates, updates, destination) {
+  if (
+    candidates.length !== 2 ||
+    candidates.some(
+      ({ receipt }) =>
+        receipt.version !== 1 ||
+        receipt.kind !== 'signed_candidate' ||
+        receipt.production_accepted !== false ||
+        receipt.installer_role_verified !== true ||
+        receipt.runtime_provenance_verified !== true,
+    )
+  )
+    throw new ReleaseError(
+      'release_acceptance_candidates',
+      'Acceptance bookkeeping requires exactly two update-enabled verified candidates.',
+    );
+  const { signedUpdateAcceptancePairSchema } =
+    await import('@windows-ai-notes/contracts/updates');
+  const current = candidates[0];
+  const feed = ({ receipt }) => {
+    const artifact = receipt.artifacts[receipt.installer];
+    if (
+      !artifact ||
+      artifact.certificate_sha256 !== updates.certificate_sha256 ||
+      artifact.publisher !== updates.publisher ||
+      artifact.timestamped !== true
+    )
+      throw new ReleaseError(
+        'release_acceptance_identity',
+        'Acceptance candidates must retain their independently verified timestamped signer identity.',
+      );
+    return {
+      version: 1,
+      kind: 'windows_update',
+      application_version: receipt.application_version,
+      architecture: receipt.architecture,
+      installer: receipt.installer,
+      bytes: Number(artifact.bytes),
+      sha512: artifact.sha512,
+    };
+  };
+  const pair = signedUpdateAcceptancePairSchema.parse({
+    version: 1,
+    kind: 'signed_activation_pair',
+    scope: 'same_source_compatible_patch',
+    source_commit: current.receipt.source_commit,
+    production_accepted: false,
+    policy: updates,
+    current: feed(current),
+    offered: feed(candidates[1]),
+  });
+  if (candidates[1].receipt.source_commit !== pair.source_commit)
+    throw new ReleaseError(
+      'release_acceptance_source',
+      'Acceptance candidates must retain the same exact source commit.',
+    );
+  await writeFile(destination, `${JSON.stringify(pair, null, 2)}\n`, {
+    flag: 'wx',
+  });
+  return pair;
 }
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url)
   main().catch((error) => {

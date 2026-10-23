@@ -638,12 +638,11 @@ The real installed lifecycle probe checks corrupt and committed recovery
 records against unchanged encrypted key/database bytes, then restores only its
 synthetic records and requires a fresh process to reopen.
 
-**Desktop activation remains disconnected.** The activation coordinator must
-use the worker client and this shutdown barrier in its authenticated handoff,
-then use the authenticated first-start and durable health/recovery path.
-A worker's post-load manifest check alone is insufficient. Installation/restart
-controls remain disabled, and real first-party signed update acceptance is still
-a release gate.
+**Public update activation remains disabled.** The private Main coordinator uses
+the worker client and terminal shutdown barrier before the authenticated first-start
+and durable health/recovery path. A worker's post-load manifest check alone is
+insufficient. Real first-party signed update acceptance remains a release gate
+before installation/restart controls can be enabled.
 
 ### Verified signed Windows candidates
 
@@ -732,9 +731,9 @@ update-enabled receipts record `runtime_provenance_verified=true`. Static signed
 payload provenance is not live process authentication, pre-database admission or
 fresh startup health. The internal first-start path separately requires retained
 processes, both bound channels, ownership transfer and durable health; none of
-these steps is replaced by the producer receipt. Product activation and real
-first-party signed positive acceptance remain pending, so installation/restart
-controls stay disabled.
+these steps is replaced by the producer receipt. The private Main activation
+coordinator is connected, but real first-party signed positive acceptance remains
+pending, so installation/restart controls stay disabled.
 
 The ordinary Windows checks verify real first-party installer/uninstaller metadata,
 reject unsigned first-party packages and correctly signed non-installer runtimes,
@@ -757,6 +756,45 @@ dependencies only after successful normal Checks for that exact source commit
 and before exposing signing secrets, removes the temporary certificate
 in `finally`, and uploads only a successfully verified installer and public receipt.
 It does not publish a GitHub release or run on pull requests.
+
+The workflow's **activation_acceptance** input is opt-in and defaults to false.
+When authorized, it runs `pnpm desktop:package:signed --acceptance-pair` to build
+the manifest version and its next stable patch from the **same exact source**,
+without modifying the source manifest. Both use the existing registered identity,
+independent public pins, timestamped signatures and signed complete-runtime
+provenance; a configured `WINDOWS_UPDATE_FEED_URL` is required. Existing candidates
+or pair records are never overwritten. These compatible-patch fixtures do not
+represent a future code/schema upgrade or a production release.
+
+Only after the signing step removes the temporary PFX and signing-secret environment
+does the isolated hosted-Windows test install the real signed base. It creates an
+encrypted meeting and partial-recording canary, copies the genuine upgrade into
+the cache as **untrusted input**, and requires actual packaged Main to freshly
+native-verify it. Playwright invokes only the cached, bundled Main's private
+no-argument activation entry, not a workspace copy, injected worker service or
+renderer install command. The real editor flush, terminal drain, guardian, fresh
+worker, commit, physical Main exit, installer and authenticated first-start run
+without a test CA or signature bypass.
+
+The harness observes the worker-launched Main without changing production restart
+arguments. A separately checked process creation identity and executable path are
+used only to request normal window closure while retaining that observed process
+handle; this diagnostic is not installer/startup authority and never kills Main.
+It then reopens the actual installed target normally and requires Main's locked,
+DPAPI-validating inspection to confirm the matching healthy session. Plain outcome
+JSON is diagnostic, never sufficient acceptance evidence. It checks the original
+profile, key envelope, document identity, note/tag edits and partial recording,
+persists new post-upgrade edits, reopens them and checks encrypted on-disk bytes
+and uninstall preservation. Uncertain handoffs leave processes and recovery files
+intact rather than attempting installer retry, rollback or forced removal.
+
+Success emits the public `activation-acceptance.json`; pair metadata alone is not
+success. Both records retain `production_accepted=false`. The acceptance receipt
+explicitly records **preseeded_cache** delivery: it does not establish HTTPS-feed
+deployment, future schema migration, physical-device quality or wider production
+readiness. Public installation/restart remains disabled. A genuine positive run
+still requires the deployment owner's authorized trusted signer; adding this
+harness does not claim that such a run has occurred.
 
 Normal CI needs no private certificate: it checks the policy, staging failures
 and actual Windows verification against the preinstalled Microsoft-signed

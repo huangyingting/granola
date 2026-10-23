@@ -2,6 +2,11 @@ name: Signed Windows candidate
 
 on:
   workflow_dispatch:
+    inputs:
+      activation_acceptance:
+        description: Build a genuine signed compatible patch pair and exercise Main activation/restart
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -51,6 +56,7 @@ jobs:
           WINDOWS_SIGNING_CERT_SHA256: ${{ vars.WINDOWS_SIGNING_CERT_SHA256 }}
           WINDOWS_PUBLISHER_NAME: ${{ vars.WINDOWS_PUBLISHER_NAME }}
           WINDOWS_UPDATE_FEED_URL: ${{ vars.WINDOWS_UPDATE_FEED_URL }}
+          ACCEPT_SIGNED_ACTIVATION: ${{ inputs.activation_acceptance }}
         run: |
           $ErrorActionPreference = 'Stop'
           $certificate = Join-Path $env:RUNNER_TEMP ("notes-signing-" + [guid]::NewGuid().ToString('N') + ".pfx")
@@ -62,7 +68,11 @@ jobs:
             [IO.File]::WriteAllBytes($certificate, $bytes)
             $env:WINDOWS_SIGNING_PFX_BASE64 = $null
             $env:WIN_CSC_LINK = $certificate
-            pnpm desktop:package:signed
+            if ($env:ACCEPT_SIGNED_ACTIVATION -eq 'true') {
+              pnpm desktop:package:signed --acceptance-pair
+            } else {
+              pnpm desktop:package:signed
+            }
             if ($LASTEXITCODE -ne 0) { throw 'Signed-candidate build or verification failed.' }
           } finally {
             if ($null -ne $bytes) { [Array]::Clear($bytes, 0, $bytes.Length) }
@@ -71,6 +81,20 @@ jobs:
             $env:WINDOWS_SIGNING_PFX_BASE64 = $null
             if ([IO.File]::Exists($certificate)) { [IO.File]::Delete($certificate) }
           }
+      - name: Accept genuine signed Main activation and authenticated restart
+        if: inputs.activation_acceptance
+        shell: pwsh
+        env:
+          DESKTOP_SIGNED_ACTIVATION_PROBE: '1'
+          WINDOWS_SIGNING_CERT_SHA256: ${{ vars.WINDOWS_SIGNING_CERT_SHA256 }}
+          WINDOWS_PUBLISHER_NAME: ${{ vars.WINDOWS_PUBLISHER_NAME }}
+          WINDOWS_UPDATE_FEED_URL: ${{ vars.WINDOWS_UPDATE_FEED_URL }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          pnpm --filter @windows-ai-notes/desktop exec playwright test tests/signed-activation.spec.ts
+          if ($LASTEXITCODE -ne 0) { throw 'Genuine signed activation acceptance failed.' }
+          $receipt = Join-Path $env:GITHUB_WORKSPACE 'artifacts/desktop-signed/activation-acceptance.json'
+          if (-not [IO.File]::Exists($receipt)) { throw 'Signed activation acceptance did not produce its required success receipt; skipped tests are not acceptance.' }
       - name: Upload only the verified installer and public receipt
         uses: actions/upload-artifact@v4
         with:
@@ -80,4 +104,6 @@ jobs:
             artifacts/desktop-signed/*/*-signed.exe
             artifacts/desktop-signed/*/signed-candidate.json
             artifacts/desktop-signed/*/windows-update.json
+            artifacts/desktop-signed/activation-pair.json
+            artifacts/desktop-signed/activation-acceptance.json
           retention-days: 7

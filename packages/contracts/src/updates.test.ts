@@ -6,6 +6,8 @@ import {
   desktopUpdateResponseSchema,
   desktopUpdateStateSchema,
   packagedUpdatePolicySchema,
+  signedUpdateAcceptancePairSchema,
+  signedUpdateAcceptanceReceiptSchema,
   stagedUpdateRuntimeSchema,
   updateFeedSchema,
   updateInstallationSchema,
@@ -43,6 +45,89 @@ const feed = {
   bytes: 100,
   sha512: Buffer.alloc(64).toString('base64'),
 };
+
+describe('signed activation acceptance bookkeeping', () => {
+  const pair = {
+    version: 1,
+    kind: 'signed_activation_pair',
+    scope: 'same_source_compatible_patch',
+    source_commit: 'd'.repeat(40),
+    production_accepted: false,
+    policy,
+    current: {
+      ...feed,
+      application_version: '0.1.0',
+      installer: 'windows-ai-notes-0.1.0-x64-signed.exe',
+    },
+    offered: feed,
+  };
+  const receipt = {
+    version: 1,
+    kind: 'signed_activation_acceptance',
+    pair,
+    verified_at: '2026-01-01T00:00:00.000Z',
+    session_id: '00000000-0000-4000-8000-000000000001',
+    storage_schema: 6,
+    delivery: 'preseeded_cache',
+    production_accepted: false,
+  };
+  it('records the compatible same-source scope without granting update or production authority', () => {
+    expect(signedUpdateAcceptancePairSchema.parse(pair)).toEqual(pair);
+    expect(signedUpdateAcceptanceReceiptSchema.parse(receipt)).toEqual(receipt);
+    expect(updateFeedSchema.safeParse(pair).success).toBe(false);
+    expect(updateWorkerOutcomeSchema.safeParse(receipt).success).toBe(false);
+    expect(desktopUpdateCommandSchema.safeParse(receipt).success).toBe(false);
+  });
+  it('rejects arbitrary version jumps, rollback, unstable versions and source/path confusion', () => {
+    for (const version of [
+      '0.1.0',
+      '0.0.9',
+      '0.1.2',
+      '0.2.0',
+      '1.0.0',
+      '0.1.1-beta',
+    ]) {
+      expect(
+        signedUpdateAcceptancePairSchema.safeParse({
+          ...pair,
+          offered: {
+            ...feed,
+            application_version: version,
+            installer: `windows-ai-notes-${version}-x64-signed.exe`,
+          },
+        }).success,
+      ).toBe(false);
+    }
+    for (const change of [
+      { source_commit: 'HEAD' },
+      { source_commit: `${pair.source_commit}\n` },
+      { scope: 'future_schema_upgrade' },
+      { production_accepted: true },
+      { installer: '../outside.exe' },
+      { offered: { ...feed, installer: '../outside.exe' } },
+    ])
+      expect(
+        signedUpdateAcceptancePairSchema.safeParse({ ...pair, ...change })
+          .success,
+      ).toBe(false);
+  });
+  it('cannot misrepresent cache recovery as HTTPS delivery or wider production acceptance', () => {
+    for (const change of [
+      { delivery: 'https_feed' },
+      { production_accepted: true },
+      { storage_schema: 0 },
+      { session_id: '../outside' },
+      { verified_at: 'yesterday' },
+      { current_payload_integrity: true },
+      { user_data: 'C:\\private\\profile' },
+      { signing_password: 'synthetic-disallowed-field' },
+    ])
+      expect(
+        signedUpdateAcceptanceReceiptSchema.safeParse({ ...receipt, ...change })
+          .success,
+      ).toBe(false);
+  });
+});
 
 describe('read-only update inspection contracts', () => {
   const entry = {

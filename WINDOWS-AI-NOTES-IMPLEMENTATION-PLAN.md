@@ -560,6 +560,8 @@ request ID 串联 API、job、worker 和 provider request，生产 trace 默认�
 
 Main 现已组合仅进程内可调用的 activation 协调器：只认领当前空闲且已验证的 ready 候选一次，不经 preload/renderer 传入路径或安装权限；先保护 runtime，再请求编辑器 flush，在可能很长的终止式后台/录音/helper/SQLite 排空期间保持 guardian，排空后才创建带新鲜决策期限的 worker。确认 guardian 实际释放后提交，不再夹杂异步关闭工作，立即将物理退出权交给该 worker；Electron 退出 API 返回 void 不算成功，若 Main 仍活着则等待 worker 失败并确认其实际停止后，才允许后续普通退出。三个退出路径都保留真实 worker，失败/过期的 release 撤销退出权限，取消不确定时不把 kill 请求当作已退出；普通退出封闭新的 worker 创建。任何失败都不重开已释放 workspace、不重试安装、不恢复快照或解除 fence。私有 Main 入口用于后续授权签名正例验收，并未接通 renderer 安装命令或开放安装/重启按钮；第一方签名正例、授权恢复以及部署/物理设备/质量和运行验收继续是发行门禁。
 
+签名候选工作流现提供默认关闭的 `activation_acceptance`：只有受保护的 owner 授权签名步骤可构建同一精确源码的当前版本及下一稳定 patch，源 manifest 不改写，两个候选都必须完成真实时间戳、独立 pin、安装器角色及完整 runtime 来源验证。签名 PFX 与环境先清除，再在隔离托管 Windows 安装真实 base，把 upgrade 仅作为不可信 cache 输入交给实际打包 Main 重新验签，调用同一个已缓存 ASAR Main 私有无参入口，执行真实 flush/终止排空/guardian/新鲜 worker/commit/物理退出/安装/双通道首次健康。普通 outcome JSON 只作诊断，新的 Main 仅以精确创建身份、image 与保留的观察句柄请求普通窗口关闭，不用于安装/准入授权，也不强杀；随后普通启动目标版本，必须通过 Main 原生锁与 DPAPI 校验的只读检查确认对应健康 session，并验证原 profile、密钥封套、文档/标签/文本、partial recording 及升级后新编辑再次启动和卸载后的保留。正例只在全部步骤结束后生成公开 acceptance receipt，明确 `preseeded_cache`、同源兼容 patch 及 `production_accepted=false`，不冒充 HTTPS 交付、未来 schema 升级或整体生产验收。不确定 handoff 不重试安装、不 rollback、不删除进程/恢复记录；真实授权 signer 尚未提供，因此新增 harness 不等于已完成第一方签名正向执行，公开安装/重启入口继续关闭。
+
 ## 12. 建议代码组织
 
 以下是未来建项布局，不是已经存在的目录：

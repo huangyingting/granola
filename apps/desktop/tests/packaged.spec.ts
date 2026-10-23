@@ -17,6 +17,11 @@ import {
   stageUpdateRuntime,
   verifyUpdateInstallation,
 } from '../src/main/update-trust.js';
+import { updateParentIdentitySchema } from '@windows-ai-notes/contracts/updates';
+import {
+  closeObservedMain,
+  desktopProbeEnvironment,
+} from './installer-support.js';
 
 const executable = process.env.DESKTOP_EXECUTABLE;
 async function rejectedMainActivation(application: ElectronApplication) {
@@ -595,7 +600,10 @@ test('opens the actual packaged sandboxed editor without workspace runtime depen
 test('seals a real self-contained runtime copy without granting unsigned provenance', async () => {
   test.setTimeout(180_000);
   if (!executable) throw new Error('The packaged executable is required.');
-  const application = await electron.launch({ executablePath: executable });
+  const application = await electron.launch({
+    executablePath: executable,
+    env: desktopProbeEnvironment(),
+  });
   let metadata: { resources: string; version: string };
   try {
     const page = await application.firstWindow();
@@ -607,9 +615,57 @@ test('seals a real self-contained runtime copy without granting unsigned provena
       version: app.getVersion(),
     }));
     const closed = application.waitForEvent('close');
-    await application.evaluate(({ BrowserWindow }) => {
-      BrowserWindow.getAllWindows()[0]?.close();
+    const observed = await application.evaluate(async () => {
+      const { execFile } = process.getBuiltinModule('node:child_process');
+      const { join } = process.getBuiltinModule('node:path');
+      const stdout = await new Promise<string>((resolve, reject) => {
+        execFile(
+          join(process.resourcesPath, 'audio-host', 'AudioHost.exe'),
+          ['--verify-update-parent', String(process.pid), process.execPath],
+          {
+            encoding: 'utf8',
+            timeout: 60_000,
+            maxBuffer: 16_384,
+            windowsHide: true,
+          },
+          (error, output) => (error ? reject(error) : resolve(output)),
+        );
+      });
+      return JSON.parse(stdout) as unknown;
     });
+    expect(observed).toMatchObject({
+      version: 1,
+      matched: true,
+      code: 'update_parent_matched',
+    });
+    if (
+      typeof observed !== 'object' ||
+      observed === null ||
+      !('parent' in observed)
+    )
+      throw new Error(
+        'Actual packaged Main did not report its observed parent identity.',
+      );
+    const identity = updateParentIdentitySchema.parse(observed.parent);
+    await expect(
+      closeObservedMain(
+        {
+          ...identity,
+          creation_file_time: (
+            BigInt(identity.creation_file_time) + 1n
+          ).toString(),
+        },
+        executable,
+      ),
+    ).rejects.toThrow();
+    await expect(
+      closeObservedMain(identity, `${executable}.wrong`),
+    ).rejects.toThrow();
+    expect(application.process().exitCode).toBeNull();
+    await expect(
+      page.getByRole('button', { name: '+ New meeting', exact: true }),
+    ).toBeEnabled();
+    await closeObservedMain(identity, executable);
     await closed;
   } finally {
     await application.close();

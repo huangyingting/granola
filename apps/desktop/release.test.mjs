@@ -25,6 +25,8 @@ import {
   updatePolicy,
   finalizeNativeRuntime,
   runtimeProvenanceOperation,
+  acceptanceVersions,
+  promoteAcceptancePair,
 } from './release.mjs';
 
 const policy = {
@@ -77,6 +79,123 @@ async function fixture() {
   return { output, destination, version, commit, productName, policy };
 }
 describe('fail-closed signed candidate policy', () => {
+  it('derives only a stable compatible next-patch acceptance version without editing source manifests', async () => {
+    expect(await acceptanceVersions('0.1.0')).toEqual(['0.1.0', '0.1.1']);
+    expect(await acceptanceVersions('65535.65535.65534')).toEqual([
+      '65535.65535.65534',
+      '65535.65535.65535',
+    ]);
+    for (const version of [
+      '0.1.65535',
+      '65536.1.0',
+      '0.1.0-beta',
+      '01.1.0',
+      '../outside',
+      '0.1.0\n',
+      undefined,
+      1,
+    ])
+      await expect(acceptanceVersions(version)).rejects.toMatchObject({
+        code: 'release_acceptance_version',
+      });
+  });
+  it('publishes non-authoritative pair bookkeeping only for matching update-enabled timestamped candidates and never overwrites it', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'notes-acceptance-pair-'));
+    directories.push(root);
+    const destination = join(root, 'pair.json');
+    const updates = {
+      version: 1,
+      feed_url: 'https://updates.example/windows/stable.json',
+      certificate_sha256: policy.certificate_sha256,
+      publisher: policy.publisher,
+      product_name: productName,
+    };
+    const candidate = (application_version) => {
+      const installer = `windows-ai-notes-${application_version}-x64-signed.exe`;
+      return {
+        receipt: {
+          version: 1,
+          kind: 'signed_candidate',
+          application_version,
+          architecture: 'x64',
+          source_commit: commit,
+          production_accepted: false,
+          installer_role_verified: true,
+          runtime_provenance_verified: true,
+          installer,
+          artifacts: {
+            [installer]: {
+              bytes: '100',
+              sha512: Buffer.alloc(64).toString('base64'),
+              certificate_sha256: policy.certificate_sha256,
+              publisher: policy.publisher,
+              timestamped: true,
+            },
+          },
+        },
+      };
+    };
+    const current = candidate('0.1.0'),
+      offered = candidate('0.1.1');
+    const pair = await promoteAcceptancePair(
+      [current, offered],
+      updates,
+      destination,
+    );
+    expect(JSON.parse(await readFile(destination, 'utf8'))).toEqual(pair);
+    expect(pair).toMatchObject({
+      kind: 'signed_activation_pair',
+      scope: 'same_source_compatible_patch',
+      production_accepted: false,
+      source_commit: commit,
+    });
+    await expect(
+      promoteAcceptancePair([current, offered], updates, destination),
+    ).rejects.toMatchObject({ code: 'EEXIST' });
+    for (const field of [
+      'installer_role_verified',
+      'runtime_provenance_verified',
+    ])
+      await expect(
+        promoteAcceptancePair(
+          [current, { receipt: { ...offered.receipt, [field]: false } }],
+          updates,
+          join(root, field),
+        ),
+      ).rejects.toMatchObject({ code: 'release_acceptance_candidates' });
+    await expect(
+      promoteAcceptancePair(
+        [
+          current,
+          { receipt: { ...offered.receipt, source_commit: 'c'.repeat(40) } },
+        ],
+        updates,
+        join(root, 'source'),
+      ),
+    ).rejects.toMatchObject({ code: 'release_acceptance_source' });
+    await expect(
+      promoteAcceptancePair([current], updates, join(root, 'missing')),
+    ).rejects.toMatchObject({ code: 'release_acceptance_candidates' });
+    for (const change of [
+      { certificate_sha256: '0'.repeat(64) },
+      { publisher: 'Other publisher' },
+      { timestamped: false },
+    ]) {
+      const changed = structuredClone(offered);
+      Object.assign(
+        changed.receipt.artifacts[changed.receipt.installer],
+        change,
+      );
+      await expect(
+        promoteAcceptancePair(
+          [current, changed],
+          updates,
+          join(root, 'identity'),
+        ),
+      ).rejects.toMatchObject({ code: 'release_acceptance_identity' });
+    }
+    expect(await readdir(root)).toEqual(['pair.json']);
+  });
   it('keeps updates unconfigured unless a direct HTTPS JSON feed is explicitly selected', async () => {
     expect(await updatePolicy({}, productName, policy)).toBeNull();
     expect(
