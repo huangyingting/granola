@@ -1,0 +1,56 @@
+name: windows-ai-notes-runtime
+
+x-runtime: &runtime
+  image: ${NOTES_SERVER_IMAGE:?Set NOTES_SERVER_IMAGE to the approved server image reference}
+  user: node
+  init: true
+  restart: unless-stopped
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,size=64m,mode=1777
+  stop_grace_period: 5m
+
+services:
+  api:
+    <<: *runtime
+    command: [node, apps/api/dist/main.js]
+    env_file:
+      - ${NOTES_COMMON_ENV_FILE:?Set NOTES_COMMON_ENV_FILE to the shared deployment configuration}
+      - ${NOTES_API_ENV_FILE:?Set NOTES_API_ENV_FILE to the API-only configuration}
+    environment:
+      NODE_ENV: production
+      AUTH_MODE: oidc
+      HOST: 0.0.0.0
+      PORT: '4411'
+    ports:
+      - '127.0.0.1:${NOTES_API_PORT:-4411}:4411'
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - --input-type=module
+        - --eval
+        - >-
+          try {
+            const response = await fetch('http://127.0.0.1:4411/health',
+              { signal: AbortSignal.timeout(2000) });
+            await response.body?.cancel();
+            if (!response.ok) throw new Error('not_ready');
+          } catch {
+            console.error('api_readiness_failed');
+            process.exitCode = 1;
+          }
+      interval: 15s
+      timeout: 3s
+      start_period: 5m
+      retries: 3
+  worker:
+    <<: *runtime
+    command: [node, apps/worker/dist/main.js]
+    env_file:
+      - ${NOTES_COMMON_ENV_FILE:?Set NOTES_COMMON_ENV_FILE to the shared deployment configuration}
+      - ${NOTES_WORKER_ENV_FILE:?Set NOTES_WORKER_ENV_FILE to the Worker-only configuration}
+    environment:
+      NODE_ENV: production

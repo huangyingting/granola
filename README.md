@@ -2291,6 +2291,62 @@ Its default command runs the API in OIDC mode; override the command with
 your deployment secret manager/environment. The development Compose file
 deliberately starts only PostgreSQL, not an unauthenticated public API.
 
+### Operator-controlled API and Worker runtime
+
+`infra/compose/runtime.yml` runs the existing server image as separate API and
+Worker containers. It does **not** provision PostgreSQL, object buckets, identity,
+TLS, backups or signing. Supply an approved image pinned by digest and three
+administrator-owned environment files outside this repository:
+
+| Compose variable        | File contents                                                                            |
+| ----------------------- | ---------------------------------------------------------------------------------------- |
+| `NOTES_COMMON_ENV_FILE` | `DATABASE_URL`, private recording-storage and independent deletion-archive configuration |
+| `NOTES_API_ENV_FILE`    | OIDC configuration; optional live Speech enablement and Speech-only credentials          |
+| `NOTES_WORKER_ENV_FILE` | The six Azure OpenAI/Speech settings; no desktop or signing secrets                      |
+
+Set `NOTES_SERVER_IMAGE` and those three absolute file paths in a separate
+operator interpolation file, for example `/etc/windows-ai-notes/runtime.env`.
+Restrict access to all configuration files. Do not copy the development `.env`
+or pass the sibling application's environment file into a production container.
+Environment files are runtime secret delivery, not encrypted secret storage:
+Docker administrators can inspect container environments. A deployment secret
+manager remains preferable.
+
+The manifest forces `NODE_ENV=production` and API OIDC even if an input file
+contains development flags. Both containers run as `node`, with a read-only root,
+dropped capabilities, no new privileges and a small non-executable temporary
+filesystem. Only API port 4411 is published, **on host loopback only**; optionally
+set `NOTES_API_PORT` to change the host port. Put the existing trusted HTTPS/WSS
+ingress in front of it. The Worker has no published port.
+
+For a **new, empty deployment only**, with every writer stopped, run the existing
+explicit deployment commands before starting services:
+
+```sh
+docker compose --env-file /etc/windows-ai-notes/runtime.env -f infra/compose/runtime.yml config --quiet
+docker compose --env-file /etc/windows-ai-notes/runtime.env -f infra/compose/runtime.yml run --rm --no-deps api node packages/db/dist/cli.js migrate
+docker compose --env-file /etc/windows-ai-notes/runtime.env -f infra/compose/runtime.yml run --rm --no-deps api node packages/db/dist/cli.js deletion-init
+docker compose --env-file /etc/windows-ai-notes/runtime.env -f infra/compose/runtime.yml up --detach
+```
+
+No startup command migrates, initializes the archive, provisions accounts, restores
+backups or attests provider reconciliation. Use the existing deployment CLI for
+explicit account provisioning. **Never initialize over a restored deployment**;
+follow the independent deletion/usage/media restore procedure above with writers
+stopped instead. Schema upgrades also require the documented backup/migration
+procedure, not merely restarting containers.
+
+The API health command checks real database-backed readiness, consumes no response
+body and reports only a fixed failure code. The Worker exposes its existing
+body-free startup/iteration observations, not a fabricated health endpoint.
+Compose health failure alone does not restart a container; process exit uses
+`unless-stopped`. A five-minute stop grace allows normal application cancellation
+and receipt settlement, but forced termination can still leave uncertain usage.
+Validate resource sizing, real OIDC/TLS and private encrypted storage, alert
+delivery, backup recovery and all release gates in the actual deployment.
+Configuration checks and isolated container-hardening probes are **not production
+deployment acceptance**.
+
 ### Internal live-source authorization
 
 Migration `007_live_sources.sql` adds `Database.live` and a separate

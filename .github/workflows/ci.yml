@@ -50,6 +50,7 @@ jobs:
             http://127.0.0.1:59000/minio/health/live
       - name: PostgreSQL, S3 integrity, private AI and client regressions
         env:
+          SERVER_COMPOSE_ACCEPTANCE: '1'
           TEST_S3_ENDPOINT: http://127.0.0.1:59000
           TEST_POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
         run: pnpm test
@@ -96,6 +97,11 @@ jobs:
           docker build --tag windows-ai-notes-server:ci .
           docker run --rm --network none --entrypoint /opt/pnpm/pnpm windows-ai-notes-server:ci --version
           docker run --rm --network none --entrypoint node windows-ai-notes-server:ci --input-type=module --eval "import {existsSync} from 'node:fs'; await import('./apps/api/dist/server.js'); await import('./apps/worker/dist/worker.js'); if (process.getuid() === 0) throw new Error('The server must not run as root.'); for (const path of ['apps/.ci-signing-context-canary.PFX', 'tools/.ci-signing-context-canary.p12']) if (existsSync(path)) throw new Error('Signing material entered the server image.'); console.log('Unprivileged runtime imports and signing-material exclusion verified.');"
+      - name: Actual hardened Compose containers and readiness probe
+        env:
+          SERVER_COMPOSE_ACCEPTANCE: '1'
+          TEST_SERVER_IMAGE: windows-ai-notes-server:ci
+        run: pnpm test packages/client/src/deployment.test.ts
   probe:
     strategy:
       fail-fast: false
