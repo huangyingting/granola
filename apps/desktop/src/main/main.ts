@@ -919,12 +919,15 @@ async function start() {
   controller?.start();
   if (app.isPackaged && startupAdmitted && controller)
     void maintenance.track(
-      cleanupRetiredUpdateSessions(
-        audioHostExecutable(),
-        process.execPath,
-        app.getVersion(),
-        updateMaintenance.signal,
-      )
+      Promise.resolve()
+        .then(() =>
+          cleanupRetiredUpdateSessions(
+            audioHostExecutable(),
+            process.execPath,
+            app.getVersion(),
+            updateMaintenance.signal,
+          ),
+        )
         .then((report) => {
           if (report.status === 'pending')
             console.error(
