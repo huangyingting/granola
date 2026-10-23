@@ -417,6 +417,8 @@ describe.skipIf(!databaseUrl || !endpoint)(
       const c = await context('archive-two');
       const actual = globalThis.fetch;
       const registrations: number[] = [];
+      const random = vi.spyOn(Math, 'random').mockReturnValue(0.5);
+      let failedAt = 0;
       let interrupt = true;
       vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
         const url = new URL(input instanceof Request ? input.url : input);
@@ -430,6 +432,8 @@ describe.skipIf(!databaseUrl || !endpoint)(
           registrations.push(upload.chunk.sequence);
           if (upload.chunk.sequence === 1 && interrupt) {
             interrupt = false;
+            failedAt = Date.now();
+            vi.spyOn(Date, 'now').mockReturnValue(failedAt);
             return Response.json(
               {
                 code: 'temporary_unavailable',
@@ -446,7 +450,12 @@ describe.skipIf(!databaseUrl || !endpoint)(
       c.controller.requestUpload(c.profile, c.doc.id, c.recording.id, false);
       await vi.waitFor(() => expect(c.status()?.state).toBe('waiting'));
       expect(c.status()?.verified_chunks).toBe(1);
-      expect(c.status()!.retry_at).toBeGreaterThan(Date.now() + 50_000);
+      expect(c.status()!.retry_at).toBe(failedAt + 60_500);
+      random.mockReturnValue(0);
+      c.controller.resumeUploads(c.upload);
+      expect(c.status()!.retry_at).toBe(failedAt + 60_500);
+      expect(registrations).toEqual([0, 1]);
+      vi.mocked(Date.now).mockRestore();
       c.controller.requestUpload(c.profile, c.doc.id, c.recording.id, false);
       await vi.waitFor(() => expect(c.status()?.state).toBe('complete'));
       expect(registrations).toEqual([0, 1, 1]);

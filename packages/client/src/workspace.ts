@@ -28,6 +28,7 @@ import { DesktopSummaries, summaryIntentSchema } from './summaries.js';
 import { DesktopChat } from './chat.js';
 import type { DesktopDelivery } from './delivery.js';
 import { PendingWork } from './lifecycle.js';
+import { retryDelay } from './retry.js';
 
 const workspaceSchema = z.strictObject({
   id: resourceId,
@@ -985,6 +986,10 @@ export class WorkspaceController {
         void this.synchronize().catch((error: unknown) => {
           if (error instanceof ClientError && error.code === 'sync_cancelled')
             return;
+          if (error instanceof ClientError && error.code === 'sync_backoff') {
+            this.schedule(Math.max(0, this.retryAt - Date.now()));
+            return;
+          }
           console.error(
             JSON.stringify({
               code: 'background_sync_failed',
@@ -1070,9 +1075,9 @@ export class WorkspaceController {
         this.retryCount++;
         this.retryAt = this.error.retryable
           ? Date.now() +
-            Math.max(
-              error instanceof ClientError ? error.retryAfterSeconds * 1000 : 0,
+            retryDelay(
               Math.min(60_000, 1000 * 2 ** Math.min(this.retryCount, 6)),
+              error instanceof ClientError ? error.retryAfterSeconds * 1000 : 0,
             )
           : 0;
         this.emit('data');

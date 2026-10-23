@@ -236,6 +236,14 @@ device, and repeated imports of an unchanged draft do not duplicate it. Copies
 include written notes only; they do not copy or upload raw audio.
 Switching back to **On this device** pauses cloud sync without signing out.
 
+Safe sync and saved-recording retries, plus summary/question event-read
+reconnections, use bounded equal jitter. Parsed `Retry-After` delays remain
+minimums, with random spread added above them rather than synchronizing every
+client onto one deadline. Nonretryable failures still pause. This timing policy
+does not authorize repeating paid AI work or replaying consumed refresh tokens.
+An early synchronization timer wake reschedules the remaining pause instead of
+losing automatic recovery.
+
 Disconnecting clears all cached workspaces and local credentials transactionally.
 You can explicitly keep unsynced drafts as new device-only copies; pending
 deletions are not sent. Existing remote audio is not deleted by disconnect.

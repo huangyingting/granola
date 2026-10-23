@@ -1127,6 +1127,9 @@ describe.skipIf(!databaseUrl)(
         });
       await controller.synchronize();
       expect(issuer.state.refreshCalls).toBe(1);
+      const now = Date.now();
+      vi.spyOn(Date, 'now').mockReturnValue(now);
+      vi.spyOn(Math, 'random').mockReturnValue(0.5);
       spy.mockImplementation(
         async () =>
           new Response(
@@ -1147,9 +1150,7 @@ describe.skipIf(!databaseUrl)(
         code: 'sync_backoff',
       });
       expect(spy.mock.calls).toHaveLength(calls);
-      expect(controller.snapshot().connection.next_retry_at).toBeGreaterThan(
-        Date.now(),
-      );
+      expect(controller.snapshot().connection.next_retry_at).toBe(now + 2500);
     });
     it('retains the account and queued edits through a retryable identity-key outage and automatically resumes', async () => {
       await connect();
@@ -1217,6 +1218,56 @@ describe.skipIf(!databaseUrl)(
       expect(issuer.state.refreshCalls).toBe(0);
       expect(accountSession().summary().status).toBe('active');
     }, 10_000);
+    it('rearms an early synchronization retry without sending a request before its deadline', async () => {
+      await connect();
+      await activate();
+      const now = Date.now();
+      const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+      vi.spyOn(Math, 'random').mockReturnValue(0.5);
+      const requests = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+        Response.json(
+          {
+            code: 'identity_provider_unavailable',
+            message: 'Synthetic early-wake outage.',
+            retryable: true,
+            request_id: randomUUID(),
+          },
+          { status: 503 },
+        ),
+      );
+      await expect(controller.synchronize()).rejects.toMatchObject({
+        code: 'identity_provider_unavailable',
+      });
+      expect(controller.snapshot().connection.next_retry_at).toBe(now + 1500);
+      expect(requests).toHaveBeenCalledTimes(1);
+      const timers = vi.spyOn(globalThis, 'setTimeout');
+      const wake = () => {
+        const call = timers.mock.calls.at(-1);
+        const result = timers.mock.results.at(-1);
+        if (!call || result?.type !== 'return')
+          throw new Error('Expected a pending synchronization retry.');
+        clearTimeout(result.value);
+        call[0]();
+      };
+      controller.start();
+      expect(timers.mock.calls[0]?.[1]).toBe(1500);
+      clock.mockReturnValue(now + 1499);
+      wake();
+      await Promise.resolve();
+      expect(timers).toHaveBeenCalledTimes(2);
+      expect(timers.mock.calls[1]?.[1]).toBe(1);
+      expect(requests).toHaveBeenCalledTimes(1);
+      expect(controller.snapshot().connection.status).toBe('attention');
+      clock.mockReturnValue(now + 1500);
+      wake();
+      clock.mockRestore();
+      await vi.waitFor(
+        () => expect(controller.snapshot().connection.status).toBe('ready'),
+        { timeout: 5000 },
+      );
+      expect(requests.mock.calls.length).toBeGreaterThan(1);
+      expect(issuer.state.refreshCalls).toBe(0);
+    });
     it('does not replace a cached account with a different browser identity without disconnecting first', async () => {
       await seed();
       await connect();

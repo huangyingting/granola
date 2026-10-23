@@ -210,12 +210,13 @@ describe('bounded isolated Main chat subscriptions', () => {
     expect(JSON.stringify(records)).not.toMatch(/Mira|checklist|New worker/);
   });
   it('bounds repeated premature EOF, backs off, releases the shared read slot and leaves a visible paused state', async () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0.5);
     vi.mocked(api.chatEvents).mockResolvedValue(0);
     await start();
     await vi.waitFor(() => expect(snapshot()?.status).toBe('paused'));
     expect(api.chatEvents).toHaveBeenCalledTimes(5);
     expect(vi.mocked(delay).mock.calls.map((call) => call[0])).toEqual([
-      2000, 4000, 8000, 16000,
+      1500, 3000, 6000, 12000,
     ]);
     expect(reads.size).toBe(0);
     expect(snapshot()).toMatchObject({
@@ -267,7 +268,8 @@ describe('bounded isolated Main chat subscriptions', () => {
       'Mira.',
     );
   });
-  it('respects bounded service backoff when renewing a read subscription', async () => {
+  it('adds jitter above bounded service backoff when renewing a read subscription', async () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0.5);
     vi.mocked(api.chatEvents).mockRejectedValueOnce(
       new ClientError(
         'quota_exceeded',
@@ -279,7 +281,7 @@ describe('bounded isolated Main chat subscriptions', () => {
     );
     await start();
     await vi.waitFor(() => expect(api.chatEvents).toHaveBeenCalledTimes(2));
-    expect(vi.mocked(delay).mock.calls[0]?.[0]).toBe(9000);
+    expect(vi.mocked(delay).mock.calls[0]?.[0]).toBe(9500);
     expect(failed).not.toHaveBeenCalled();
   });
   it('shares the four-read Main limit and rejects another subscription before contacting the service', async () => {

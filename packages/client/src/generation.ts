@@ -14,6 +14,7 @@ import {
 import { ApiClient, ClientError } from './http.js';
 import type { DesktopDelivery, DeliveryHandle } from './delivery.js';
 import { PendingWork } from './lifecycle.js';
+import { retryDelay } from './retry.js';
 
 type Owner = { profile: string; api: ApiClient; authorize: () => void };
 type Subscription = Owner & {
@@ -279,6 +280,7 @@ export class SummaryEvents {
     let failures = 0;
     try {
       while (!current.abort.signal.aborted) {
+        let retryAfter = 0;
         try {
           this.authorize(current);
           current.state.status = 'streaming';
@@ -327,14 +329,17 @@ export class SummaryEvents {
             )
               throw error;
             current.state.error = error.message;
+            retryAfter = error.retryAfterSeconds * 1000;
           }
         }
         this.authorize(current);
         current.state.status = 'reconnecting';
         this.hooks.changed();
-        await delay(Math.min(30_000, 1000 * 2 ** failures), undefined, {
-          signal: current.abort.signal,
-        });
+        await delay(
+          retryDelay(Math.min(30_000, 1000 * 2 ** failures), retryAfter),
+          undefined,
+          { signal: current.abort.signal },
+        );
       }
     } catch (error) {
       if (!current.abort.signal.aborted && this.current === current) {

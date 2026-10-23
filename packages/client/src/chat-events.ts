@@ -14,6 +14,7 @@ import {
 import { ApiClient, ClientError } from './http.js';
 import type { DesktopDelivery, DeliveryHandle } from './delivery.js';
 import { PendingWork } from './lifecycle.js';
+import { retryDelay } from './retry.js';
 
 type Owner = { profile: string; api: ApiClient; authorize: () => void };
 type Subscription = Owner & {
@@ -436,7 +437,7 @@ export class ChatEvents {
         current.state.status = 'reconnecting';
         this.save(current);
         await delay(
-          Math.max(retryAfter, Math.min(30_000, 1000 * 2 ** failures)),
+          retryDelay(Math.min(30_000, 1000 * 2 ** failures), retryAfter),
           undefined,
           {
             signal: current.abort.signal,

@@ -22,6 +22,7 @@ import { RecordingLivePreview } from './recording-live.js';
 import type { DesktopDelivery } from './delivery.js';
 import { recordingRetentionSchema } from '@windows-ai-notes/contracts/uploads';
 import { PendingWork } from './lifecycle.js';
+import { retryDelay } from './retry.js';
 
 type AudioClient = Pick<
   AudioHostClient,
@@ -896,11 +897,11 @@ export class RecordingController {
               ? 0
               : retryable
                 ? Date.now() +
-                  Math.max(
+                  retryDelay(
+                    Math.min(60_000, 1000 * 2 ** Math.min(current.attempts, 6)),
                     error instanceof ClientError
                       ? error.retryAfterSeconds * 1000
                       : 0,
-                    Math.min(60_000, 1000 * 2 ** Math.min(current.attempts, 6)),
                   )
                 : deleting
                   ? Number.MAX_SAFE_INTEGER

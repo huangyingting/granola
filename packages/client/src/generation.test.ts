@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Writable } from 'node:stream';
+import { setTimeout as delay } from 'node:timers/promises';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { LocalStore } from '@windows-ai-notes/local';
 import { jobSchema, jobEventSchema } from '@windows-ai-notes/contracts/server';
@@ -11,6 +12,11 @@ import { richTextFromPlainText } from '@windows-ai-notes/contracts/content';
 import { ApiClient, ClientError } from './http.js';
 import { SummaryEvents } from './generation.js';
 import { DesktopDelivery } from './delivery.js';
+
+vi.mock('node:timers/promises', async (original) => ({
+  ...(await original<typeof import('node:timers/promises')>()),
+  setTimeout: vi.fn(async () => undefined),
+}));
 
 let local: LocalStore,
   directory: string,
@@ -21,6 +27,7 @@ let local: LocalStore,
 let id: string, job: string, records: Record<string, unknown>[];
 const profile = 'summary-delivery-fixture';
 beforeEach(() => {
+  vi.mocked(delay).mockClear();
   directory = mkdtempSync(join(tmpdir(), 'notes-summary-delivery-'));
   key = randomBytes(32);
   local = new LocalStore(join(directory, 'notes.sqlite'), key);
@@ -130,6 +137,21 @@ it('drains a cancelled summary stream before closing and does not allow it to re
   await expect(events.start(1, id, job)).rejects.toMatchObject({
     code: 'workspace_closed',
   });
+});
+it('honors the service retry floor and adds jitter when reconnecting a summary read', async () => {
+  vi.spyOn(Math, 'random').mockReturnValue(0.5);
+  vi.mocked(api.events).mockRejectedValueOnce(
+    new ClientError(
+      'rate_limited',
+      'Wait before subscribing again.',
+      429,
+      true,
+      9,
+    ),
+  );
+  await events.start(1, id, job);
+  await vi.waitFor(() => expect(api.events).toHaveBeenCalledTimes(2));
+  expect(vi.mocked(delay).mock.calls[0]?.[0]).toBe(9500);
 });
 const message = (seq: number, text: string, attempt = 1) =>
   jobEventSchema.parse({
