@@ -49,6 +49,7 @@ export type { ClaimedChat } from './chat.js';
 export type { LiveClaim, LiveStart, LiveCursor } from './live.js';
 export { LIVE_MEDIA_MS, LIVE_LEASE_MS } from './live.js';
 export { recordChange } from './sync.js';
+export { isDatabaseUnavailable } from './connection-errors.js';
 export {
   withAuditContext,
   setAuditActor,
@@ -208,6 +209,21 @@ export class Database {
     this.chat = new ChatStore(this);
     this.audit = new AuditStore(this);
     this.deletions = new DeletionPublications(this, publisher);
+    // Pool error events cover idle clients, not checked-out transaction clients.
+    const acquired = new WeakSet<pg.PoolClient>();
+    this.pool.on('acquire', (client) => acquired.add(client));
+    this.pool.on('release', (_error, client) => acquired.delete(client));
+    this.pool.on('connect', (client) => {
+      client.on('error', () => {
+        if (acquired.has(client))
+          console.error(
+            JSON.stringify({
+              code: 'database_connection_failed',
+              connection: 'active',
+            }),
+          );
+      });
+    });
     this.pool.on('error', () =>
       console.error(
         'database_connection_failed: idle PostgreSQL connection closed.',
@@ -249,6 +265,7 @@ export class Database {
   ): Promise<T> {
     const scope = randomUUID();
     const client = await this.pool.connect();
+    let discard = false;
     try {
       await client.query(
         `BEGIN; SET LOCAL notes.audit_context TO ${pg.escapeLiteral(JSON.stringify(auditTransactionContext()))}; SET LOCAL notes.deletion_scope TO ${pg.escapeLiteral(scope)}`,
@@ -258,7 +275,14 @@ export class Database {
       await client.query('COMMIT');
       return result;
     } catch (error) {
-      await client.query('ROLLBACK');
+      try {
+        await client.query('ROLLBACK');
+      } catch {
+        discard = true;
+        console.error(
+          JSON.stringify({ code: 'database_transaction_rollback_failed' }),
+        );
+      }
       if (error instanceof Error && 'code' in error && error.code === 'PDR01')
         throw new ServiceError(
           'resource_gone',
@@ -267,7 +291,7 @@ export class Database {
         );
       throw error;
     } finally {
-      client.release();
+      client.release(discard);
     }
   }
   async pendingWork(user: string, tx: Transaction): Promise<number> {

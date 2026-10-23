@@ -20,7 +20,7 @@ jobs:
           POSTGRES_USER: notes
           POSTGRES_PASSWORD: ci-test-only
         ports:
-          - 5432:5432
+          - 127.0.0.1:5432:5432
         options: >-
           --health-cmd "pg_isready -U notes -d notes"
           --health-interval 2s --health-timeout 3s --health-retries 20
@@ -63,6 +63,11 @@ jobs:
           if-no-files-found: error
           path: artifacts/server-acceptance.json
           retention-days: 7
+      - name: Physical PostgreSQL crash, WAL recovery and frozen client replay
+        env:
+          SERVER_DATABASE_CRASH_ACCEPTANCE: '1'
+          TEST_POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
+        run: pnpm test packages/client/src/database-recovery.test.ts
       - run: pnpm format:check
       - name: Build the unprivileged server image without credentials
         run: |

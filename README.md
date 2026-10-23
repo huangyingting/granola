@@ -1553,6 +1553,52 @@ After `pnpm build`, run
 the kill/pause cases intentionally wait for the real lease clock. Cleanup awaits
 physical child closure before dropping its schema and deleting the private TLS directory.
 
+### Physical PostgreSQL crash and WAL recovery
+
+Database connection loss now produces a sanitized, retryable `503 database_unavailable`
+instead of a non-retryable internal error. Known PostgreSQL connection/shutdown/capacity
+failures, transport failures and pinned `pg` connection messages are classified narrowly;
+explicit domain errors and permanent/query/protocol failures retain their existing handling.
+Diagnostics never include the exception, SQL, connection string or meeting body.
+
+Checked-out clients have connection-error handlers as well as the pool's idle-client
+handler, so a broken active transaction does not cause an uncaught process exception.
+If rollback also fails, its fixed diagnostic is recorded, the connection is discarded,
+and the original error is preserved. This does not automatically retry a transaction
+or assume that an uncertain commit was rolled back.
+
+An opt-in Linux test physically sends `SIGKILL` to an explicitly supplied, disposable
+PostgreSQL 16 Docker container. It requires an otherwise empty database/cluster,
+literal-loopback publication, persistent Docker-volume data and no automatic container
+removal; shared databases, external bind mounts and tmpfs data are rejected before
+signalling. With normal `fsync`, full-page writes and synchronous commit enabled, it
+loses a fully committed HTTP response, saves newer typing in encrypted SQLite, and
+interrupts both an unfinished control transaction and a real Worker transaction.
+
+The offline `pg_controldata` inspection must confirm an unclean shutdown. Restarting
+the same container/volume must retain its cluster identity, start a new postmaster,
+recover committed notes and discard the uncommitted control row. The original API
+and Worker must remain alive, the Worker must complete a transaction on a new
+post-restart database connection, clients must receive retryable outage errors, and
+encrypted-store reopening/frozen replay must preserve newer edits without duplication.
+Cleanup restores the owned container if needed, closes its children and removes only
+the test schema and private client directory.
+
+**Never run this against a shared or production database.** After `pnpm build`, supply
+an empty, owned, disk-backed disposable container:
+
+```sh
+SERVER_DATABASE_CRASH_ACCEPTANCE=1 \
+  TEST_POSTGRES_CONTAINER=FULL_64_HEX_OWNED_CONTAINER_ID \
+  TEST_DATABASE_URL=YOUR_LITERAL_LOOPBACK_TEST_DATABASE_URL \
+  pnpm test packages/client/src/database-recovery.test.ts
+```
+
+Normal tests skip this destructive case. Server CI runs it in a separate step only
+after all other PostgreSQL tests and the controlled workload have finished. This is
+a process-crash/WAL drill, not host power loss, storage failure, point-in-time restore,
+production capacity, OIDC/TLS or release acceptance.
+
 ### Controlled sync and overload acceptance
 
 The server CI job separately runs an opt-in real-HTTP/PostgreSQL/encrypted-SQLite

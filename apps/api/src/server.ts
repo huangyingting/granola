@@ -29,6 +29,7 @@ import { exportMeetingStream } from '@windows-ai-notes/contracts/content';
 import {
   withAuditContext,
   setAuditActor,
+  isDatabaseUnavailable,
   type Database,
 } from '@windows-ai-notes/db';
 import { validateWav } from '@windows-ai-notes/ai/wav';
@@ -104,6 +105,20 @@ export async function createServer(
         retryable: error.retryable,
         request_id: request.id,
         ...error.details,
+      });
+    }
+    if (isDatabaseUnavailable(error)) {
+      console.error(
+        JSON.stringify({
+          code: 'database_unavailable',
+          request_id: request.id,
+        }),
+      );
+      return reply.code(503).send({
+        code: 'database_unavailable',
+        message: 'The database is temporarily unavailable. Retry this request.',
+        retryable: true,
+        request_id: request.id,
       });
     }
     const status =

@@ -644,6 +644,8 @@ Linux 集成测试另执行实际编译的 API/Worker 子进程，以真实 Post
 
 运行中取消和正常关闭另覆盖真实认证 API cancel、SIGTERM、SIGINT，在未收到 usage 和已收到合法合成 wire receipt 两种时序下分别执行。后者持有真实 usage-period 行锁，以自有 Worker 的 pg_stat_activity / pg_blocking_pids 锁等待确认结算已开始，不使用 sleep 或替换 provider。取消后的已知 receipt 必须仍被结算但不能发布输出；关闭必须等结算后自然零码退出，新 Worker 不得自动重发中断的总结。未收到 receipt 则保留不确定预留，所有路径保持原手写笔记。这是实际服务生命周期和合成协议记账覆盖，不是供应商账单或语义质量认证。
 
+PostgreSQL 进程故障另增加显式 opt-in 的破坏性隔离演练：仅接受完整容器 ID、literal-loopback 映射、空的专属数据库/cluster、非自动删除的 PostgreSQL 16 容器及持久 Docker volume；拒绝共享数据、bind mount 和 tmpfs。正常 fsync/full-page-write/synchronous-commit 下，真实已提交 HTTP 回应丢失及加密 SQLite 新输入之后，以 SIGKILL 同时打断控制事务和真实 Worker 的锁等待，离线 pg_controldata 必须证实未正常关闭。原容器/volume 重启后 cluster 身份不变、postmaster 更新，已提交笔记保留、未提交控制行消失，原 API/Worker 进程不崩溃，冻结重放不重复且保留新输入。已修复 checked-out pg client 无 error listener 导致的未捕获异常、ROLLBACK 失败覆盖原错误，以及连接中断被返回为不可重试 500；故障连接显式丢弃，原错误保留，已知连接/关闭/容量故障返回无敏感信息的 retryable 503，不覆盖 domain/permanent/query/protocol 错误，不自动重试事务或假定不确定 COMMIT 已回滚。CI 只在其他数据库测试全部结束后单独运行此演练；它不冒充断电、存储故障、PITR restore 或生产部署/容量验收。
+
 ## 15. 风险、降级与启动条件
 
 | 风险 | 策略与可接受降级 |
