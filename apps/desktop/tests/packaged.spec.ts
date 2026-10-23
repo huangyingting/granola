@@ -29,16 +29,14 @@ async function verifyNativeRuntimeSeal(resources: string, version: string) {
     windowsHide: true,
   };
   try {
-    await cp(join(resources, 'audio-host'), native, {
-      recursive: true,
-      force: false,
-      errorOnExist: true,
-    });
-    const sealed = await run(
-      source,
-      ['--seal-update-runtime', native, version],
-      options,
-    );
+    await test.step('Copy the complete self-contained runtime', () =>
+      cp(join(resources, 'audio-host'), native, {
+        recursive: true,
+        force: false,
+        errorOnExist: true,
+      }));
+    const sealed = await test.step('Embed the exact payload inventory', () =>
+      run(source, ['--seal-update-runtime', native, version], options));
     expect(JSON.parse(sealed.stdout)).toEqual({
       version: 1,
       operation: '--seal-update-runtime',
@@ -64,7 +62,8 @@ async function verifyNativeRuntimeSeal(resources: string, version: string) {
     ] as const) {
       let rejection: unknown;
       try {
-        await run(join(native, 'AudioHost.exe'), [operation, ...args], options);
+        await test.step(`Reject untrusted or repeated provenance: ${operation}`, () =>
+          run(join(native, 'AudioHost.exe'), [operation, ...args], options));
       } catch (error) {
         rejection = error;
       }
@@ -389,7 +388,6 @@ test('opens the actual packaged sandboxed editor without workspace runtime depen
       BrowserWindow.getAllWindows()[0]?.close();
     });
     await closed;
-    await verifyNativeRuntimeSeal(resources, currentVersion);
     if (
       process.env.GITHUB_ACTIONS === 'true' &&
       process.env.RUNNER_ENVIRONMENT === 'github-hosted'
@@ -398,4 +396,28 @@ test('opens the actual packaged sandboxed editor without workspace runtime depen
   } finally {
     await application.close();
   }
+});
+test('seals a real self-contained runtime copy without granting unsigned provenance', async () => {
+  test.setTimeout(180_000);
+  if (!executable) throw new Error('The packaged executable is required.');
+  const application = await electron.launch({ executablePath: executable });
+  let metadata: { resources: string; version: string };
+  try {
+    const page = await application.firstWindow();
+    await expect(
+      page.getByRole('button', { name: '+ New meeting', exact: true }),
+    ).toBeEnabled();
+    metadata = await application.evaluate(({ app }) => ({
+      resources: process.resourcesPath,
+      version: app.getVersion(),
+    }));
+    const closed = application.waitForEvent('close');
+    await application.evaluate(({ BrowserWindow }) => {
+      BrowserWindow.getAllWindows()[0]?.close();
+    });
+    await closed;
+  } finally {
+    await application.close();
+  }
+  await verifyNativeRuntimeSeal(metadata.resources, metadata.version);
 });
