@@ -302,6 +302,23 @@ public sealed class UpdateSessionRetentionTests : IDisposable
     }
 
     [Fact]
+    public void DirectoryLeasesPreventEmptyPathReplacementDeletionAndCompetingDeleteAccessUntilPhysicalRelease()
+    {
+        var source = Path.Combine(Workers, $"worker-{Guid.NewGuid():D}");
+        var moved = source + "-moved";
+        new DirectoryInfo(source).Create(UpdatePrivateDirectory.Security());
+        using (UpdatePathLock.OpenDirectory(source))
+        {
+            Assert.Throws<IOException>(() => Directory.Move(source, moved));
+            Assert.Throws<IOException>(() => Directory.Delete(source));
+            Assert.Equal(32, Assert.Throws<Win32Exception>(
+                () => UpdatePathLock.OpenForRemoval(source, directory: true)).NativeErrorCode);
+        }
+        Directory.Move(source, moved);
+        Directory.Delete(moved);
+    }
+
+    [Fact]
     public void RenameAndDeleteUseTheOriginalKernelHandleAndNeverReplaceAnExistingDestination()
     {
         var source = Path.Combine(Workers, $"worker-{Guid.NewGuid():D}");
