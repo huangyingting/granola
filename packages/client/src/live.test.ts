@@ -9,6 +9,8 @@ import {
   type LiveClientMessage,
   type LiveServerMessage,
   type LiveSource,
+  SEGMENTED_LIVE_PROFILE,
+  SEGMENTED_LIVE_LIMITS,
 } from '@windows-ai-notes/contracts/realtime';
 import { ApiClient, ClientError } from './http.js';
 import {
@@ -86,9 +88,31 @@ describe('Main-owned bounded live client transport', () => {
       ack?: boolean;
       finish?: boolean;
       usage?: 'settled' | 'check_account';
+      segmented?: boolean;
+      onModels?: () => void;
+      models?: unknown;
     } = {},
   ) {
-    const server = createServer();
+    const server = createServer((_request, response) => {
+      configuration.onModels?.();
+      response.setHeader('content-type', 'application/json');
+      response.end(
+        JSON.stringify(
+          configuration.models ?? {
+            live_transcription: {
+              configured: true,
+              max_media_seconds: 60,
+              max_unfinalized_seconds: 5,
+              canonical: false,
+              automatic_reconnect: false,
+              ...(configuration.segmented
+                ? { profiles: [SEGMENTED_LIVE_PROFILE] }
+                : {}),
+            },
+          },
+        ),
+      );
+    });
     const wss = new WebSocketServer({ server, perMessageDeflate: false });
     sockets.push(wss);
     const selected = source();
@@ -108,7 +132,12 @@ describe('Main-owned bounded live client transport', () => {
       canonical: false as const,
       continuity: 'unverified' as const,
       max_media_ms: 60_000 as const,
-      max_unfinalized_ms: 5000 as const,
+      ...(configuration.segmented
+        ? {
+            profile: SEGMENTED_LIVE_PROFILE,
+            max_unfinalized_ms: 25_000 as const,
+          }
+        : { max_unfinalized_ms: 5000 as const }),
     });
     const send = (value: unknown) => peer.send(JSON.stringify(value));
     const ack = (audio: Audio, change: Record<string, unknown> = {}) => {
@@ -270,6 +299,46 @@ describe('Main-owned bounded live client transport', () => {
     });
     await live.closed;
   });
+  it('negotiates a long-phrase window but only finalization releases its bounded credit', async () => {
+    const f = await fixture({ segmented: true });
+    const live = await f.open();
+    expect(f.received[0]).toMatchObject({ profile: SEGMENTED_LIVE_PROFILE });
+    expect(live.ready).toMatchObject({
+      profile: SEGMENTED_LIVE_PROFILE,
+      max_unfinalized_ms: 25_000,
+    });
+    for (let index = 0; index < 44; index++)
+      await live.write(frames(f.selected, index * 10));
+    expect(live.unfinalizedSamples).toBe(
+      SEGMENTED_LIVE_LIMITS.client_window_samples,
+    );
+    const waiting = live.write(frames(f.selected, 440));
+    f.recognition({ sample_end: 4000 + live.unfinalizedSamples });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(f.audio).toHaveLength(44);
+    f.progress(20_000 * 16);
+    await waiting;
+    expect(live.unfinalizedSamples).toBe(2500 * 16);
+    await live.finish();
+  });
+  it.each([false, true])(
+    'rejects a readiness profile different from the negotiated one (segmented=%s)',
+    async (segmented) => {
+      const f = await fixture({ segmented, ready: false });
+      const opening = f.open();
+      await expect.poll(() => f.received.length).toBe(1);
+      f.send({
+        ...f.ready(),
+        ...(segmented
+          ? { profile: undefined, max_unfinalized_ms: 5000 }
+          : { profile: SEGMENTED_LIVE_PROFILE, max_unfinalized_ms: 25_000 }),
+      });
+      await expect(opening).rejects.toMatchObject({
+        code: 'invalid_live_response',
+      });
+      expect(f.audio).toEqual([]);
+    },
+  );
   it('requires consent before credentials or network dispatch', async () => {
     const f = await fixture();
     const invalid = { ...f.options, consent: false };
@@ -280,6 +349,72 @@ describe('Main-owned bounded live client transport', () => {
     });
     expect(f.received).toEqual([]);
   });
+  it('rechecks owner scope after reading capabilities and never starts an old-account socket', async () => {
+    let active = true;
+    const f = await fixture({
+      onModels: () => {
+        active = false;
+      },
+    });
+    await expect(
+      f.open({
+        authorize: () => {
+          if (!active)
+            throw new ClientError('workspace_changed', 'Workspace changed.');
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'workspace_changed' });
+    expect(f.received).toEqual([]);
+  });
+  it('cancels capability negotiation before opening a socket', async () => {
+    const controller = new AbortController();
+    const f = await fixture({ onModels: () => controller.abort() });
+    await expect(f.open({ signal: controller.signal })).rejects.toMatchObject({
+      code: 'live_cancelled',
+    });
+    expect(f.received).toEqual([]);
+  });
+  it.each([
+    { live_transcription: { configured: true, profiles: ['unknown'] } },
+    { live_transcription: { configured: true, max_unfinalized_seconds: 25 } },
+  ])(
+    'rejects unsupported capability metadata rather than guessing a larger budget: %j',
+    async (models) => {
+      const f = await fixture({ models });
+      await expect(f.open()).rejects.toMatchObject({
+        code: 'invalid_server_response',
+      });
+      expect(f.received).toEqual([]);
+    },
+  );
+  it.each([false, true])(
+    'admits empty-final discards only after explicit profile negotiation (segmented=%s)',
+    async (segmented) => {
+      const f = await fixture({ segmented });
+      const live = await f.open();
+      await live.write(frames(f.selected));
+      f.recognition({
+        event_type: 'transcript.discarded',
+        text: '',
+        discard_reason: 'empty_final',
+      });
+      if (segmented) {
+        await expect
+          .poll(
+            () =>
+              f.events.filter(
+                (event) => event.event_type === 'transcript.discarded',
+              ).length,
+          )
+          .toBe(1);
+        await live.finish();
+      } else {
+        await expect(live.completion).rejects.toMatchObject({
+          code: 'invalid_live_response',
+        });
+      }
+    },
+  );
   it('preserves a credential-provider failure without dispatching', async () => {
     const f = await fixture();
     const error = new Error('Synthetic locked vault.');
@@ -372,7 +507,22 @@ describe('Main-owned bounded live client transport', () => {
     'reports bounded handshake rejection %s without reflecting the response body',
     async (status, code) => {
       const base = await serve(
-        createServer((_request, response) => {
+        createServer((request, response) => {
+          if (request.url === '/v1/models') {
+            response.setHeader('content-type', 'application/json');
+            response.end(
+              JSON.stringify({
+                live_transcription: {
+                  configured: true,
+                  max_media_seconds: 60,
+                  max_unfinalized_seconds: 5,
+                  canonical: false,
+                  automatic_reconnect: false,
+                },
+              }),
+            );
+            return;
+          }
           response.writeHead(status);
           response.end('private diagnostics');
         }),

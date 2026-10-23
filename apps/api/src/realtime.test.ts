@@ -22,6 +22,7 @@ import {
 } from '@windows-ai-notes/contracts/server';
 import {
   liveServerMessageSchema,
+  SEGMENTED_LIVE_PROFILE,
   type LiveSource,
   type LiveRecognitionEvent,
   type LiveServerMessage,
@@ -407,6 +408,48 @@ describe.skipIf(!url)(
         canonical: false,
         automatic_reconnect: false,
       });
+    });
+    it('refuses an unsupported streaming profile before reserving usage or opening the provider', async () => {
+      const user = await actor();
+      const count = models.length;
+      const socket = await peer(user);
+      socket.send({ ...start(), profile: SEGMENTED_LIVE_PROFILE });
+      expect(await socket.next('live.error')).toMatchObject({
+        code: 'live_profile_unsupported',
+        usage_status: 'check_account',
+      });
+      await socket.closed;
+      expect(models).toHaveLength(count);
+    });
+    it('advertises, binds and passes the supported profile without changing legacy readiness', async () => {
+      const open = vi.fn(provider.open);
+      const supported = await createServer(
+        db,
+        { mode: 'development', host: '127.0.0.1' },
+        null,
+        { ...provider, profiles: [SEGMENTED_LIVE_PROFILE], open },
+      );
+      extras.push(supported);
+      const address = await supported.listen({ host: '127.0.0.1', port: 0 });
+      const user = await actor();
+      expect(
+        (
+          await supported.inject({ url: '/v1/models', headers: user.headers })
+        ).json().live_transcription.profiles,
+      ).toEqual([SEGMENTED_LIVE_PROFILE]);
+      const socket = await peer(user, address);
+      socket.send({ ...start(), profile: SEGMENTED_LIVE_PROFILE });
+      expect(await socket.next('live.ready')).toMatchObject({
+        profile: SEGMENTED_LIVE_PROFILE,
+        max_unfinalized_ms: 25_000,
+      });
+      expect(open.mock.calls[0]?.[6]).toBe(SEGMENTED_LIVE_PROFILE);
+      await finished(socket);
+      const legacy = await live(user, source(), address);
+      expect(legacy.ready).toMatchObject({ max_unfinalized_ms: 5000 });
+      expect(legacy.ready).not.toHaveProperty('profile');
+      expect(open.mock.calls[1]?.[6]).toBeUndefined();
+      await finished(legacy.socket);
     });
     it('authenticates before upgrading and rejects cross-owner, query-token, browser and subprotocol handshakes', async () => {
       const user = await actor();
@@ -1284,7 +1327,7 @@ describe.skipIf(!url)(
           AZURE_SPEECH_KEY: 'synthetic-loopback-speech-key',
           AZURE_SPEECH_REGION: 'westus',
         },
-        (locale) => {
+        (locale, profile) => {
           worker = new Worker(
             new URL(
               '../../../packages/ai/dist/realtime-worker.js',
@@ -1295,6 +1338,7 @@ describe.skipIf(!url)(
                 key: 'synthetic-loopback-speech-key',
                 region: 'westus',
                 locale,
+                profile,
               },
               env: {
                 SYNTHETIC_SPEECH_ENDPOINT: `ws://127.0.0.1:${endpoint.port}/speech/recognition/conversation/cognitiveservices/v1`,

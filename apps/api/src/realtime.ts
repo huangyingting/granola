@@ -1,4 +1,5 @@
 import websocket from '@fastify/websocket';
+import { createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { FastifyInstance } from 'fastify';
 import type { WebSocket, RawData } from 'ws';
@@ -6,10 +7,12 @@ import { z } from 'zod';
 import {
   liveClientMessageSchema,
   liveServerMessageSchema,
+  SEGMENTED_LIVE_LIMITS,
   type LiveClientMessage,
   type LiveServerMessage,
   type LiveRecognitionEvent,
   type LiveSource,
+  type LiveSpeechProfile,
 } from '@windows-ai-notes/contracts/realtime';
 import { ServiceError, resourceId } from '@windows-ai-notes/contracts/server';
 import type {
@@ -153,6 +156,7 @@ export async function prepareRealtimeRoutes(
 }
 
 class LiveConnection {
+  private profile: LiveSpeechProfile | undefined;
   readonly owner: string;
   private phase:
     | 'waiting'
@@ -285,6 +289,20 @@ class LiveConnection {
   ) {
     if (message.event_type === 'live.start') {
       if (this.phase !== 'waiting') throw error('invalid_live_state');
+      if (message.profile && !this.provider.profiles?.includes(message.profile))
+        throw error('live_profile_unsupported');
+      const configurationVersion = message.profile
+        ? createHash('sha256')
+            .update(
+              JSON.stringify([
+                this.provider.configurationVersion,
+                message.profile,
+              ]),
+            )
+            .digest('hex')
+            .slice(0, 16)
+        : this.provider.configurationVersion;
+      this.profile = message.profile;
       this.phase = 'starting';
       this.armIdle(15_000, 'live_start_timeout');
       const reserved = await this.transaction(async (tx) => {
@@ -297,7 +315,7 @@ class LiveConnection {
             locale: message.locale,
             consent: message.consent,
             provider: this.provider.provider,
-            configurationVersion: this.provider.configurationVersion,
+            configurationVersion,
           },
           message.request_id,
           this.accessExpiresAt,
@@ -306,8 +324,7 @@ class LiveConnection {
         const configuration = await this.db.live.authorize(claim, tx);
         if (
           configuration.provider !== this.provider.provider ||
-          configuration.configuration_version !==
-            this.provider.configurationVersion
+          configuration.configuration_version !== configurationVersion
         )
           throw error('live_configuration_changed');
         const call = await this.db.usage.startLive(claim, tx);
@@ -336,6 +353,7 @@ class LiveConnection {
           this.measured.providerSession(identity);
           return undefined;
         },
+        message.profile,
       );
       this.measured.providerReady();
       this.session = session;
@@ -353,7 +371,12 @@ class LiveConnection {
         canonical: false,
         continuity: 'unverified',
         max_media_ms: 60_000,
-        max_unfinalized_ms: 5000,
+        ...(message.profile
+          ? {
+              profile: message.profile,
+              max_unfinalized_ms: SEGMENTED_LIVE_LIMITS.provider_window_ms,
+            }
+          : { max_unfinalized_ms: 5000 as const }),
       });
       return;
     }
@@ -441,6 +464,9 @@ class LiveConnection {
         return this.fail(error('live_invalid_result'));
       this.finalized = value.finalized_samples;
     } else if (
+      (value.event_type === 'transcript.discarded' &&
+        value.discard_reason === 'empty_final' &&
+        !this.profile) ||
       this.base === undefined ||
       value.sample_start < this.base ||
       value.sample_end > this.base + this.forwarded

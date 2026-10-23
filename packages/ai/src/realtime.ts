@@ -8,6 +8,10 @@ import {
 import {
   liveSourceSchema,
   liveRecognitionEventSchema,
+  liveSpeechProfileSchema,
+  SEGMENTED_LIVE_PROFILE,
+  SEGMENTED_LIVE_LIMITS,
+  type LiveSpeechProfile,
   type LiveSource,
   type LiveRecognitionEvent,
 } from '@windows-ai-notes/contracts/realtime';
@@ -48,6 +52,7 @@ export interface RealtimeIdentity {
 export interface RealtimeProvider {
   readonly provider: 'azure' | 'fixture';
   readonly configurationVersion: string;
+  readonly profiles?: readonly LiveSpeechProfile[];
   open(
     source: LiveSource,
     locale: 'en-US' | 'zh-CN',
@@ -55,9 +60,13 @@ export interface RealtimeProvider {
     emit: (event: LiveRecognitionEvent) => undefined,
     progress?: (value: RealtimeProgress) => undefined,
     identity?: (value: RealtimeIdentity) => undefined,
+    profile?: LiveSpeechProfile,
   ): Promise<RealtimeSession>;
 }
-export type SpeechWorkerFactory = (locale: 'en-US' | 'zh-CN') => Worker;
+export type SpeechWorkerFactory = (
+  locale: 'en-US' | 'zh-CN',
+  profile?: LiveSpeechProfile,
+) => Worker;
 export const AZURE_REALTIME_CAPABILITIES = Object.freeze({
   languages: ['en-US', 'zh-CN'] as const,
   sample_rate: 16_000,
@@ -70,12 +79,13 @@ export const AZURE_REALTIME_CAPABILITIES = Object.freeze({
 });
 export function createAzureRealtimeProvider(
   config: AzureSpeechConfig,
-  launch: SpeechWorkerFactory = (locale) =>
+  launch: SpeechWorkerFactory = (locale, profile) =>
     new Worker(new URL('./realtime-worker.js', import.meta.url), {
       workerData: {
         key: config.AZURE_SPEECH_KEY,
         region: config.AZURE_SPEECH_REGION,
         locale,
+        profile,
       },
       env: {},
       execArgv: [],
@@ -89,6 +99,7 @@ export function createAzureRealtimeProvider(
 ) {
   return {
     provider: 'azure' as const,
+    profiles: [SEGMENTED_LIVE_PROFILE] as const,
     configurationVersion: createHash('sha256')
       .update(
         JSON.stringify([
@@ -107,11 +118,13 @@ export function createAzureRealtimeProvider(
       emit: (event: LiveRecognitionEvent) => undefined,
       progress?: (value: RealtimeProgress) => undefined,
       identity?: (value: RealtimeIdentity) => undefined,
+      profile?: LiveSpeechProfile,
     ): Promise<RealtimeSession> {
       const selected = liveSourceSchema.safeParse(source);
       if (
         !selected.success ||
-        !z.enum(['en-US', 'zh-CN']).safeParse(locale).success
+        !z.enum(['en-US', 'zh-CN']).safeParse(locale).success ||
+        !liveSpeechProfileSchema.optional().safeParse(profile).success
       )
         throw new ServiceError(
           'invalid_live_source',
@@ -126,7 +139,7 @@ export function createAzureRealtimeProvider(
         );
       let worker: Worker;
       try {
-        worker = launch(locale);
+        worker = launch(locale, profile);
       } catch {
         throw new ServiceError(
           'provider_unavailable',
@@ -142,6 +155,7 @@ export function createAzureRealtimeProvider(
         worker,
         progress,
         identity,
+        profile,
       );
       try {
         await session.ready;
@@ -195,6 +209,7 @@ class SpeechSession implements RealtimeSession {
     private readonly worker: Worker,
     private readonly progress?: (value: RealtimeProgress) => undefined,
     private readonly identity?: (value: RealtimeIdentity) => undefined,
+    private readonly profile?: LiveSpeechProfile,
   ) {
     this.completion = new Promise((resolve, reject) => {
       this.resolve = resolve;
@@ -279,7 +294,13 @@ class SpeechSession implements RealtimeSession {
     if (oldest)
       this.stallTimer = setTimeout(
         () => this.fail('live_provider_stalled'),
-        Math.max(1, LIVE_STALL_MS - (performance.now() - oldest.at)),
+        Math.max(
+          1,
+          (this.profile
+            ? SEGMENTED_LIVE_LIMITS.provider_window_ms
+            : LIVE_STALL_MS) -
+            (performance.now() - oldest.at),
+        ),
       );
   }
   private armIdle() {
@@ -315,7 +336,12 @@ class SpeechSession implements RealtimeSession {
       throw this.fail('live_frame_discontinuity');
     if (this.samples + 800 > MAX_SESSION_SAMPLES)
       throw this.fail('live_session_expired');
-    if (this.samples + 800 - this.credited > MAX_PENDING_SAMPLES)
+    if (
+      this.samples + 800 - this.credited >
+      (this.profile
+        ? SEGMENTED_LIVE_LIMITS.provider_window_ms * 16
+        : MAX_PENDING_SAMPLES)
+    )
       throw this.fail('live_audio_overrun');
     const pcm = Uint8Array.from(
       Buffer.from(frame.data_base64, 'base64'),
@@ -426,7 +452,28 @@ class SpeechSession implements RealtimeSession {
       }
       this.resultSequence = event.sequence;
       try {
-        this.result(event);
+        if (event.kind === 'eof_non_speech') {
+          if (!this.finishing || !this.profile) {
+            this.fail('live_worker_protocol');
+            return;
+          }
+          const partial = this.partial;
+          if (partial) {
+            this.publish(
+              {
+                result_id: event.result_id,
+                offset_ticks: partial.offset,
+                duration_ticks: partial.end - partial.offset,
+              },
+              'transcript.discarded',
+              partial.id,
+              partial.version + 1,
+              '',
+              event.reason,
+            );
+            this.partial = undefined;
+          }
+        } else this.result(event);
         if (!this.terminal)
           this.worker.postMessage({ kind: 'ack', sequence: event.sequence });
       } catch {
@@ -475,7 +522,9 @@ class SpeechSession implements RealtimeSession {
           Math.min(this.partial.end, endTicks))
         ? this.partial
         : undefined;
-    if (result.result_type === 'no_match') {
+    const emptyFinal =
+      this.profile && result.result_type === 'final' && !result.text.trim();
+    if (result.result_type === 'no_match' || emptyFinal) {
       if (partial) {
         this.publish(
           result,
@@ -483,6 +532,7 @@ class SpeechSession implements RealtimeSession {
           partial.id,
           partial.version + 1,
           '',
+          emptyFinal ? 'empty_final' : 'no_match',
         );
         this.partial = undefined;
       }
@@ -539,11 +589,15 @@ class SpeechSession implements RealtimeSession {
     );
   }
   private publish(
-    result: SpeechWorkerResult,
+    result: Pick<
+      SpeechWorkerResult,
+      'result_id' | 'offset_ticks' | 'duration_ticks'
+    >,
     type: LiveRecognitionEvent['event_type'],
     id: string,
     version: number,
     text: string,
+    discardReason: 'no_match' | 'empty_final' = 'no_match',
   ) {
     const base = this.base;
     if (base === undefined) {
@@ -561,7 +615,7 @@ class SpeechSession implements RealtimeSession {
       sample_start: base + Math.floor(result.offset_ticks / 625),
       sample_end: base + Math.ceil(endTicks / 625),
       text,
-      discard_reason: type === 'transcript.discarded' ? 'no_match' : null,
+      discard_reason: type === 'transcript.discarded' ? discardReason : null,
       provider_result_id: result.result_id,
     });
     const returned: unknown = this.emit(event);

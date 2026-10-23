@@ -18,10 +18,11 @@ import {
   liveAudioBatchSchema,
   type LivePcmFrame,
 } from '@windows-ai-notes/contracts';
-import type {
-  LiveRecognitionEvent,
-  LiveServerMessage,
-  LiveSource,
+import {
+  SEGMENTED_LIVE_PROFILE,
+  type LiveRecognitionEvent,
+  type LiveServerMessage,
+  type LiveSource,
 } from '@windows-ai-notes/contracts/realtime';
 import { ApiClient, ClientError } from './http.js';
 import { AudioHostClient } from './audio.js';
@@ -67,10 +68,22 @@ describe.skipIf(!url)(
     let late: (() => void) | undefined;
     let lateReceipts = false;
     let opened = 0;
+    let segmented = false;
     const provider: Provider = {
       provider: 'fixture',
       configurationVersion: 'live-client-fixture-v1',
-      async open(selected, _locale, signal, emit, progress) {
+      get profiles() {
+        return segmented ? [SEGMENTED_LIVE_PROFILE] : [];
+      },
+      async open(
+        selected,
+        _locale,
+        signal,
+        emit,
+        progress,
+        _identity,
+        profile,
+      ) {
         opened++;
         const epoch = randomUUID();
         const media: LivePcmFrame[] = [];
@@ -113,7 +126,8 @@ describe.skipIf(!url)(
           write(frame) {
             media.push(frame);
             received.push(frame);
-            if (media.length % 10 === 0) {
+            const batchSize = profile ? 400 : 10;
+            if (media.length % batchSize === 0) {
               finalized = media.length * 800;
               progress?.({
                 provider_epoch: epoch,
@@ -126,7 +140,7 @@ describe.skipIf(!url)(
                 event_type: 'transcript.final',
                 segment_id: randomUUID(),
                 version: 1,
-                sample_start: media.at(-10)!.sample_start,
+                sample_start: media.at(-batchSize)!.sample_start,
                 sample_end: frame.sample_start + 800,
                 text: 'Synthetic meeting evidence.',
                 discard_reason: null,
@@ -172,6 +186,7 @@ describe.skipIf(!url)(
       late?.();
       late = undefined;
       lateReceipts = false;
+      segmented = false;
       received.length = 0;
     });
     afterAll(async () => {
@@ -225,56 +240,69 @@ describe.skipIf(!url)(
       clients.push(connection);
       return connection;
     }
-    it('streams beyond one window using final-only credit, then settles known usage without uploading or editing notes', async () => {
-      const { user, doc, api } = await actor();
-      const selected = source();
-      const events: LiveServerMessage[] = [];
-      const connection = await open(api, doc.id, selected, events);
-      expect((await db.usage.snapshot(user.user_id)).uncertain.audio_ms).toBe(
-        '60000',
-      );
-      for (let index = 0; index < 8; index++) {
-        await expect(
-          connection.write(frames(selected, index * 10)),
-        ).resolves.toMatchObject({
-          acknowledgment: 'authorization_only',
-          accepted_samples: (index + 1) * 8000,
-          source: selected,
-          provider_epoch: connection.ready.provider_epoch,
-        });
-        await vi.waitFor(() =>
-          expect(
-            events.filter((event) => event.event_type === 'transcript.final'),
-          ).toHaveLength(index + 1),
+    it.each([false, true])(
+      'streams beyond one window using final-only credit, then settles known usage without uploading or editing notes (segmented=%s)',
+      async (profile) => {
+        segmented = profile;
+        const { user, doc, api } = await actor();
+        const selected = source();
+        const events: LiveServerMessage[] = [];
+        const connection = await open(api, doc.id, selected, events);
+        expect(connection.ready).toMatchObject(
+          profile
+            ? { profile: SEGMENTED_LIVE_PROFILE, max_unfinalized_ms: 25_000 }
+            : { max_unfinalized_ms: 5000 },
         );
-      }
-      await expect(connection.finish()).resolves.toMatchObject({
-        reason: 'finished',
-        usage_status: 'settled',
-        canonical: false,
-      });
-      await connection.closed;
-      expect(received).toEqual(
-        Array.from({ length: 8 }, (_, index) =>
-          frames(selected, index * 10),
-        ).flat(),
-      );
-      expect(
-        events.filter((event) => event.event_type === 'transcript.final'),
-      ).toHaveLength(8);
-      expect(await db.usage.snapshot(user.user_id)).toMatchObject({
-        settled: { audio_ms: '4000' },
-        uncertain_requests: '0',
-        settled_requests: '1',
-      });
-      expect(await api.document(doc.id)).toMatchObject({
-        notes: 'Keep manual notes intact.',
-        transcript_revision: 0,
-      });
-      expect((await db.pool.query('SELECT id FROM recordings')).rows).toEqual(
-        [],
-      );
-    });
+        expect((await db.usage.snapshot(user.user_id)).uncertain.audio_ms).toBe(
+          '60000',
+        );
+        const batches = profile ? 52 : 8;
+        for (let index = 0; index < batches; index++) {
+          await expect(
+            connection.write(frames(selected, index * 10)),
+          ).resolves.toMatchObject({
+            acknowledgment: 'authorization_only',
+            accepted_samples: (index + 1) * 8000,
+            source: selected,
+            provider_epoch: connection.ready.provider_epoch,
+          });
+          if (!profile || index === 39)
+            await vi.waitFor(() =>
+              expect(
+                events.filter(
+                  (event) => event.event_type === 'transcript.final',
+                ),
+              ).toHaveLength(profile ? 1 : index + 1),
+            );
+        }
+        await expect(connection.finish()).resolves.toMatchObject({
+          reason: 'finished',
+          usage_status: 'settled',
+          canonical: false,
+        });
+        await connection.closed;
+        expect(received).toEqual(
+          Array.from({ length: batches }, (_, index) =>
+            frames(selected, index * 10),
+          ).flat(),
+        );
+        expect(
+          events.filter((event) => event.event_type === 'transcript.final'),
+        ).toHaveLength(profile ? 1 : 8);
+        expect(await db.usage.snapshot(user.user_id)).toMatchObject({
+          settled: { audio_ms: profile ? '26000' : '4000' },
+          uncertain_requests: '0',
+          settled_requests: '1',
+        });
+        expect(await api.document(doc.id)).toMatchObject({
+          notes: 'Keep manual notes intact.',
+          transcript_revision: 0,
+        });
+        expect((await db.pool.query('SELECT id FROM recordings')).rows).toEqual(
+          [],
+        );
+      },
+    );
     it("does not reach the provider for another account's document", async () => {
       const owner = await actor();
       const other = await actor();

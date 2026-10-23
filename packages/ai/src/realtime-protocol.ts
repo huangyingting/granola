@@ -41,6 +41,12 @@ export const speechWorkerEventSchema = z.discriminatedUnion('kind', [
     ),
   speechResultSchema,
   z.strictObject({
+    kind: z.literal('eof_non_speech'),
+    sequence: z.number().int().min(1).max(1_000_000),
+    result_id: speechResultSchema.shape.result_id,
+    reason: z.enum(['no_match', 'empty_final']),
+  }),
+  z.strictObject({
     kind: z.literal('stopped'),
     samples: z.number().int().min(0).max(MAX_SESSION_SAMPLES),
   }),

@@ -230,6 +230,7 @@ export async function createServer(
       max_unfinalized_seconds: 5,
       canonical: false,
       automatic_reconnect: false,
+      profiles: realtime?.profiles ?? [],
     },
     recording_transcription: {
       storage_configured: storage !== null,

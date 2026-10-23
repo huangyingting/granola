@@ -2,6 +2,10 @@ import { parentPort, workerData } from 'node:worker_threads';
 import { z } from 'zod';
 import * as sdk from 'microsoft-cognitiveservices-speech-sdk';
 import {
+  liveSpeechProfileSchema,
+  SEGMENTED_LIVE_LIMITS,
+} from '@windows-ai-notes/contracts/realtime';
+import {
   MAX_PENDING_SAMPLES,
   MAX_SESSION_SAMPLES,
   speechResultSchema,
@@ -31,10 +35,12 @@ const parsed = z
     key: z.string().min(16),
     region: z.string().regex(/^[a-z0-9]{2,32}$/),
     locale: z.enum(['en-US', 'zh-CN']),
+    profile: liveSpeechProfileSchema.optional(),
   })
   .safeParse(workerData);
 if (!parsed.success) fail('live_worker_protocol');
 else {
+  const profile = parsed.data.profile;
   sdk.Recognizer.enableTelemetry(false);
   sdk.Diagnostics.SetLoggingLevel(sdk.LogLevel.None);
   const speech = sdk.SpeechConfig.fromSubscription(
@@ -48,6 +54,24 @@ else {
     'false',
   );
   speech.setProperty(sdk.PropertyId.Recognizer_StopTimeoutMs, '2000');
+  const maxPendingSamples = profile
+    ? SEGMENTED_LIVE_LIMITS.provider_window_ms * 16
+    : MAX_PENDING_SAMPLES;
+  if (profile) {
+    speech.setProperty(sdk.PropertyId.Speech_SegmentationStrategy, 'Time');
+    speech.setProperty(
+      sdk.PropertyId.Speech_SegmentationMaximumTimeMs,
+      String(SEGMENTED_LIVE_LIMITS.phrase_ms),
+    );
+    speech.setProperty(
+      sdk.PropertyId.Speech_SegmentationSilenceTimeoutMs,
+      String(SEGMENTED_LIVE_LIMITS.silence_ms),
+    );
+    speech.setProperty(
+      sdk.PropertyId.SpeechServiceConnection_InitialSilenceTimeoutMs,
+      String(SEGMENTED_LIVE_LIMITS.initial_silence_ms),
+    );
+  }
   const input = sdk.AudioInputStream.createPushStream(
     sdk.AudioStreamFormat.getWaveFormatPCM(16_000, 16, 1),
   );
@@ -72,12 +96,21 @@ else {
       result_id: result.resultId,
       offset_ticks: result.offset,
       duration_ticks: result.duration,
-      text: result.text,
+      text: type === 'no_match' ? '' : result.text,
     });
-    if (
-      !value.success ||
-      value.data.offset_ticks + value.data.duration_ticks > samples * 625
-    ) {
+    if (!value.success) {
+      fail('live_invalid_result');
+      return;
+    }
+    const beyondInput =
+      value.data.offset_ticks + value.data.duration_ticks > samples * 625;
+    const nonSpeechReason =
+      type === 'no_match'
+        ? ('no_match' as const)
+        : type === 'final' && profile && !value.data.text.trim()
+          ? ('empty_final' as const)
+          : undefined;
+    if (beyondInput && !(profile && finishing && nonSpeechReason)) {
       fail('live_invalid_result');
       return;
     }
@@ -85,7 +118,7 @@ else {
       fail('live_event_overrun');
       return;
     }
-    if (type !== 'partial') {
+    if (type !== 'partial' && !beyondInput) {
       // The pinned SDK trims replay in 100 ms chunks before publishing final/NoMatch.
       processed = Math.max(
         processed,
@@ -93,7 +126,17 @@ else {
       );
     }
     pendingResults.add(value.data.sequence);
-    port.postMessage(value.data);
+    // Azure may pad terminal non-speech past EOF; it must never grant audio credit.
+    port.postMessage(
+      beyondInput
+        ? {
+            kind: 'eof_non_speech',
+            sequence: value.data.sequence,
+            result_id: value.data.result_id,
+            reason: nonSpeechReason,
+          }
+        : value.data,
+    );
   }
   recognizer.recognizing = (_, event) => result(event.result, 'partial');
   recognizer.recognized = (_, event) =>
@@ -149,7 +192,7 @@ else {
       }
       if (
         samples + 800 > MAX_SESSION_SAMPLES ||
-        samples + 800 - processed > MAX_PENDING_SAMPLES
+        samples + 800 - processed > maxPendingSamples
       ) {
         fail('live_audio_overrun');
         return;

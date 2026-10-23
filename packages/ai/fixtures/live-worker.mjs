@@ -36,6 +36,13 @@ parentPort.on('message', (message) => {
         code: 'provider_authentication_failed',
       });
     if (mode === 'partials') send({ result_type: 'partial' });
+    if (mode === 'unexpected-eof-no-match')
+      parentPort.postMessage({
+        kind: 'eof_non_speech',
+        sequence: ++outputSequence,
+        result_id: 'synthetic-result',
+        reason: 'no_match',
+      });
     for (const result of results[message.sequence] ?? []) send(result);
     if (mode === 'progress' && samples % 1600 === 0)
       send({

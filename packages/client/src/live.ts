@@ -4,6 +4,8 @@ import type { LivePcmFrame } from '@windows-ai-notes/contracts';
 import {
   liveClientMessageSchema,
   liveServerMessageSchema,
+  SEGMENTED_LIVE_LIMITS,
+  type LiveSpeechProfile,
   type LiveSource,
   type LiveServerMessage,
 } from '@windows-ai-notes/contracts/realtime';
@@ -34,8 +36,8 @@ export interface LiveConnection {
   cancel(): Promise<void>;
 }
 
-// Desktop integration must reserve 2.5 seconds for native capture and one
-// 0.5-second read in Main. Do not raise this window independently.
+// The legacy five-second budget reserves 2.5 seconds for native capture and
+// one 0.5-second read in Main; the negotiated profile keeps that reservation.
 export const LIVE_CLIENT_WINDOW_SAMPLES = 32_000;
 const MAX_BYTES = 32_768;
 const sameSource = (a: LiveSource, b: LiveSource) =>
@@ -332,7 +334,12 @@ class SocketLiveConnection implements LiveConnection {
         return;
       }
       if (value.event_type === 'live.ready') {
-        if (this.phase !== 'starting') throw invalidResponse();
+        if (
+          this.phase !== 'starting' ||
+          ('profile' in value ? value.profile : undefined) !==
+            this.start.profile
+        )
+          throw invalidResponse();
         this.readyValue = structuredClone(value);
         this.phase = 'streaming';
         clearTimeout(this.deadline);
@@ -381,6 +388,9 @@ class SocketLiveConnection implements LiveConnection {
         this.flush();
       } else {
         if (
+          (value.event_type === 'transcript.discarded' &&
+            value.discard_reason === 'empty_final' &&
+            !this.start.profile) ||
           this.baseSample === undefined ||
           value.sample_start < this.baseSample ||
           value.sample_end > this.baseSample + this.sentSamples
@@ -486,7 +496,10 @@ class SocketLiveConnection implements LiveConnection {
       !pending ||
       pending.sent ||
       this.phase !== 'streaming' ||
-      this.unfinalizedSamples + pending.samples > LIVE_CLIENT_WINDOW_SAMPLES
+      this.unfinalizedSamples + pending.samples >
+        (this.start.profile
+          ? SEGMENTED_LIVE_LIMITS.client_window_samples
+          : LIVE_CLIENT_WINDOW_SAMPLES)
     )
       return;
     try {
@@ -569,6 +582,10 @@ export async function openLiveConnection(
   document: string,
   headers: () => Promise<Record<string, string>>,
   options: LiveConnectionOptions,
+  negotiate?: (
+    headers: Record<string, string>,
+    signal: AbortSignal,
+  ) => Promise<LiveSpeechProfile | undefined>,
 ): Promise<LiveConnection> {
   const parsed = liveClientMessageSchema.safeParse({
     schema_version: 1,
@@ -591,22 +608,30 @@ export async function openLiveConnection(
     if (signal.aborted) throw cancelled();
     checkAuthorization(options);
     if (signal.aborted) throw cancelled();
-    const credentials = await Promise.race([
-      headers(),
-      new Promise<never>((_resolve, reject) => {
-        abort = () => reject(cancelled());
-        signal.addEventListener('abort', abort, { once: true });
-        if (signal.aborted) abort();
-      }),
-    ]);
+    const aborted = new Promise<never>((_resolve, reject) => {
+      abort = () => reject(cancelled());
+      signal.addEventListener('abort', abort, { once: true });
+      if (signal.aborted) abort();
+    });
+    const credentials = await Promise.race([headers(), aborted]);
     if (signal.aborted) throw cancelled();
     checkAuthorization(options);
+    const profile = negotiate
+      ? await Promise.race([negotiate(credentials, signal), aborted])
+      : undefined;
+    if (signal.aborted) throw cancelled();
+    checkAuthorization(options);
+    const start = liveClientMessageSchema.parse({
+      ...parsed.data,
+      ...(profile ? { profile } : {}),
+    });
+    if (start.event_type !== 'live.start') throw invalidResponse();
     const destination = new URL(`/v1/documents/${document}/live`, base);
     destination.protocol = destination.protocol === 'https:' ? 'wss:' : 'ws:';
     return await new SocketLiveConnection(
       destination,
       credentials,
-      parsed.data,
+      start,
       options,
     ).open();
   } finally {

@@ -1,6 +1,25 @@
 import { z } from 'zod';
 import { livePcmFrameSchema } from './index.js';
 
+export const SEGMENTED_LIVE_PROFILE = 'segmented_20s_v1' as const;
+export const liveSpeechProfileSchema = z.literal(SEGMENTED_LIVE_PROFILE);
+export type LiveSpeechProfile = z.infer<typeof liveSpeechProfileSchema>;
+export const SEGMENTED_LIVE_LIMITS = Object.freeze({
+  phrase_ms: 20_000,
+  initial_silence_ms: 1000,
+  silence_ms: 500,
+  provider_window_ms: 25_000,
+  client_window_samples: 22_000 * 16,
+});
+export const liveTranscriptionCapabilitiesSchema = z.strictObject({
+  configured: z.boolean(),
+  max_media_seconds: z.literal(60),
+  max_unfinalized_seconds: z.literal(5),
+  canonical: z.literal(false),
+  automatic_reconnect: z.literal(false),
+  profiles: z.array(liveSpeechProfileSchema).max(1).optional(),
+});
+
 export const liveSourceSchema = z.strictObject({
   recording_id: livePcmFrameSchema.shape.recording_id,
   preview_id: livePcmFrameSchema.shape.preview_id,
@@ -24,14 +43,14 @@ export const liveRecognitionEventSchema = z
     sample_start: sample,
     sample_end: sample,
     text: z.string().max(4000),
-    discard_reason: z.literal('no_match').nullable(),
+    discard_reason: z.enum(['no_match', 'empty_final']).nullable(),
     provider_result_id: z.string().regex(/^[A-Za-z0-9-]{1,128}$/),
   })
   .refine(
     (event) =>
       event.sample_end >= event.sample_start &&
       (event.event_type === 'transcript.discarded'
-        ? event.text === '' && event.discard_reason === 'no_match'
+        ? event.text === '' && event.discard_reason !== null
         : event.text.trim().length > 0 && event.discard_reason === null),
   );
 export type LiveRecognitionEvent = z.infer<typeof liveRecognitionEventSchema>;
@@ -45,6 +64,7 @@ export const liveClientMessageSchema = z.discriminatedUnion('event_type', [
     source: liveSourceSchema,
     locale: z.enum(['en-US', 'zh-CN']),
     consent: z.literal(true),
+    profile: liveSpeechProfileSchema.optional(),
   }),
   z
     .strictObject({
@@ -86,6 +106,15 @@ export const liveServerMessageSchema = z.union([
     provider_epoch: z.uuidv4(),
     max_media_ms: z.literal(60_000),
     max_unfinalized_ms: z.literal(5000),
+  }),
+  z.strictObject({
+    ...provisional,
+    event_type: z.literal('live.ready'),
+    source: liveSourceSchema,
+    provider_epoch: z.uuidv4(),
+    max_media_ms: z.literal(60_000),
+    max_unfinalized_ms: z.literal(25_000),
+    profile: liveSpeechProfileSchema,
   }),
   z
     .strictObject({

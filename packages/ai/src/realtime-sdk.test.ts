@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { Worker } from 'node:worker_threads';
+import { setTimeout as delay } from 'node:timers/promises';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { describe, expect, it } from 'vitest';
 import {
@@ -8,7 +9,11 @@ import {
   type RealtimeIdentity,
 } from '@windows-ai-notes/ai/realtime';
 import type { LivePcmFrame } from '@windows-ai-notes/contracts';
-import type { LiveRecognitionEvent } from '@windows-ai-notes/contracts/realtime';
+import {
+  SEGMENTED_LIVE_PROFILE,
+  type LiveSpeechProfile,
+  type LiveRecognitionEvent,
+} from '@windows-ai-notes/contracts/realtime';
 import type { AzureConfig } from './config.js';
 
 const config: AzureConfig = {
@@ -21,7 +26,19 @@ const config: AzureConfig = {
 };
 async function fixture(
   mode:
-    'speech' | 'silence' | 'invalid' | 'disconnect' | 'partial-only' = 'speech',
+    | 'speech'
+    | 'silence'
+    | 'initial-silence'
+    | 'eof-no-match'
+    | 'invalid-no-match'
+    | 'empty-final'
+    | 'eof-empty-final'
+    | 'eof-final'
+    | 'invalid'
+    | 'disconnect'
+    | 'partial-only'
+    | 'long-phrase' = 'speech',
+  profile?: LiveSpeechProfile,
 ) {
   const server = new WebSocketServer({
     host: '127.0.0.1',
@@ -41,6 +58,7 @@ async function fixture(
   let eof = false;
   const connectionIds = new Set<string>();
   const identities: RealtimeIdentity[] = [];
+  const contexts: unknown[] = [];
   function send(
     socket: WebSocket,
     path: string,
@@ -78,6 +96,8 @@ async function fixture(
           ];
         }),
       );
+      if (fields.get('path')?.toLowerCase() === 'speech.context')
+        contexts.push(JSON.parse(bytes.subarray(length + 4).toString()));
       if (fields.get('path')?.toLowerCase() !== 'audio') return;
       const request = fields.get('x-requestid');
       if (!request) throw new Error('No synthetic speech request identity.');
@@ -89,35 +109,91 @@ async function fixture(
       if (body.subarray(0, 4).toString() === 'RIFF') return;
       if (!body.length) {
         eof = true;
+        if (
+          mode === 'eof-no-match' ||
+          mode === 'eof-empty-final' ||
+          mode === 'eof-final'
+        )
+          send(socket, 'speech.phrase', request, {
+            Id: randomUUID(),
+            RecognitionStatus:
+              mode === 'eof-no-match' ? 'InitialSilenceTimeout' : 'Success',
+            ...(mode === 'eof-empty-final'
+              ? { DisplayText: '' }
+              : mode === 'eof-final'
+                ? { DisplayText: 'Orion launch' }
+                : {}),
+            Offset: 0,
+            Duration: (mediaBytes / 2) * 625 + 300_000,
+          });
         send(socket, 'turn.end', request, {});
         return;
       }
       pcmValid &&= body.every((byte) => byte === 0x3b);
       const offset = (mediaBytes / 2) * 625;
       mediaBytes += body.length;
+      if (mode === 'long-phrase') {
+        if (mediaBytes === 640_000)
+          send(socket, 'speech.phrase', request, {
+            Id: randomUUID(),
+            RecognitionStatus: 'Success',
+            DisplayText: 'Orion launch',
+            Offset: 0,
+            Duration: 200_000_000,
+          });
+        else if (mediaBytes > 640_000)
+          send(socket, 'speech.phrase', request, {
+            Id: randomUUID(),
+            RecognitionStatus: 'Success',
+            DisplayText: 'Orion launch',
+            Offset: offset,
+            Duration: (body.length / 2) * 625,
+          });
+        return;
+      }
       if (mode === 'disconnect') {
         socket.terminate();
         return;
       }
-      if (mode !== 'silence')
+      if (mode !== 'silence' && mode !== 'initial-silence')
         send(socket, 'speech.hypothesis', request, {
           Id: randomUUID(),
           Text: 'Orion',
           Offset: offset,
           Duration: (body.length / 2) * 625,
         });
-      if (mode !== 'partial-only')
+      if (
+        mode !== 'partial-only' &&
+        mode !== 'eof-no-match' &&
+        mode !== 'eof-empty-final' &&
+        mode !== 'eof-final'
+      )
         send(socket, 'speech.phrase', request, {
           Id: randomUUID(),
-          RecognitionStatus: mode === 'silence' ? 'NoMatch' : 'Success',
-          DisplayText: mode === 'silence' ? '' : 'Orion launch',
-          Offset: mode === 'invalid' ? 20_000_000 : offset,
+          RecognitionStatus:
+            mode === 'initial-silence' || mode === 'invalid-no-match'
+              ? 'InitialSilenceTimeout'
+              : mode === 'silence'
+                ? 'NoMatch'
+                : 'Success',
+          ...(mode === 'initial-silence' || mode === 'invalid-no-match'
+            ? {}
+            : {
+                DisplayText:
+                  mode === 'silence' || mode === 'empty-final'
+                    ? ''
+                    : 'Orion launch',
+              }),
+          Offset:
+            mode === 'invalid' || mode === 'invalid-no-match'
+              ? 20_000_000
+              : offset,
           Duration: (body.length / 2) * 625,
         });
     });
   });
   let worker!: Worker;
-  const provider = createAzureRealtimeProvider(config, (locale) => {
+  const provider = createAzureRealtimeProvider(config, (locale, profile) => {
     worker = new Worker(
       new URL('../dist/realtime-worker.js', import.meta.url),
       {
@@ -125,6 +201,7 @@ async function fixture(
           key: config.AZURE_SPEECH_KEY,
           region: config.AZURE_SPEECH_REGION,
           locale,
+          profile,
         },
         execArgv: [
           '--import',
@@ -170,6 +247,7 @@ async function fixture(
         identities.push(identity);
         return undefined;
       },
+      profile,
     )
     .catch(async (error: unknown) => {
       await shutdown();
@@ -196,6 +274,7 @@ async function fixture(
     events,
     identities,
     connectionIds,
+    contexts,
     write,
     nextResult: () => once(worker, 'message'),
     stats: () => ({
@@ -213,6 +292,62 @@ async function fixture(
 }
 
 describe('actual pinned Azure Speech SDK with an isolated synthetic service', () => {
+  it('uses supported time segmentation and consumes a complete twenty-second phrase before final credit, with no replay', async () => {
+    const live = await fixture('long-phrase', SEGMENTED_LIVE_PROFILE);
+    try {
+      for (let batch = 0; batch < 20; batch++) {
+        expect(live.session.finalizedSamples).toBe(0);
+        for (let index = 0; index < 20; index++) live.write(batch * 20 + index);
+        if (batch < 19) await delay(1000);
+      }
+      await expect
+        .poll(() => live.session.finalizedSamples, {
+          timeout: 2000,
+          interval: 25,
+        })
+        .toBe(320_000);
+      expect(live.events).toHaveLength(1);
+      expect(live.events[0]).toMatchObject({
+        event_type: 'transcript.final',
+        sample_start: 1234,
+        sample_end: 321_234,
+      });
+      expect(live.contexts).toContainEqual(
+        expect.objectContaining({
+          phraseDetection: expect.objectContaining({
+            initialSilenceTimeout: 1000,
+            conversation: expect.objectContaining({
+              segmentation: expect.objectContaining({
+                mode: 'Custom',
+                segmentationForcedTimeoutMs: 20_000,
+                segmentationSilenceTimeoutMs: 500,
+              }),
+            }),
+          }),
+        }),
+      );
+      for (let pair = 0; pair < 60; pair++) {
+        live.write(400 + pair * 2);
+        live.write(401 + pair * 2);
+        await expect
+          .poll(() => live.session.finalizedSamples, {
+            timeout: 1000,
+            interval: 5,
+          })
+          .toBe(320_000 + (pair + 1) * 1600);
+      }
+      expect((await live.session.finish()).usage.audio_ms).toBe(26_000);
+      expect(live.stats()).toEqual({
+        connections: 1,
+        mediaBytes: 832_000,
+        pcmValid: true,
+        eof: true,
+        thread: -1,
+      });
+    } finally {
+      await live.close();
+    }
+  }, 30_000);
   it('streams intact header-free PCM beyond five seconds as validated final results advance, then drains EOF before a known receipt', async () => {
     const live = await fixture();
     try {
@@ -257,35 +392,128 @@ describe('actual pinned Azure Speech SDK with an isolated synthetic service', ()
       await live.close();
     }
   }, 15_000);
-  it('credits explicit NoMatch progress without fabricating transcript text', async () => {
-    const live = await fixture('silence');
-    try {
-      for (let pair = 0; pair < 60; pair++) {
-        const progress = live.nextResult();
-        live.write(pair * 2);
-        live.write(pair * 2 + 1);
-        expect((await progress)[0]).toMatchObject({ result_type: 'no_match' });
+  it.each(['silence', 'initial-silence'] as const)(
+    'credits explicit %s progress without fabricating transcript text',
+    async (mode) => {
+      const live = await fixture(mode);
+      try {
+        for (let pair = 0; pair < 60; pair++) {
+          const progress = live.nextResult();
+          live.write(pair * 2);
+          live.write(pair * 2 + 1);
+          expect((await progress)[0]).toMatchObject({
+            result_type: 'no_match',
+          });
+        }
+        expect((await live.session.finish()).usage.audio_ms).toBe(6000);
+        expect(live.events).toEqual([]);
+        expect(live.stats().pcmValid).toBe(true);
+      } finally {
+        await live.close();
       }
-      expect((await live.session.finish()).usage.audio_ms).toBe(6000);
-      expect(live.events).toEqual([]);
-      expect(live.stats().pcmValid).toBe(true);
-    } finally {
-      await live.close();
-    }
-  }, 15_000);
-  it('rejects provider phrases outside submitted samples and terminates SDK resources', async () => {
-    const live = await fixture('invalid');
+    },
+    15_000,
+  );
+  it.each(['eof-no-match', 'eof-empty-final'] as const)(
+    'discards a provisional hypothesis on padded terminal %s without inventing source audio or finalization credit',
+    async (mode) => {
+      const live = await fixture(mode, SEGMENTED_LIVE_PROFILE);
+      try {
+        live.write(0);
+        live.write(1);
+        await expect.poll(() => live.events.length).toBe(1);
+        expect((await live.session.finish()).usage.audio_ms).toBe(100);
+        expect(live.session.finalizedSamples).toBe(0);
+        expect(live.events).toHaveLength(2);
+        expect(live.events[1]).toMatchObject({
+          event_type: 'transcript.discarded',
+          sample_start: 1234,
+          sample_end: 2834,
+          text: '',
+          discard_reason: mode === 'eof-no-match' ? 'no_match' : 'empty_final',
+          version: 2,
+          segment_id: live.events[0]!.segment_id,
+        });
+        expect(live.stats().thread).toBe(-1);
+      } finally {
+        await live.close();
+      }
+    },
+  );
+  it('handles a validated empty provider final as an explicit discard only on the negotiated profile', async () => {
+    const live = await fixture('empty-final', SEGMENTED_LIVE_PROFILE);
     try {
       live.write(0);
       live.write(1);
-      await expect(live.session.completion).rejects.toMatchObject({
+      await expect.poll(() => live.events.length).toBe(2);
+      expect(live.session.finalizedSamples).toBe(1600);
+      expect(live.events[1]).toMatchObject({
+        event_type: 'transcript.discarded',
+        discard_reason: 'empty_final',
+        text: '',
+      });
+      expect((await live.session.finish()).usage.audio_ms).toBe(100);
+    } finally {
+      await live.close();
+    }
+    const legacy = await fixture('empty-final');
+    try {
+      legacy.write(0);
+      legacy.write(1);
+      await expect(legacy.session.completion).rejects.toMatchObject({
         code: 'live_invalid_result',
       });
-      expect(live.stats().thread).toBe(-1);
+    } finally {
+      await legacy.close();
+    }
+  });
+  it.each(['eof-no-match', 'eof-empty-final'] as const)(
+    'preserves strict legacy EOF range validation for %s',
+    async (mode) => {
+      const live = await fixture(mode);
+      try {
+        live.write(0);
+        live.write(1);
+        await expect.poll(() => live.events.length).toBe(1);
+        await expect(live.session.finish()).rejects.toMatchObject({
+          code: 'live_invalid_result',
+        });
+        expect(live.session.finalizedSamples).toBe(0);
+      } finally {
+        await live.close();
+      }
+    },
+  );
+  it('still rejects nonempty speech beyond input after EOF on the negotiated profile', async () => {
+    const live = await fixture('eof-final', SEGMENTED_LIVE_PROFILE);
+    try {
+      live.write(0);
+      live.write(1);
+      await expect.poll(() => live.events.length).toBe(1);
+      await expect(live.session.finish()).rejects.toMatchObject({
+        code: 'live_invalid_result',
+      });
+      expect(live.session.finalizedSamples).toBe(0);
     } finally {
       await live.close();
     }
   });
+  it.each(['invalid', 'invalid-no-match'] as const)(
+    'rejects %s provider phrases outside submitted samples and terminates SDK resources',
+    async (mode) => {
+      const live = await fixture(mode);
+      try {
+        live.write(0);
+        live.write(1);
+        await expect(live.session.completion).rejects.toMatchObject({
+          code: 'live_invalid_result',
+        });
+        expect(live.stats().thread).toBe(-1);
+      } finally {
+        await live.close();
+      }
+    },
+  );
   it.each([false, true])(
     'ends the isolated SDK on a dropped connection (finishing=%s) without automatically reconnecting or replaying paid audio',
     async (finishing) => {

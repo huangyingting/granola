@@ -5,6 +5,8 @@ import {
   liveSourceSchema,
   liveClientMessageSchema,
   liveServerMessageSchema,
+  SEGMENTED_LIVE_PROFILE,
+  liveTranscriptionCapabilitiesSchema,
 } from './realtime.js';
 
 const event = {
@@ -26,6 +28,65 @@ const event = {
   provider_result_id: 'synthetic-result',
 };
 describe('source-fenced live recognition contracts', () => {
+  it('requires explicit negotiation for the fixed long-phrase budget and keeps legacy readiness unchanged', () => {
+    const ready = {
+      schema_version: 1,
+      event_type: 'live.ready',
+      source: event.source,
+      provider_epoch: event.provider_epoch,
+      canonical: false,
+      continuity: 'unverified',
+      max_media_ms: 60_000,
+      max_unfinalized_ms: 5000,
+    };
+    expect(liveServerMessageSchema.parse(ready)).toEqual(ready);
+    const segmented = {
+      ...ready,
+      profile: SEGMENTED_LIVE_PROFILE,
+      max_unfinalized_ms: 25_000,
+    };
+    expect(liveServerMessageSchema.parse(segmented)).toEqual(segmented);
+    for (const change of [
+      { max_unfinalized_ms: 25_000 },
+      { profile: SEGMENTED_LIVE_PROFILE },
+      { profile: 'unbounded', max_unfinalized_ms: 25_000 },
+      { profile: SEGMENTED_LIVE_PROFILE, max_unfinalized_ms: 30_000 },
+      {
+        profile: SEGMENTED_LIVE_PROFILE,
+        max_unfinalized_ms: 25_000,
+        canonical: true,
+      },
+    ])
+      expect(
+        liveServerMessageSchema.safeParse({ ...ready, ...change }).success,
+      ).toBe(false);
+    const capabilities = {
+      configured: true,
+      max_media_seconds: 60,
+      max_unfinalized_seconds: 5,
+      canonical: false,
+      automatic_reconnect: false,
+    };
+    expect(liveTranscriptionCapabilitiesSchema.parse(capabilities)).toEqual(
+      capabilities,
+    );
+    expect(
+      liveTranscriptionCapabilitiesSchema.safeParse({
+        ...capabilities,
+        profiles: [SEGMENTED_LIVE_PROFILE],
+      }).success,
+    ).toBe(true);
+    for (const profiles of [
+      ['unbounded'],
+      [SEGMENTED_LIVE_PROFILE, SEGMENTED_LIVE_PROFILE],
+    ])
+      expect(
+        liveTranscriptionCapabilitiesSchema.safeParse({
+          ...capabilities,
+          profiles,
+        }).success,
+      ).toBe(false);
+  });
   it('bounds live wire batches and separates authorization cursors from finalization-only flow credit', () => {
     const pcm = {
       ...event.source,
@@ -164,6 +225,15 @@ describe('source-fenced live recognition contracts', () => {
       discard_reason: 'no_match',
     };
     expect(liveRecognitionEventSchema.parse(discarded)).toEqual(discarded);
+    expect(
+      liveRecognitionEventSchema.parse({
+        ...discarded,
+        discard_reason: 'empty_final',
+      }),
+    ).toMatchObject({
+      event_type: 'transcript.discarded',
+      discard_reason: 'empty_final',
+    });
     for (const change of [
       { text: 'Orion' },
       { discard_reason: null },

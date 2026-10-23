@@ -91,8 +91,8 @@ Real Windows audio behavior still requires the hardware checks below.
   changes limits without resetting counters.
 - Optional desktop live captions with separate inline consent, Main-owned private
   transport, the official isolated Azure Speech SDK and durable source leases.
-  Request-only native PCM and submitted SDK media have a combined five-second
-  bound per source. Captions remain provisional and ephemeral; preview failures
+  Request-only native PCM and submitted SDK media have a negotiated five- or
+  twenty-five-second bound per source. Captions remain provisional and ephemeral; preview failures
   do not stop healthy encrypted recording. This is not verified continuous STT.
 - Revision-pinned transcript pages backed by indexed immutable PostgreSQL segments.
   Synchronization atomically caches the first bounded page with the document and
@@ -2445,8 +2445,8 @@ without new audio. Input messages are capped at 32 KiB, pending result publicati
 at eight messages/32 KiB, and outbound sends at sixteen messages/64 KiB with a
 five-second drain deadline. Compression and automatic ping replies are disabled.
 Cloud/network failure does not command or stop the independent local recorder.
-The provider's stricter five-second unfinalized limit described below still
-applies, so this is not yet a reliable continuous-meeting STT release.
+The negotiated provider bounds described below still apply; this is not
+acceptance of uninterrupted continuous-meeting STT.
 
 Real PostgreSQL/WebSocket tests cover fixed reservations, duplicate dispatch,
 real signed-token expiry, revocation/regrant, cursor replay/gaps, slow/broken
@@ -2467,7 +2467,7 @@ guard; scope is checked again after credential retrieval, before audio and
 before publishing each result. Native PCM and access tokens stay out of renderer
 IPC. The caller must abort the connection when changing account/document context.
 
-There are at most **two seconds of submitted but unfinalized PCM**, including
+Without a negotiated profile there are at most **two seconds of submitted but unfinalized PCM**, including
 transport and provider queues, and **one additional pending native read of at
 most 500 ms**. Only validated final/NoMatch credit releases that window; partials,
 socket callbacks and authorization acknowledgments do not. Credit merges
@@ -2482,9 +2482,32 @@ from 50 to 5000, in complete 50 ms frames. It bounds both buffered samples and
 their native-clock age; omission preserves the existing five-second default.
 The desktop controller explicitly chooses **2500 ms** and holds only one
 500 ms read, so native + Main + submitted/unfinalized media total at most
-five seconds per source. Using the legacy native default alongside the client
+five seconds per source on the legacy profile. Using the legacy native default alongside the client
 would exceed that end-to-end budget. This is a
 media-buffer bound, not a latency or recognition-quality guarantee.
+
+Before opening WSS, Main reads the authenticated, bounded `/v1/models`
+capabilities with the same private credentials, no redirects and no cache.
+It selects `segmented_20s_v1` only when advertised; otherwise the legacy
+handshake and limits remain unchanged. Scope is rechecked after this asynchronous
+read. The server rejects unsupported profiles before usage reservation, binds
+the selected profile into the durable configuration version, passes it to the
+isolated worker, and echoes it in readiness. A missing or mismatched echo stops
+the client without audio or automatic fallback/replay.
+
+The new profile uses the pinned SDK's supported **Time** segmentation: a
+**20-second maximum phrase**, 500 ms segmentation silence and 1000 ms initial
+silence. Twenty seconds is the SDK's minimum supported maximum phrase length;
+it cannot reliably fit the old two-second window. The fixed **25-second**
+budget reserves **22 seconds** for all submitted/unfinalized media plus the
+unchanged **2500 ms native buffer and one 500 ms Main read**. Provider unresolved
+audio expires at 25 seconds; five-second input-idle, pending-write and network
+drain deadlines are unchanged. These are explicit negotiated limits, not
+operator-tunable buffer growth or a recognition-latency promise. Result credit
+still requires validated provider finalization and complete 100 ms replay chunks.
+Partials, private/debug service headers and transport writes never grant credit.
+The 60-second gateway attempt, usage reservation, admission limits and
+continuity-unverified settled rotation remain unchanged.
 
 Cancellation and transport/protocol/scope faults reject pending work, close only
 the live connection and retain uncertain-usage semantics. They never command the
@@ -2523,7 +2546,9 @@ This does not prove seamless audio coverage, complete recognition, wall-clock
 alignment or source/speaker attribution. Measured skipped ranges are only known
 gaps, not an exhaustive account of missing speech. Provider capacity/startup
 failure or uncertain usage stops the preview without automatic retry or replay.
-Long phrases and silence can exhaust the conservative final-only window.
+Legacy peers can still exhaust the conservative final-only window during long
+phrases or silence. The negotiated profile accommodates supported 20-second
+phrases, but a stalled or late provider still stops preview within its bounds.
 
 Pause, stop, account/context changes and document revocation cancel preview
 independently of saved capture. Resume does not silently restart cloud audio;
@@ -2542,25 +2567,38 @@ quality gates remain open.
 single recording/preview/track/capture epoch. It rejects duplicate, discontinuous
 or changed sources before forwarding audio. Recognition events carry a provider
 epoch, stable segment ID, increasing version and absolute source sample range.
-Final corrections retain identity; explicit NoMatch discards clear provisional
+Final corrections retain identity; explicit non-speech discards clear provisional
 text. Source samples are not speaker identities or reconstructed wall-clock times.
 Live results must remain provisional evidence, not overwrite manually edited
 transcripts or replace canonical persisted-recording transcription.
 
 The official `microsoft-cognitiveservices-speech-sdk` is pinned to `1.52.0`.
 Each source runs in a separate Node worker with only its Speech key/region and
-language, empty inherited environment, captured diagnostics and bounded V8 heaps.
+language/profile, empty inherited environment, captured diagnostics and bounded V8 heaps.
 Telemetry and audio logging are disabled. Only validated final/NoMatch progress
 releases the pinned SDK's replay credit, rounded down to its 100 ms chunks.
 Partial hypotheses and transport sends do **not** release credit. There are at
-most five seconds of unfinalized PCM, 32 unacknowledged worker results and 6,000
+most five seconds of unfinalized PCM by default, or 25 seconds on the explicitly
+negotiated segmentation profile, 32 unacknowledged worker results and 6,000
 final-revision entries per provider session. Result consumers must be synchronous
 and bounded; the adapter does not queue content for a slow network/UI consumer.
 
-**This conservative five-second unfinalized limit can stop preview during long
+On the negotiated profile, a range-validated provider final with empty text
+grants normal finalization credit but never becomes empty transcript text:
+it explicitly discards any overlapping hypothesis with `empty_final`, distinct
+from `no_match`. Legacy streams retain their stricter empty-final rejection.
+Azure can pad terminal non-speech results beyond submitted input. After EOF
+only, the new profile converts these into a separately validated non-speech
+control event: it may discard the last hypothesis at its already-known source
+range, but grants **no** finalization credit, invents no source samples, and
+does not extend the measured receipt. Active-stream out-of-range results,
+nonempty speech beyond input, malformed metadata and early EOF controls remain
+fatal. No SDK private continuation/reconnect or debugging-message contract is used.
+
+**The legacy conservative five-second unfinalized limit can stop preview during long
 phrases or silence if Azure does not finalize promptly, even while partials
-continue arriving.** Idle input or unresolved audio older than five seconds also
-stops the session. Startup and EOF drain each have ten-second deadlines; media
+continue arriving.** Input idle still expires after five seconds; unresolved
+audio expires after five or 25 seconds according to the profile. Startup and EOF drain each have ten-second deadlines; media
 and wall-clock session durations are capped at ten minutes. Failure, cancellation,
 diagnostics or disconnect (including during EOF drain) terminates the isolated
 worker; the adapter does not automatically reconnect/replay. A normal EOF receipt
@@ -2632,14 +2670,28 @@ neither PostgreSQL nor OpenAI requests:
 
 ```sh
 pnpm azure:live-probe --env-file ../ReadWise/.env
+pnpm azure:live-probe --env-file ../ReadWise/.env --scenario long-phrase
+pnpm azure:live-probe --env-file ../ReadWise/.env --scenario silence
 ```
 
-It streams only a synthetic “Orion launch approved” sample plus trailing silence,
+The default scenario streams only a synthetic “Orion launch approved” sample plus trailing silence,
 at most five seconds in total, paced in 50 ms frames. It bounds the TTS response
 and overall deadline, checks source/sample identities and increasing result
 versions, requires the expected final subject and normal media receipt, and
 waits for worker cleanup. Audio stays in memory; credentials/provider bodies are
-not printed. An English synthetic live run passed with 3,200 ms of media; it is
+not printed. The negotiated long-phrase scenario bounds generated speech to
+30 seconds plus four seconds of leading/trailing silence, paces 50 ms frames
+within the actual 22-second client window, and requires more than five seconds
+of unresolved audio plus normal finalization/receipt. The silence scenario
+sends only eight seconds of zero PCM, with no TTS request, and requires
+provider finalization without transcript text. Both use a 75-second overall
+deadline and still wait for worker cleanup.
+
+An approved real English long-phrase run passed with 25,400 ms of media,
+20,750 ms peak unresolved input, 70 partials and two finals. Eight seconds of
+real-provider silent input passed without transcript text and with seven
+finalization progress events. The legacy short English probe previously passed
+with 3,200 ms. This is
 not acceptance evidence for uninterrupted meetings, Chinese, acoustic conditions
 or production reliability. These probes import only the six approved Azure fields
 from the specified file and are disabled in production mode. Direct-provider

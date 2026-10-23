@@ -9,9 +9,11 @@ import {
   type RealtimeIdentity,
 } from '@windows-ai-notes/ai/realtime';
 import type { LivePcmFrame } from '@windows-ai-notes/contracts';
-import type {
-  LiveRecognitionEvent,
-  LiveSource,
+import {
+  SEGMENTED_LIVE_PROFILE,
+  type LiveRecognitionEvent,
+  type LiveSource,
+  type LiveSpeechProfile,
 } from '@windows-ai-notes/contracts/realtime';
 import type { AzureConfig } from './config.js';
 
@@ -56,6 +58,7 @@ async function open(
   progress?: (value: RealtimeProgress) => undefined,
   identity?: (value: RealtimeIdentity) => undefined,
   identities: unknown[] = [],
+  profile?: LiveSpeechProfile,
 ) {
   const selected = source();
   const events: LiveRecognitionEvent[] = [];
@@ -85,12 +88,78 @@ async function open(
       }),
     progress,
     identity,
+    profile,
   );
   owned.push(session);
   return { session, worker, selected, events, controller };
 }
 
 describe('bounded isolated streaming speech sessions', () => {
+  it.each([undefined, SEGMENTED_LIVE_PROFILE])(
+    'rejects an EOF-only NoMatch control event while still accepting live input (profile=%s)',
+    async (profile) => {
+      const live = await open(
+        'unexpected-eof-no-match',
+        {},
+        undefined,
+        undefined,
+        undefined,
+        [],
+        profile,
+      );
+      live.session.write(frame(live.selected));
+      await expect(live.session.completion).rejects.toMatchObject({
+        code: 'live_worker_protocol',
+      });
+      expect(live.session.finalizedSamples).toBe(0);
+      expect(live.worker.threadId).toBe(-1);
+    },
+  );
+  it('keeps the negotiated profile bounded at twenty-five seconds without changing legacy limits', async () => {
+    const live = await open(
+      'scripted',
+      {},
+      undefined,
+      undefined,
+      undefined,
+      [],
+      SEGMENTED_LIVE_PROFILE,
+    );
+    for (let sequence = 0; sequence < 500; sequence++)
+      live.session.write(frame(live.selected, sequence));
+    expect(live.session.finalizedSamples).toBe(0);
+    expect(() => live.session.write(frame(live.selected, 500))).toThrow();
+    await expect(live.session.completion).rejects.toMatchObject({
+      code: 'live_audio_overrun',
+    });
+    expect(live.worker.threadId).toBe(-1);
+  });
+  it('permits a supported long phrase but still expires its oldest unfinalized audio while new input continues', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] });
+    const live = await open(
+      'scripted',
+      {},
+      undefined,
+      undefined,
+      undefined,
+      [],
+      SEGMENTED_LIVE_PROFILE,
+    );
+    let failed = false;
+    void live.session.completion.catch(() => {
+      failed = true;
+    });
+    for (let sequence = 0; sequence < 7; sequence++) {
+      if (sequence) await vi.advanceTimersByTimeAsync(4000);
+      live.session.write(frame(live.selected, sequence));
+    }
+    expect(failed).toBe(false);
+    await vi.advanceTimersByTimeAsync(1001);
+    await expect(live.session.completion).rejects.toMatchObject({
+      code: 'live_provider_stalled',
+    });
+    expect(live.worker.threadId).toBe(-1);
+  });
   it('admits session metadata before readiness without consuming recognition sequence numbers or receipts', async () => {
     const observe = vi.fn((_value: RealtimeIdentity): undefined => undefined);
     const live = await open(

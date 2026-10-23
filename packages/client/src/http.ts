@@ -17,6 +17,10 @@ import { ClientError } from './errors.js';
 import { openLiveConnection, type LiveConnectionOptions } from './live.js';
 import { SseDecoder, SseDecodeError } from '@windows-ai-notes/contracts/sse';
 import { chatEventSchema } from '@windows-ai-notes/contracts/questions';
+import {
+  liveTranscriptionCapabilitiesSchema,
+  SEGMENTED_LIVE_PROFILE,
+} from '@windows-ai-notes/contracts/realtime';
 export { ClientError } from './errors.js';
 export function serverUrl(value: string, allowLoopback = false): string {
   let url: URL;
@@ -444,6 +448,35 @@ export class ApiClient {
       resourceId.parse(id),
       this.headers,
       options,
+      async (headers, signal) => {
+        const response = await fetch(`${this.base}/v1/models`, {
+          headers: { ...headers, Accept: 'application/json' },
+          signal,
+          redirect: 'manual',
+          cache: 'no-store',
+        }).catch(() => {
+          throw new ClientError(
+            'service_unavailable',
+            'Live service capabilities could not be read.',
+            0,
+            true,
+          );
+        });
+        await checkResponse(response);
+        const capabilities = await responseJson(
+          response,
+          z.object({
+            live_transcription: liveTranscriptionCapabilitiesSchema,
+          }),
+          65_536,
+        );
+        return capabilities.live_transcription.configured &&
+          capabilities.live_transcription.profiles?.includes(
+            SEGMENTED_LIVE_PROFILE,
+          )
+          ? SEGMENTED_LIVE_PROFILE
+          : undefined;
+      },
     );
   }
   workspaces(signal?: AbortSignal) {
