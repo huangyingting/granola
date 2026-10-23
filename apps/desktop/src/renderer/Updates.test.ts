@@ -33,6 +33,18 @@ function render(change: Partial<DesktopUpdateState> = {}, pending = false) {
   );
 }
 describe('desktop update cards', () => {
+  it('describes private Main preparation without adding public installation authority', () => {
+    const html = render({
+      phase: 'preparing',
+      available_version: '0.1.1',
+      download_bytes: 1234,
+    });
+    expect(html).toContain('Main is protecting the update');
+    expect(html).toContain('Installation is not available');
+    expect(html).not.toContain('Download update');
+    expect(html).not.toContain('Cancel update operation');
+    expect(html).not.toContain('Restart to update');
+  });
   it('offers only read-only inspection after blocked startup without enabling installation', () => {
     const html = render({
       phase: 'failed',

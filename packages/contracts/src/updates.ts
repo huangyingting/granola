@@ -395,6 +395,7 @@ export const desktopUpdateStateSchema = z.strictObject({
     'available',
     'downloading',
     'ready',
+    'preparing',
     'cancelling',
     'cancelled',
     'failed',

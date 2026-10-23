@@ -27,6 +27,8 @@ function status(state: DesktopUpdateState) {
       return 'Downloading and verifying the update...';
     case 'ready':
       return `Version ${state.available_version} is verified and saved on this device.`;
+    case 'preparing':
+      return 'Main is protecting the update before safely closing local notes...';
     case 'cancelling':
       return 'Cancelling and cleaning up this operation...';
     case 'cancelled':

@@ -558,6 +558,8 @@ request ID 串联 API、job、worker 和 provider request，生产 trace 默认�
 
 已增加打包 Windows Main 的只读恢复检查及页内 UX：启动被阻断时仍可从错误页进入 About & updates，原始 bundled 子 helper 验证实际 Main 创建者，在 operation 与 cleanup 锁下只读取固定私有 active/retired 根中的严格元数据。每根最多检查 128 项并额外观察一项以明确报告越界，最多返回 32 个优先呈现的未解决/不可验证 session 摘要；不暴露路径、pins、原始进程句柄或正文。健康记录沿用 DPAPI 绑定校验，退休记录沿用保留的健康 receipt 及仍存在的原日志；未知、损坏、重放及 busy 均显式呈现，不伪装为空成功。检查不解锁内容密钥、不打开 SQLite、不 hash payload、不退休/删除记录、不解除 fence、不重试安装或恢复快照；已记录健康不代表当前 payload 完整性或数据库准入。刷新失败保留带时间戳的旧观察，不改变原本禁用、失败或已下载的更新状态，终止关闭取消并等待 helper 物理结束。正式 activation/退出权协调、授权恢复与第一方签名正向更新、部署/物理设备/质量和运行验收仍是门禁，安装与重启继续禁用。
 
+Main 现已组合仅进程内可调用的 activation 协调器：只认领当前空闲且已验证的 ready 候选一次，不经 preload/renderer 传入路径或安装权限；先保护 runtime，再请求编辑器 flush，在可能很长的终止式后台/录音/helper/SQLite 排空期间保持 guardian，排空后才创建带新鲜决策期限的 worker。确认 guardian 实际释放后提交，不再夹杂异步关闭工作，立即将物理退出权交给该 worker；Electron 退出 API 返回 void 不算成功，若 Main 仍活着则等待 worker 失败并确认其实际停止后，才允许后续普通退出。三个退出路径都保留真实 worker，失败/过期的 release 撤销退出权限，取消不确定时不把 kill 请求当作已退出；普通退出封闭新的 worker 创建。任何失败都不重开已释放 workspace、不重试安装、不恢复快照或解除 fence。私有 Main 入口用于后续授权签名正例验收，并未接通 renderer 安装命令或开放安装/重启按钮；第一方签名正例、授权恢复以及部署/物理设备/质量和运行验收继续是发行门禁。
+
 ## 12. 建议代码组织
 
 以下是未来建项布局，不是已经存在的目录：

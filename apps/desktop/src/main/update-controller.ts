@@ -31,6 +31,7 @@ export class DesktopUpdateController {
   private active: Operation | null = null;
   private started = false;
   private closed = false;
+  private claimed = false;
 
   constructor(
     private readonly installedVersion: string,
@@ -56,12 +57,21 @@ export class DesktopUpdateController {
       phase: this.phase,
       available_version: feed?.application_version ?? null,
       download_bytes: feed?.bytes ?? null,
-      can_check: !this.closed && !this.active && this.phase !== 'disabled',
+      can_check:
+        !this.closed &&
+        !this.claimed &&
+        !this.active &&
+        this.phase !== 'disabled',
       can_download:
-        !this.closed && !this.active && !!this.feed && !this.hasReadyFeed(),
+        !this.closed &&
+        !this.claimed &&
+        !this.active &&
+        !!this.feed &&
+        !this.hasReadyFeed(),
       can_cancel:
         !this.closed && !!this.active && !this.active.abort.signal.aborted,
-      can_inspect: !this.closed && !this.active && !!this.inspect,
+      can_inspect:
+        !this.closed && !this.claimed && !this.active && !!this.inspect,
       inspection: this.inspection,
       installation_enabled: false,
       cache: this.cache,
@@ -73,6 +83,11 @@ export class DesktopUpdateController {
     if (this.closed)
       throw new LocalError('update_closed', 'The update service is closing.');
     if (command.operation === 'getState') return this.snapshot();
+    if (this.claimed)
+      throw new LocalError(
+        'update_activation_started',
+        'Main owns this update handoff. Close and reopen the app before another attempt.',
+      );
     if (command.operation === 'cancel') {
       if (!this.active || this.active.abort.signal.aborted)
         throw new LocalError(
@@ -166,6 +181,38 @@ export class DesktopUpdateController {
     const active = this.active;
     active?.abort.abort();
     await active?.done;
+  }
+
+  claimReady(): ReadyUpdate {
+    if (
+      this.closed ||
+      this.claimed ||
+      this.active ||
+      this.phase !== 'ready' ||
+      !this.ready ||
+      !this.hasReadyFeed()
+    )
+      throw new LocalError(
+        'update_not_ready',
+        'Main requires an idle, verified current update candidate.',
+      );
+    const candidate = structuredClone(this.ready);
+    this.claimed = true;
+    this.phase = 'preparing';
+    this.error = null;
+    this.publish();
+    return candidate;
+  }
+
+  activationFailed(error: NonNullable<DesktopUpdateState['error']>): void {
+    if (!this.claimed)
+      throw new LocalError(
+        'update_activation_state',
+        'No Main-owned update candidate can report an activation failure.',
+      );
+    this.phase = 'failed';
+    this.error = error;
+    this.publish();
   }
 
   private async initialize(signal: AbortSignal) {

@@ -460,6 +460,20 @@ cancellation keeps every later window/application exit blocked until the worker
 actually closes. Workspace shutdown seals commands while that fence drains.
 This adds no installation command or enabled update control.
 
+The programmatic-only Main activation coordinator claims the currently verified
+ready candidate once; neither candidate paths nor this entry point are exposed
+through preload or renderer IPC. It holds the runtime guardian **before** asking
+the editor to flush, keeps it across terminal service/SQLite drainage, and only
+then prepares a worker with a fresh bounded decision window. Main commits only
+after confirmed guardian release and hands exit to that exact worker without
+another asynchronous shutdown step. A void Electron exit API return is not
+success: if Main remains alive, the worker's failure is awaited and its physical
+stop is required before a later ordinary exit. Errors never reopen a disposed
+workspace, retry an installer, restore a backup or clear a startup fence. The
+private Main entry point is available for authorized signed-release acceptance;
+it does not enable public installation/restart controls. Genuine first-party
+signed positive acceptance is still required before those controls are exposed.
+
 Packaged startup now claims a separate current-user admission lease before
 unlocking the content key or opening SQLite. A short-lived bundled native helper
 authenticates its actual Main creator, takes the operation lock, then duplicates

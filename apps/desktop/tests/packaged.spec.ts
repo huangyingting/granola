@@ -1,4 +1,9 @@
-import { _electron as electron, expect, test } from '@playwright/test';
+import {
+  _electron as electron,
+  expect,
+  test,
+  type ElectronApplication,
+} from '@playwright/test';
 import { existsSync, readFileSync } from 'node:fs';
 import { cp, mkdtemp, rename, rm, writeFile } from 'node:fs/promises';
 import { execFile, spawn } from 'node:child_process';
@@ -14,6 +19,30 @@ import {
 } from '../src/main/update-trust.js';
 
 const executable = process.env.DESKTOP_EXECUTABLE;
+async function rejectedMainActivation(application: ElectronApplication) {
+  return application.evaluate(async ({ app }) => {
+    const { join } = process.getBuiltinModule('node:path');
+    const { pathToFileURL } = process.getBuiltinModule('node:url');
+    const main: typeof import('../src/main/main.js') = await import(
+      pathToFileURL(join(app.getAppPath(), 'dist/main/main.js')).href
+    );
+    try {
+      await main.activateReadyUpdate();
+    } catch (error) {
+      if (
+        typeof error !== 'object' ||
+        error === null ||
+        !('code' in error) ||
+        typeof error.code !== 'string'
+      )
+        throw error;
+      return error.code;
+    }
+    throw new Error(
+      'A packaged Main without an admitted verified candidate must reject activation.',
+    );
+  });
+}
 async function verifyNativeRuntimeSeal(resources: string, version: string) {
   const root = await mkdtemp(join(tmpdir(), 'notes-packaged-runtime-seal-'));
   const source = join(resources, 'audio-host', 'AudioHost.exe');
@@ -124,6 +153,14 @@ test('rejects forged restart startup before unlocking or modifying existing loca
     expect(
       await application.evaluate(({ app }) => app.getPath('userData')),
     ).toBe(root);
+    const startup = await page.evaluate(() =>
+      window.notes.invoke({ operation: 'bootstrap' }),
+    );
+    if (startup.ok) throw new Error('Forged startup must remain unavailable.');
+    expect(await rejectedMainActivation(application)).toBe(startup.error.code);
+    expect(await page.evaluate(() => Object.keys(window.notes))).not.toContain(
+      'activateReadyUpdate',
+    );
     expect(readFileSync(join(root, 'content-key.protected'))).toEqual(key);
     expect(readFileSync(join(root, 'notes.sqlite'))).toEqual(database);
     const invoke = (operation: string) =>
@@ -260,6 +297,7 @@ test('opens the actual packaged sandboxed editor without workspace runtime depen
       page.getByText('Encrypted on this device', { exact: true }),
     ).toBeVisible();
     expect(await application.evaluate(({ app }) => app.isPackaged)).toBe(true);
+    expect(await rejectedMainActivation(application)).toBe('update_not_ready');
     await expect(
       page.getByRole('button', { name: '+ New meeting', exact: true }),
     ).toBeEnabled();

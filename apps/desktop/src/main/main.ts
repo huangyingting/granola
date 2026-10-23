@@ -50,9 +50,12 @@ import {
   UpdateDownloads,
 } from './update-downloads.js';
 import { DesktopUpdateController } from './update-controller.js';
+import { DesktopUpdateActivation } from './update-activation.js';
+import { holdUpdateRuntime } from './update-runtime.js';
 import { DesktopShutdown } from './shutdown.js';
 import {
   closeUpdateWorkerForExit,
+  prepareUpdateWorker,
   updateWorkerAllowsExit,
 } from './update-worker.js';
 import {
@@ -78,6 +81,8 @@ let recordings: RecordingController | null = null;
 let delivery: DesktopDelivery | null = null;
 let updates: DesktopUpdateController | null = null;
 let shutdown: DesktopShutdown | null = null;
+let activation: DesktopUpdateActivation | null = null;
+let closeForUpdate = false;
 const maintenance = new PendingWork();
 const audioProcesses = new PendingWork();
 
@@ -220,6 +225,36 @@ function safeError(error: unknown) {
       'The operation could not be completed. Existing data was preserved.',
   };
 }
+export async function activateReadyUpdate(): Promise<void> {
+  if (
+    !app.isPackaged ||
+    process.platform !== 'win32' ||
+    !activation ||
+    !updates ||
+    !shutdown
+  )
+    throw new LocalError(
+      'update_activation_unavailable',
+      'Update activation requires the initialized packaged Windows Main.',
+    );
+  shutdown.assertOpen();
+  database();
+  if (closeNonce)
+    throw new LocalError(
+      'desktop_closing',
+      'An editor flush or Main exit is already pending.',
+    );
+  const candidate = updates.claimReady();
+  try {
+    await activation.start(candidate);
+  } catch (error) {
+    closeForUpdate = false;
+    const failure = safeError(error);
+    updates?.activationFailed(failure);
+    console.error(JSON.stringify({ code: failure.code }));
+    throw error;
+  }
+}
 async function start() {
   if (
     !app.isPackaged &&
@@ -352,6 +387,47 @@ async function start() {
     },
   });
   shutdown = closing;
+  activation = new DesktopUpdateActivation({
+    hold: async (candidate, signal) =>
+      holdUpdateRuntime(
+        audioHostExecutable(),
+        process.execPath,
+        app.getVersion(),
+        candidate.expected.product_name,
+        signal,
+      ),
+    prepare: async (guard, candidate, signal) =>
+      prepareUpdateWorker(
+        guard,
+        {
+          application: process.execPath,
+          user_data: dataDirectory,
+          current_version: app.getVersion(),
+          offered_version: candidate.feed.application_version,
+          installer: candidate.installer,
+          bytes: candidate.feed.bytes,
+          sha512: candidate.feed.sha512,
+        },
+        signal,
+      ),
+    requestFlush: () => {
+      if (closeNonce)
+        throw new LocalError(
+          'desktop_closing',
+          'An editor flush is already pending.',
+        );
+      closeForUpdate = true;
+      closeNonce = randomUUID();
+      current.webContents.send('notes:flush', closeNonce);
+    },
+    drain: () => closing.close(),
+    exit: () => {
+      allowClose = true;
+      app.exit(0);
+    },
+    stopWorker: closeUpdateWorkerForExit,
+    allowsExit: updateWorkerAllowsExit,
+  });
   current.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   current.webContents.on('will-navigate', (event, url) => {
     if (url !== page) event.preventDefault();
@@ -455,7 +531,18 @@ async function start() {
               'invalid_close_request',
               'No matching close operation is pending.',
             );
-          await Promise.all([closing.close(), closeUpdateWorkerForExit()]);
+          if (closeForUpdate && activation) {
+            try {
+              return await activation.completeFlush();
+            } finally {
+              closeForUpdate = false;
+            }
+          }
+          await Promise.all([
+            closing.close(),
+            activation?.stopForExit(),
+            closeUpdateWorkerForExit(),
+          ]);
           allowClose = true;
           current.close();
           return { ok: true, closing: true };
@@ -917,8 +1004,10 @@ async function start() {
     },
   );
   current.on('close', (event) => {
-    if (allowClose && updateWorkerAllowsExit()) return;
+    if (allowClose && updateWorkerAllowsExit() && !activation?.blocksExit)
+      return;
     event.preventDefault();
+    if (!closeForUpdate) activation?.cancelPreparation();
     closeNonce ??= randomUUID();
     current.webContents.send('notes:flush', closeNonce);
   });
@@ -974,7 +1063,11 @@ else {
     window?.focus();
   });
   const finishQuit = () => {
-    void Promise.all([shutdown?.close(), closeUpdateWorkerForExit()])
+    void Promise.all([
+      shutdown?.close(),
+      activation?.stopForExit(),
+      closeUpdateWorkerForExit(),
+    ])
       .then(() => app.quit())
       .catch((error: unknown) => {
         console.error(
@@ -986,7 +1079,12 @@ else {
       });
   };
   app.on('before-quit', (event) => {
-    if ((!shutdown || shutdown.complete) && updateWorkerAllowsExit()) return;
+    if (
+      (!shutdown || shutdown.complete) &&
+      updateWorkerAllowsExit() &&
+      !activation?.blocksExit
+    )
+      return;
     event.preventDefault();
     if (window) window.close();
     else finishQuit();

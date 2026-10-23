@@ -100,6 +100,78 @@ async function started(f: ReturnType<typeof fixture>) {
 }
 
 describe('Main-owned desktop update operations', () => {
+  it('claims an isolated ready candidate once without exposing paths or installation authority', async () => {
+    const f = fixture({ ready: candidate() }, async () => ({
+      checked_at: '2026-01-01T00:00:00.000Z',
+      status: 'complete',
+      active: 0,
+      retired: 0,
+      unverifiable: 0,
+      limited: false,
+      omitted: 0,
+      sessions: [],
+    }));
+    f.controller.start();
+    await phase(f.controller, 'ready');
+    const claimed = f.controller.claimReady();
+    expect(claimed).toEqual(candidate());
+    claimed.feed.application_version = '0.1.9';
+    claimed.expected.publisher = 'Changed only the claim copy';
+    expect(f.controller.snapshot()).toMatchObject({
+      phase: 'preparing',
+      available_version: '0.1.1',
+      can_check: false,
+      can_download: false,
+      can_cancel: false,
+      can_inspect: false,
+      installation_enabled: false,
+    });
+    expect(JSON.stringify(f.controller.snapshot())).not.toContain('C:\\\\');
+    await expect(
+      f.downloads.recover.mock.results[0]!.value,
+    ).resolves.toMatchObject({
+      ready: { expected: { publisher: 'Synthetic publisher' } },
+    });
+    expect(() => f.controller.claimReady()).toThrow();
+    for (const operation of ['check', 'download', 'cancel', 'inspect'] as const)
+      expect(() => f.controller.execute({ operation })).toThrow(/Main owns/u);
+    expect(f.controller.execute({ operation: 'getState' }).phase).toBe(
+      'preparing',
+    );
+    f.controller.activationFailed({
+      code: 'update_runtime_invalid',
+      message: 'Runtime rejected; reopen before another attempt.',
+    });
+    expect(f.controller.snapshot()).toMatchObject({
+      phase: 'failed',
+      can_check: false,
+    });
+    expect(() => f.controller.claimReady()).toThrow();
+    await f.controller.close();
+  });
+
+  it('does not claim before idle verified recovery or during an update operation', async () => {
+    const f = fixture();
+    expect(() =>
+      f.controller.activationFailed({
+        code: 'update_runtime_invalid',
+        message: 'No claim exists.',
+      }),
+    ).toThrow(/No Main-owned/u);
+    expect(() => f.controller.claimReady()).toThrow();
+    await started(f);
+    expect(() => f.controller.claimReady()).toThrow();
+    f.controller.execute({ operation: 'check' });
+    expect(() => f.controller.claimReady()).toThrow();
+    await phase(f.controller, 'available');
+    expect(() => f.controller.claimReady()).toThrow();
+    f.controller.execute({ operation: 'download' });
+    expect(() => f.controller.claimReady()).toThrow();
+    await phase(f.controller, 'ready');
+    await f.controller.close();
+    expect(() => f.controller.claimReady()).toThrow();
+  });
+
   const inspection = (): NonNullable<DesktopUpdateState['inspection']> => ({
     checked_at: '2026-01-01T00:00:00.000Z',
     status: 'complete',
