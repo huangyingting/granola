@@ -161,7 +161,9 @@ export async function privatePitrArchive(endpoint: string) {
   }
 }
 
-export async function physicalPitrCluster() {
+export async function physicalPitrCluster({
+  checkInitialization = false,
+}: { checkInitialization?: boolean } = {}) {
   if (process.platform !== 'linux')
     throw new Error('Physical PITR acceptance requires isolated Linux Docker.');
   const image = imageIdentifier.parse(
@@ -177,6 +179,7 @@ export async function physicalPitrCluster() {
   const label = 'windows-ai-notes.pitr';
   const owned: string[] = [];
   const volumes = new Set<string>();
+  let bootstrapVerified = false;
   const inspection = async (id: string) => {
     const value = z
       .object({
@@ -187,7 +190,18 @@ export async function physicalPitrCluster() {
         State: z.object({
           Running: z.boolean(),
           Health: z
-            .object({ Status: z.enum(['starting', 'healthy', 'unhealthy']) })
+            .object({
+              Status: z.enum(['starting', 'healthy', 'unhealthy']),
+              Log: z
+                .array(
+                  z.object({
+                    Start: z.iso.datetime({ offset: true }),
+                    ExitCode: z.number().int(),
+                  }),
+                )
+                .nullable()
+                .optional(),
+            })
             .optional(),
         }),
         NetworkSettings: z.object({
@@ -282,7 +296,7 @@ export async function physicalPitrCluster() {
         '--env',
         `POSTGRES_PASSWORD=${password}`,
         '--health-cmd',
-        'pg_isready -U notes -d notes',
+        'pg_isready -h 127.0.0.1 -U notes -d notes',
         '--health-interval',
         '1s',
         '--health-timeout',
@@ -300,6 +314,42 @@ export async function physicalPitrCluster() {
     owned.push(id);
     await inspection(id);
     await docker('start', id);
+    if (role === 'primary' && checkInitialization) {
+      const deadline = Date.now() + 30_000;
+      let bootstrapProbe: string | null | undefined;
+      while (Date.now() < deadline) {
+        const value = await inspection(id);
+        if (!value.State.Running)
+          throw new Error(
+            'The owned PostgreSQL stopped during bootstrap verification.',
+          );
+        const held = await docker(
+          'exec',
+          id,
+          '/bin/sh',
+          '-ec',
+          'if test -f /archive/bootstrap-held; then printf held; fi',
+        );
+        const last = value.State.Health?.Log?.at(-1);
+        if (held === 'held' && bootstrapProbe === undefined)
+          bootstrapProbe = last?.Start ?? null;
+        if (held === 'held' && last && last.Start !== bootstrapProbe) {
+          await docker('exec', id, 'pg_isready', '-U', 'notes', '-d', 'notes');
+          if (value.State.Health?.Status === 'healthy' || last.ExitCode !== 2)
+            throw new Error(
+              'PITR readiness accepted the temporary bootstrap server.',
+            );
+          bootstrapVerified = true;
+          break;
+        }
+        await delay(100);
+      }
+      if (!bootstrapVerified)
+        throw new Error(
+          'The owned PostgreSQL bootstrap verification exceeded its bound.',
+        );
+      await docker('exec', id, 'touch', '/archive/bootstrap-release');
+    }
     const deadline = Date.now() + 30_000;
     while (Date.now() < deadline) {
       const value = await inspection(id);
@@ -311,8 +361,13 @@ export async function physicalPitrCluster() {
         value.State.Health?.Status === 'healthy' &&
         (await docker(
           'exec',
+          '--env',
+          `PGPASSWORD=${password}`,
           id,
           'psql',
+          '-X',
+          '-h',
+          '127.0.0.1',
           '-U',
           'notes',
           '-d',
@@ -346,6 +401,13 @@ export async function physicalPitrCluster() {
       ['--volume', '/archive', '--volume', '/backup'],
       `chown postgres:postgres /archive /backup
 chmod 700 /archive /backup
+${
+  checkInitialization
+    ? `mkdir -p /docker-entrypoint-initdb.d
+printf '%s\\n' 'touch /archive/bootstrap-held' 'while test ! -f /archive/bootstrap-release; do sleep 0.1; done' > /docker-entrypoint-initdb.d/00-pitr-bootstrap.sh
+`
+    : ''
+}
 exec /usr/local/bin/docker-entrypoint.sh postgres -c wal_level=replica -c archive_mode=on -c "archive_command=test ! -f /archive/%f && cp %p /archive/%f"`,
     );
     const value = await inspection(primary.id);
@@ -364,6 +426,7 @@ exec /usr/local/bin/docker-entrypoint.sh postgres -c wal_level=replica -c archiv
     volume('/var/lib/postgresql/data');
     return {
       primary,
+      bootstrapVerified,
       close,
       async backup() {
         await docker(

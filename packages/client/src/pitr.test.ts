@@ -82,6 +82,27 @@ it('keeps synthetic PITR reports strict, source-bound and explicitly non-product
 describe.skipIf(process.env.SERVER_DATABASE_PITR_ACCEPTANCE !== '1')(
   'opt-in physical PostgreSQL backup and named-target WAL recovery',
   () => {
+    it('rejects the temporary bootstrap server before admitting the initialized TCP database', async () => {
+      const lab = await physicalPitrCluster({ checkInitialization: true });
+      let db: Database | undefined;
+      try {
+        expect(lab.bootstrapVerified).toBe(true);
+        db = new Database(lab.primary.url);
+        expect(
+          (
+            await db.pool.query(
+              'SELECT current_database() database, NOT pg_is_in_recovery() recovered',
+            )
+          ).rows[0],
+        ).toEqual({ database: 'notes', recovered: true });
+      } finally {
+        try {
+          await db?.close();
+        } finally {
+          await lab.close();
+        }
+      }
+    }, 60_000);
     it('replays only the selected WAL history and independently restores deletion and usage gates before exposure', async () => {
       const endpoint = process.env.TEST_S3_ENDPOINT;
       if (!endpoint)

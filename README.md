@@ -1653,6 +1653,10 @@ SHA-256 manifest with `pg_verifybackup`, then archives subsequent WAL. Recovery
 uses the same exact cached image, a fresh data volume, read-only backup/archive
 mounts and a named restore point. The drill waits for PostgreSQL's completed
 archive marker, not merely the appearance of a partially copied segment.
+PostgreSQL health checks use the final TCP listener, not the entrypoint's
+temporary Unix-socket bootstrap server. The PITR fixture additionally executes
+SQL in the requested database before admission; a held-bootstrap regression
+verifies the distinction without extending readiness deadlines.
 
 The restored cluster must retain its physical identity and promote to a newer
 timeline. A note revision committed after the base backup must survive; a later
