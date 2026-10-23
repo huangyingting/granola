@@ -1993,6 +1993,13 @@ Contracts are in `packages/contracts/src/server.ts`. Errors include `code`,
 `current_revision`. Create operations require an `Idempotency-Key` of 8-128
 letters, digits, dots, colons, underscores or hyphens.
 
+Ordinary and unmatched API routes share a per-IP 120-request/minute budget,
+including unauthorized requests. Admission runs before token verification and
+identity lookup; exhausted requests receive a typed retryable `429` and
+`Retry-After` without authentication or body-parser work. Authentication still
+precedes body parsing, including malformed JSON, and admitted payloads are
+forwarded unchanged. These are per-instance budgets, not a cluster-wide limiter.
+
 Use `/health/live` for API process liveness and `/health` for database readiness.
 Both are anonymous GET/HEAD endpoints without meeting content, with independent
 per-IP 120-request/minute budgets, separate from each other and ordinary API traffic.

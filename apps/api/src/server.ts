@@ -78,11 +78,17 @@ export async function createServer(
   app.addHook('onRequest', (request, _reply, done) =>
     withAuditContext({ source: 'api', request_id: request.id }, done),
   );
+  await app.register(rateLimit, { max: 120, timeWindow: '1 minute' });
+  const limitUnmatched = app.rateLimit();
   app.addHook('onRequest', async (request, reply) => {
     reply
       .header('X-Content-Type-Options', 'nosniff')
       .header('Cache-Control', 'no-store')
       .header('X-Request-ID', request.id);
+    if (request.is404) await limitUnmatched.call(app, request, reply);
+  });
+  // Authenticate after onRequest admission, but before consuming the payload.
+  app.addHook('preParsing', async (request, _reply, payload) => {
     if (
       !['/health', '/health/live', '/v1/client-config'].includes(
         request.routeOptions.url ?? '',
@@ -91,8 +97,8 @@ export async function createServer(
       request.principal = await authenticate(request);
       setAuditActor(request.principal.userId);
     }
+    return payload;
   });
-  await app.register(rateLimit, { max: 120, timeWindow: '1 minute' });
   app.addContentTypeParser(
     'audio/wav',
     { parseAs: 'buffer', bodyLimit: MAX_AUDIO_BYTES },
