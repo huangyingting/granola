@@ -1490,6 +1490,29 @@ Measured desktop delivery and independent deletion recovery are described in
 their dedicated sections. Production alert routing, capacity/load evidence and
 release acceptance remain deployment-specific gates.
 
+### Real server process shutdown and replay
+
+The Linux server integration suite also runs the actual compiled API and Worker
+entrypoints against a disposable literal-loopback PostgreSQL schema. It holds
+database readiness with a real PostgreSQL lock, sends `SIGTERM`, observes
+`api_stopping`/`worker_stopping`, then requires natural zero-code process closure
+without a later ready record. A Worker stopped during database readiness does not
+proceed to storage validation or publish `worker_ready`.
+
+The API cases drain an open authenticated SSE subscription on `SIGTERM` and
+`SIGINT`. Another case loses a fully committed create response through the real
+loopback proxy, physically terminates the owned API with `SIGKILL`, starts a new
+API process, reopens encrypted SQLite, and verifies frozen-request replay and
+newer typing without duplicate documents. Cleanup targets only owned child
+processes, schema and temporary files. These synthetic development-auth cases
+do not contact Azure, crash PostgreSQL, simulate power loss, validate active
+Worker/provider recovery or replace production deployment and restore drills.
+Stopping records indicate signal handling, not proof of completed shutdown.
+
+After `pnpm build`, run with an isolated `TEST_DATABASE_URL`:
+`pnpm test packages/client/src/server-process.test.ts`. Normal server CI includes
+these cases; they are intentionally skipped on non-Linux hosts.
+
 ### Controlled sync and overload acceptance
 
 The server CI job separately runs an opt-in real-HTTP/PostgreSQL/encrypted-SQLite

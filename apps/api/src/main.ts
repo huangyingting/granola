@@ -35,6 +35,7 @@ async function main() {
     });
     const owned = server;
     const stop = () => {
+      console.log(JSON.stringify({ code: 'api_stopping' }));
       db.deletions.close();
       void owned.close().catch(() => {
         console.error('api_shutdown_failed');

@@ -24,14 +24,21 @@ async function main() {
   const db = new Database(requireDatabaseUrl(), archive ?? undefined);
   const storage = config ? new RecordingBlobs(config) : null;
   const shutdown = new AbortController();
-  process.once('SIGTERM', () => shutdown.abort());
-  process.once('SIGINT', () => shutdown.abort());
+  const stop = () => {
+    if (shutdown.signal.aborted) return;
+    shutdown.abort();
+    console.log(JSON.stringify({ code: 'worker_stopping' }));
+  };
+  process.once('SIGTERM', stop);
+  process.once('SIGINT', stop);
   let nextCleanup = 0;
   const closeTelemetry = registerProviderTelemetry();
   const observations = workerObservability();
   try {
     await db.assertReady(shutdown.signal);
+    if (shutdown.signal.aborted) return;
     await storage?.assertReady();
+    if (shutdown.signal.aborted) return;
     console.log(
       JSON.stringify({ code: 'worker_ready', provider: providers.provider }),
     );

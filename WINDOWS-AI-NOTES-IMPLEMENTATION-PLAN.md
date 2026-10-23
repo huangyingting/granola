@@ -638,6 +638,8 @@ P1 内可并行开发桌面编辑器和服务端业务底座，前提是 contrac
 
 服务端 CI 另增加显式 opt-in 的受控合成并发验收：真实 loopback HTTP、PostgreSQL 及四个加密 SQLite 设备，在两个独立账号下验证 upstream 已提交后真正断开 response、冻结请求和客户端/API/pool 重启后的幂等重放、并发冲突及显式副本、跨账号拒绝，以及删除遇到离线修改和重启不能复活。128 请求/8 并发的独立 read burst 保留默认限流，必须观察正常读取和显式 429/Retry-After；正确性阶段使用新 API 实例，burst 后重启不冒充限流窗口到期或持续负载验收。只在检查和自有 schema/临时加密目录清理全部成功后生成固定无正文报告，记录样本数、最近秩 p50/p95/min/max、重启及一次丢失，明确同进程/event loop、loopback development auth、小合成样本与 `production_accepted=false`。不是 TLS/OIDC/供应商、独立服务吞吐或生产容量证明；实际部署 SLO、负载/restore 演练、告警阈值及送达仍为发行门禁。
 
+Linux 集成测试另执行实际编译的 API/Worker 子进程，以真实 PostgreSQL schema 锁阻塞启动，再发送 SIGTERM，等待无正文 stopping 观察并解除锁，必须自然退出且不能之后发布 ready；停止中的 Worker 不继续验证 storage 或报告就绪。真实 SSE 在 SIGTERM/SIGINT 后排空；另在真实已提交 response 丢失后 SIGKILL 自有 API，重启新进程并重开加密 SQLite，冻结请求及更新输入必须不重复、不丢失。观察日志不等于物理退出证明，测试还等待 child close/退出状态；不调用 Azure，不冒充 PostgreSQL/power-loss 故障、运行中 Worker/provider 崩溃恢复或生产部署/restore 验收。
+
 ## 15. 风险、降级与启动条件
 
 | 风险 | 策略与可接受降级 |
