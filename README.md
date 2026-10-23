@@ -1672,6 +1672,22 @@ until explicit review. This fixture never dispatches a provider request, so its
 zero-usage attestation is valid only for these known synthetic inputs. After
 review, an actual owner-authenticated HTTP read must still deny the deleted note.
 
+The same drill separately copies two canonical synthetic audio objects to a fresh
+private **media backup bucket**, verifies their immutable sizes/checksums, removes
+both original objects and restores the backup into a third fresh private bucket.
+The independent deletion archive is separate from all three media buckets and is
+never copied or restored. Established verified recordings are seeded with already
+expired object protections; the fixture never issues and then shortens a live
+upload grant. This is media restoration, not another upload-lifecycle test.
+
+The raw recovered database initially includes both recordings. Independent replay
+must revoke the erased recording, and retained-media verification must refuse the
+usage quarantine. After the known zero-provider review, the production cleanup
+claim/fencing primitives and private object deletion must purge the restored erased
+object. `Database.verifyRecordingMedia()` must then verify exactly one retained
+chunk before any API listener opens. Actual owner-authenticated HTTP reads must
+return the retained ready recording and deny the erased recording.
+
 After `pnpm build`, with Docker, the cached `postgres:16-alpine` image and the
 existing private synthetic S3 store running:
 
@@ -1683,18 +1699,21 @@ SERVER_DATABASE_PITR_ACCEPTANCE=1 \
 
 No existing database or container is accepted as a recovery target. Cleanup checks
 the exact owned image/container identities and removes only its own containers,
-volumes and private bucket. A strict body-free
+volumes and private buckets. A strict body-free
 `artifacts/database-pitr-acceptance.json` is written without overwriting an earlier
 report **only after all assertions and cleanup succeed**. Server CI runs the
 opt-in drill separately and uploads the source-bound
 `controlled-database-pitr-acceptance` ZIP.
 
-The report explicitly retains `production_accepted=false` and
-`media_restore=not_exercised`. This controlled physical PITR test does not prove
-production backup immutability, media recovery, restore authorization, provider
-billing reconciliation, RPO/RTO, host/storage failure, TLS/OIDC or sustained
-capacity. Actual deployment restore and the independent deletion/usage procedure
-above remain required production gates.
+The strict v2 report retains `production_accepted=false`, identifies only the
+synthetic private-S3 round trip, and records the fixed backup/restore/verification/
+purge counts and pre-exposure checks. Historical v1 reports remain valid and
+continue to mean `media_restore=not_exercised`; they do not acquire new evidence.
+This controlled physical PITR test does not prove production backup immutability,
+encrypted media recovery, restore authorization, provider billing reconciliation,
+RPO/RTO, host/storage failure, TLS/OIDC or sustained capacity. Actual deployment
+restore and the independent deletion/usage procedure above remain required
+production gates.
 
 ### Controlled sync and overload acceptance
 

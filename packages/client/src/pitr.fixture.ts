@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import assert from 'node:assert/strict';
 import { setTimeout as delay } from 'node:timers/promises';
 import { promisify } from 'node:util';
 import {
@@ -7,11 +8,15 @@ import {
   CreateBucketCommand,
   PutObjectLockConfigurationCommand,
   ListObjectVersionsCommand,
+  ListObjectsV2Command,
   DeleteObjectCommand,
   DeleteBucketCommand,
 } from '@aws-sdk/client-s3';
 import { z } from 'zod';
 import { DeletionArchive } from '@windows-ai-notes/storage/deletion';
+import { RecordingBlobs } from '@windows-ai-notes/storage';
+import { resourceId, ServiceError } from '@windows-ai-notes/contracts/server';
+import type { Database } from '@windows-ai-notes/db';
 
 const identifier = z.string().regex(/^[a-f0-9]{64}$/);
 const imageIdentifier = z.string().regex(/^sha256:[a-f0-9]{64}$/);
@@ -29,35 +34,48 @@ async function docker(...args: string[]) {
   ).stdout.trim();
 }
 
+const legacyPitrReportSchema = z.strictObject({
+  version: z.literal(1),
+  kind: z.literal('controlled_postgresql_pitr'),
+  scope: z.literal('synthetic_loopback_development_auth'),
+  execution: z.enum(['local', 'github_actions']),
+  source_commit: z
+    .string()
+    .regex(/^[0-9a-f]{40}$/)
+    .nullable(),
+  production_accepted: z.literal(false),
+  backup_verified: z.literal(true),
+  post_backup_wal_replayed: z.literal(true),
+  later_primary_change_excluded: z.literal(true),
+  independent_deletion_replayed: z.literal(true),
+  new_usage_reservation_quarantined: z.literal(true),
+  usage_review: z.literal('synthetic_no_provider_requests'),
+  provider_requests: z.literal(0),
+  api_exposure: z.literal('only_after_verified_replay_and_synthetic_review'),
+  media_restore: z.literal('not_exercised'),
+  resources_cleaned: z.literal(true),
+});
 export const pitrAcceptanceReportSchema = z
-  .strictObject({
-    version: z.literal(1),
-    kind: z.literal('controlled_postgresql_pitr'),
-    scope: z.literal('synthetic_loopback_development_auth'),
-    execution: z.enum(['local', 'github_actions']),
-    source_commit: z
-      .string()
-      .regex(/^[0-9a-f]{40}$/)
-      .nullable(),
-    production_accepted: z.literal(false),
-    backup_verified: z.literal(true),
-    post_backup_wal_replayed: z.literal(true),
-    later_primary_change_excluded: z.literal(true),
-    independent_deletion_replayed: z.literal(true),
-    new_usage_reservation_quarantined: z.literal(true),
-    usage_review: z.literal('synthetic_no_provider_requests'),
-    provider_requests: z.literal(0),
-    api_exposure: z.literal('only_after_verified_replay_and_synthetic_review'),
-    media_restore: z.literal('not_exercised'),
-    resources_cleaned: z.literal(true),
-  })
+  .discriminatedUnion('version', [
+    legacyPitrReportSchema,
+    legacyPitrReportSchema.extend({
+      version: z.literal(2),
+      media_restore: z.literal('verified_synthetic_private_s3_round_trip'),
+      source_media_removed: z.literal(true),
+      media_backup_objects: z.literal(2),
+      media_restored_objects: z.literal(2),
+      retained_media_verified_chunks: z.literal(1),
+      erased_media_purged_objects: z.literal(1),
+      media_verified_before_exposure: z.literal(true),
+    }),
+  ])
   .refine((value) =>
     value.execution === 'github_actions'
       ? value.source_commit !== null
       : value.source_commit === null,
   );
 
-export async function privatePitrArchive(endpoint: string) {
+function privatePitrEndpoint(endpoint: string) {
   const url = new URL(endpoint);
   if (
     url.protocol !== 'http:' ||
@@ -73,9 +91,13 @@ export async function privatePitrArchive(endpoint: string) {
     throw new Error(
       'PITR requires a private literal-loopback synthetic S3 store.',
     );
+  return url.href;
+}
+
+export async function privatePitrArchive(endpoint: string) {
   const bucket = `notes-pitr-${randomUUID()}`;
   const config = {
-    endpoint: url.href,
+    endpoint: privatePitrEndpoint(endpoint),
     region: 'us-east-1',
     bucket,
     encryption: 'none' as const,
@@ -158,6 +180,287 @@ export async function privatePitrArchive(endpoint: string) {
       );
     }
     throw error;
+  }
+}
+
+const mediaObjectSchema = z.strictObject({
+  id: resourceId,
+  kind: z.literal('verified'),
+  size_bytes: z.number().int().min(46).max(960_044),
+  sha256: z.string().regex(/^[a-f0-9]{64}$/),
+});
+const mediaSnapshotSchema = z
+  .array(mediaObjectSchema)
+  .length(2)
+  .refine(
+    (objects) =>
+      new Set(objects.map((object) => object.id)).size === objects.length,
+  );
+
+export async function privatePitrMedia(endpoint: string) {
+  const config = {
+    endpoint: privatePitrEndpoint(endpoint),
+    region: 'us-east-1',
+    encryption: 'none' as const,
+    credentials,
+  };
+  const s3 = new S3Client({
+    ...config,
+    forcePathStyle: true,
+    requestChecksumCalculation: 'WHEN_REQUIRED',
+    responseChecksumValidation: 'WHEN_REQUIRED',
+  });
+  const buckets: string[] = [],
+    stores: RecordingBlobs[] = [];
+  const signal = () => AbortSignal.timeout(10_000);
+  let snapshot: z.infer<typeof mediaSnapshotSchema> | undefined;
+  let sourceRemoved = false;
+  async function create(role: string) {
+    const bucket = `notes-pitr-${role}-${randomUUID()}`;
+    await s3.send(new CreateBucketCommand({ Bucket: bucket }), {
+      abortSignal: signal(),
+    });
+    buckets.push(bucket);
+    const storage = new RecordingBlobs({ ...config, bucket });
+    stores.push(storage);
+    await storage.assertReady();
+    return storage;
+  }
+  async function close() {
+    const failures: unknown[] = [];
+    for (const store of stores) {
+      try {
+        store.close();
+      } catch (error) {
+        failures.push(error);
+      }
+    }
+    try {
+      for (const bucket of [...buckets].reverse()) {
+        try {
+          for (let page = 0; page < 32; page++) {
+            const result = await s3.send(
+              new ListObjectsV2Command({ Bucket: bucket, MaxKeys: 1000 }),
+              { abortSignal: signal() },
+            );
+            if (!result.Contents?.length) break;
+            for (const object of result.Contents) {
+              if (!object.Key)
+                throw new Error(
+                  'An owned PITR media object has no exact identity.',
+                );
+              await s3.send(
+                new DeleteObjectCommand({ Bucket: bucket, Key: object.Key }),
+                { abortSignal: signal() },
+              );
+            }
+          }
+          await s3.send(new DeleteBucketCommand({ Bucket: bucket }), {
+            abortSignal: signal(),
+          });
+        } catch (error) {
+          failures.push(error);
+        }
+      }
+    } finally {
+      s3.destroy();
+    }
+    if (failures.length)
+      throw new AggregateError(failures, 'Owned PITR media cleanup failed.');
+  }
+  async function missing(
+    storage: RecordingBlobs,
+    object: z.infer<typeof mediaObjectSchema>,
+  ) {
+    await assert.rejects(
+      async () => {
+        const body = await storage.read(object, object.size_bytes, signal());
+        body.fill(0);
+      },
+      (error: unknown) =>
+        error instanceof ServiceError && error.code === 'upload_missing',
+    );
+  }
+  async function transfer(
+    from: RecordingBlobs,
+    to: RecordingBlobs,
+    objects: z.infer<typeof mediaSnapshotSchema>,
+  ) {
+    for (const object of objects) {
+      const body = await from.read(object, object.size_bytes, signal());
+      try {
+        if (
+          body.length !== object.size_bytes ||
+          createHash('sha256').update(body).digest('hex') !== object.sha256
+        )
+          throw new Error(
+            'Synthetic PITR source media failed its immutable checksum.',
+          );
+        await to.promote(object, body, signal());
+        const copied = await to.read(object, object.size_bytes, signal());
+        try {
+          if (!copied.equals(body))
+            throw new Error(
+              'Synthetic PITR copied media differs from its source.',
+            );
+        } finally {
+          copied.fill(0);
+        }
+      } finally {
+        body.fill(0);
+      }
+    }
+  }
+  try {
+    const source = await create('source'),
+      backup = await create('backup'),
+      restored = await create('restored');
+    return {
+      source,
+      restored,
+      close,
+      async backup(objects: unknown) {
+        if (snapshot)
+          throw new Error(
+            'The synthetic PITR media snapshot is already fixed.',
+          );
+        const parsed = mediaSnapshotSchema.parse(objects);
+        await transfer(source, backup, parsed);
+        snapshot = parsed;
+      },
+      async discardSource() {
+        if (!snapshot)
+          throw new Error(
+            'A verified media snapshot is required before source removal.',
+          );
+        for (const object of snapshot) {
+          await source.remove(object, signal());
+          await missing(source, object);
+        }
+        sourceRemoved = true;
+      },
+      async restore() {
+        if (!snapshot || !sourceRemoved)
+          throw new Error(
+            'PITR media restore requires a verified snapshot and removed source.',
+          );
+        await transfer(backup, restored, snapshot);
+      },
+      async assertErased(object: z.infer<typeof mediaObjectSchema>) {
+        await missing(restored, object);
+      },
+    };
+  } catch (error) {
+    try {
+      await close();
+    } catch (cleanup) {
+      throw new AggregateError(
+        [error, cleanup],
+        'PITR media setup and cleanup failed.',
+      );
+    }
+    throw error;
+  }
+}
+
+export async function seedPitrRecording(
+  db: Database,
+  storage: RecordingBlobs,
+  user: string,
+  document: string,
+) {
+  const wav = Buffer.from(
+    '524946462600000057415645666d74201000000001000100803e0000007d00000200100064617461020000000000',
+    'hex',
+  );
+  const recording = randomUUID(),
+    track = randomUUID(),
+    chunk = randomUUID();
+  const object = mediaObjectSchema.parse({
+    id: randomUUID(),
+    kind: 'verified',
+    size_bytes: wav.length,
+    sha256: createHash('sha256').update(wav).digest('hex'),
+  });
+  try {
+    await db.recordings.create(
+      user,
+      document,
+      {
+        id: recording,
+        created_at: new Date(Date.now() - 3_600_000).toISOString(),
+        tracks: [
+          {
+            spec: {
+              track_id: track,
+              kind: 'microphone',
+              capture_scope: 'endpoint',
+              device_selection_policy: 'explicit',
+              device_id: 'synthetic-pitr-device',
+            },
+            actual_device_id: 'synthetic-pitr-device',
+          },
+        ],
+      },
+      randomUUID(),
+    );
+    await db.recordings.register(
+      user,
+      recording,
+      {
+        chunk: {
+          format_version: 1,
+          recording_id: recording,
+          track_id: track,
+          chunk_id: chunk,
+          capture_epoch: randomUUID(),
+          sequence: 0,
+          sample_start: 0,
+          sample_count: 1,
+          sample_rate: 16000,
+          channels: 1,
+          bits_per_sample: 16,
+          clock_start_ms: 0,
+          clock_end_ms: 1 / 16,
+          pcm_sha256: createHash('sha256')
+            .update(wav.subarray(44))
+            .digest('hex'),
+        },
+        size_bytes: object.size_bytes,
+        sha256: object.sha256,
+      },
+      randomUUID(),
+    );
+    await storage.promote(object, wav, AbortSignal.timeout(10_000));
+    // Model established media; no live upload grant is issued or shortened.
+    await db.transaction(async (tx) => {
+      await tx.query(
+        `INSERT INTO recording_objects(id,recording_id,chunk_id,kind,created_at,protected_until,cleanup_after)
+         VALUES($1,$2,$3,'verified',now()-interval '1 hour',now()-interval '30 minutes',now()-interval '30 minutes')`,
+        [object.id, recording, chunk],
+      );
+      const changed = await tx.query(
+        "UPDATE recording_chunks SET state='verified',verified_object=$2 WHERE id=$1 AND recording_id=$3",
+        [chunk, object.id, recording],
+      );
+      if (changed.rowCount !== 1)
+        throw new Error('The synthetic verified media row is missing.');
+    });
+    await db.recordings.seal(
+      user,
+      recording,
+      {
+        native_state: 'sealed',
+        accept_incomplete: false,
+        tracks: [{ track_id: track, end_sample: 1, chunk_ids: [chunk] }],
+        events: [],
+        gaps: [],
+      },
+      randomUUID(),
+    );
+    return { recording, object };
+  } finally {
+    wav.fill(0);
   }
 }
 

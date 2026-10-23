@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -8,6 +8,8 @@ import { createServer } from '@windows-ai-notes/api/server';
 import {
   physicalPitrCluster,
   privatePitrArchive,
+  privatePitrMedia,
+  seedPitrRecording,
   pitrAcceptanceReportSchema,
 } from './pitr.fixture.js';
 
@@ -30,6 +32,9 @@ it.each([
   'refuses non-private or ambiguous PITR archive target %s before creating resources',
   async (endpoint) => {
     await expect(privatePitrArchive(endpoint)).rejects.toThrow(
+      'private literal-loopback',
+    );
+    await expect(privatePitrMedia(endpoint)).rejects.toThrow(
       'private literal-loopback',
     );
   },
@@ -55,28 +60,64 @@ it('keeps synthetic PITR reports strict, source-bound and explicitly non-product
     resources_cleaned: true,
   };
   expect(pitrAcceptanceReportSchema.safeParse(report).success).toBe(true);
-  expect(
-    pitrAcceptanceReportSchema.safeParse({
-      ...report,
-      execution: 'github_actions',
-      source_commit: 'a'.repeat(40),
-    }).success,
-  ).toBe(true);
+  const media = {
+    ...report,
+    version: 2,
+    media_restore: 'verified_synthetic_private_s3_round_trip',
+    source_media_removed: true,
+    media_backup_objects: 2,
+    media_restored_objects: 2,
+    retained_media_verified_chunks: 1,
+    erased_media_purged_objects: 1,
+    media_verified_before_exposure: true,
+  };
+  for (const valid of [report, media]) {
+    expect(pitrAcceptanceReportSchema.safeParse(valid).success).toBe(true);
+    expect(
+      pitrAcceptanceReportSchema.safeParse({
+        ...valid,
+        execution: 'github_actions',
+        source_commit: 'a'.repeat(40),
+      }).success,
+    ).toBe(true);
+    for (const change of [
+      { execution: 'github_actions' },
+      { source_commit: 'a'.repeat(40) },
+      { execution: 'github_actions', source_commit: 'invalid' },
+      { production_accepted: true },
+      { provider_requests: 1 },
+      { backup_verified: false },
+      { resources_cleaned: false },
+      { media_restore: 'accepted' },
+      { document_body: 'Must not enter an acceptance report.' },
+    ]) {
+      expect(
+        pitrAcceptanceReportSchema.safeParse({ ...valid, ...change }).success,
+      ).toBe(false);
+    }
+  }
   for (const change of [
-    { execution: 'github_actions' },
-    { source_commit: 'a'.repeat(40) },
-    { execution: 'github_actions', source_commit: 'invalid' },
-    { production_accepted: true },
-    { provider_requests: 1 },
-    { backup_verified: false },
-    { resources_cleaned: false },
-    { media_restore: 'accepted' },
-    { document_body: 'Must not enter an acceptance report.' },
+    { version: 1 },
+    { media_restore: 'not_exercised' },
+    { source_media_removed: false },
+    { media_backup_objects: 1 },
+    { media_restored_objects: 3 },
+    { retained_media_verified_chunks: 0 },
+    { erased_media_purged_objects: 0 },
+    { media_verified_before_exposure: false },
+    { object_key: 'Must not enter an acceptance report.' },
   ]) {
     expect(
-      pitrAcceptanceReportSchema.safeParse({ ...report, ...change }).success,
+      pitrAcceptanceReportSchema.safeParse({ ...media, ...change }).success,
     ).toBe(false);
   }
+  expect(
+    pitrAcceptanceReportSchema.safeParse({ ...report, version: 2 }).success,
+  ).toBe(false);
+  expect(
+    pitrAcceptanceReportSchema.safeParse({ ...report, media_backup_objects: 2 })
+      .success,
+  ).toBe(false);
 });
 
 describe.skipIf(process.env.SERVER_DATABASE_PITR_ACCEPTANCE !== '1')(
@@ -103,7 +144,7 @@ describe.skipIf(process.env.SERVER_DATABASE_PITR_ACCEPTANCE !== '1')(
         }
       }
     }, 60_000);
-    it('replays only the selected WAL history and independently restores deletion and usage gates before exposure', async () => {
+    it('restores the selected WAL history and separate private media, enforcing deletion, usage and integrity before exposure', async () => {
       const endpoint = process.env.TEST_S3_ENDPOINT;
       if (!endpoint)
         throw new Error(
@@ -112,6 +153,7 @@ describe.skipIf(process.env.SERVER_DATABASE_PITR_ACCEPTANCE !== '1')(
       const storage = await privatePitrArchive(endpoint);
       const archive = storage.open();
       let lab: Awaited<ReturnType<typeof physicalPitrCluster>> | undefined;
+      let media: Awaited<ReturnType<typeof privatePitrMedia>> | undefined;
       let primary: Database | undefined, restored: Database | undefined;
       let app: Awaited<ReturnType<typeof createServer>> | undefined;
       let report:
@@ -119,6 +161,11 @@ describe.skipIf(process.env.SERVER_DATABASE_PITR_ACCEPTANCE !== '1')(
       const failures: unknown[] = [];
       const signal = () => AbortSignal.timeout(60_000);
       try {
+        media = await privatePitrMedia(endpoint);
+        await expect(media.restore()).rejects.toThrow('verified snapshot');
+        await expect(media.discardSource()).rejects.toThrow(
+          'verified media snapshot',
+        );
         lab = await physicalPitrCluster();
         primary = new Database(lab.primary.url, archive);
         await primary.migrate();
@@ -145,6 +192,31 @@ describe.skipIf(process.env.SERVER_DATABASE_PITR_ACCEPTANCE !== '1')(
         };
         const erasedKey = randomUUID();
         await primary.createDocument(actor.user_id, erasedInput, erasedKey);
+        const keptMedia = await seedPitrRecording(
+          primary,
+          media.source,
+          actor.user_id,
+          kept.id,
+        );
+        const erasedMedia = await seedPitrRecording(
+          primary,
+          media.source,
+          actor.user_id,
+          erasedId,
+        );
+        await expect(
+          media.backup([keptMedia.object, keptMedia.object]),
+        ).rejects.toThrow();
+        await media.backup([keptMedia.object, erasedMedia.object]);
+        await expect(
+          media.backup([keptMedia.object, erasedMedia.object]),
+        ).rejects.toThrow('already fixed');
+        expect(
+          await primary.verifyRecordingMedia(media.source, signal()),
+        ).toMatchObject({
+          verified_chunks: '2',
+          verified_bytes: '92',
+        });
         await primary.enqueueSummary(
           actor.user_id,
           kept.id,
@@ -205,6 +277,7 @@ describe.skipIf(process.env.SERVER_DATABASE_PITR_ACCEPTANCE !== '1')(
           randomUUID(),
         );
         await primary.deleteDocument(actor.user_id, erasedId);
+        await media.discardSource();
         expect(
           (
             await primary.pool.query(
@@ -245,8 +318,26 @@ describe.skipIf(process.env.SERVER_DATABASE_PITR_ACCEPTANCE !== '1')(
             )
           ).rows[0],
         ).toEqual({ deleted_at: null });
+        expect(
+          await restored.recordings.get(actor.user_id, keptMedia.recording),
+        ).toMatchObject({
+          state: 'ready',
+          verified_chunks: 1,
+        });
+        expect(
+          await restored.recordings.get(actor.user_id, erasedMedia.recording),
+        ).toMatchObject({
+          state: 'ready',
+          verified_chunks: 1,
+        });
+        await media.restore();
         await expect(
           restored.deletions.recover(signal(), true),
+        ).rejects.toMatchObject({
+          code: 'deletion_usage_review_required',
+        });
+        await expect(
+          restored.verifyRecordingMedia(media.restored, signal()),
         ).rejects.toMatchObject({
           code: 'deletion_usage_review_required',
         });
@@ -308,10 +399,59 @@ describe.skipIf(process.env.SERVER_DATABASE_PITR_ACCEPTANCE !== '1')(
         ).rejects.toMatchObject({
           code: 'resource_gone',
         });
-        app = await createServer(restored, {
-          mode: 'development',
-          host: '127.0.0.1',
+        const erasedBytes = await media.restored.read(
+          erasedMedia.object,
+          erasedMedia.object.size_bytes,
+          signal(),
+        );
+        try {
+          expect(erasedBytes.length).toBe(erasedMedia.object.size_bytes);
+          expect(createHash('sha256').update(erasedBytes).digest('hex')).toBe(
+            erasedMedia.object.sha256,
+          );
+        } finally {
+          erasedBytes.fill(0);
+        }
+        const cleanup = await restored.recordings.claimCleanup();
+        expect(cleanup).toHaveLength(1);
+        expect(cleanup[0]).toMatchObject({
+          id: erasedMedia.object.id,
+          kind: 'verified',
         });
+        for (const object of cleanup) {
+          await media.restored.remove(object, signal());
+          await restored.recordings.finishCleanup(object, true);
+        }
+        await media.assertErased(erasedMedia.object);
+        expect(
+          (
+            await restored.pool.query(
+              `SELECT deleted_at IS NOT NULL erased,cleanup_until IS NULL lease_released
+               FROM recording_objects WHERE id=$1`,
+              [erasedMedia.object.id],
+            )
+          ).rows[0],
+        ).toEqual({ erased: true, lease_released: true });
+        expect(await restored.recordings.claimCleanup()).toEqual([]);
+        expect(
+          await restored.verifyRecordingMedia(media.restored, signal()),
+        ).toMatchObject({
+          verified_chunks: '1',
+          verified_bytes: '46',
+        });
+        await expect(
+          restored.recordings.get(actor.user_id, erasedMedia.recording),
+        ).rejects.toMatchObject({
+          code: 'recording_not_found',
+        });
+        app = await createServer(
+          restored,
+          {
+            mode: 'development',
+            host: '127.0.0.1',
+          },
+          media.restored,
+        );
         const origin = await app.listen({ host: '127.0.0.1', port: 0 });
         const response = await fetch(`${origin}/v1/documents/${erasedId}`, {
           headers: { 'x-dev-subject': subject },
@@ -319,8 +459,25 @@ describe.skipIf(process.env.SERVER_DATABASE_PITR_ACCEPTANCE !== '1')(
         });
         expect(response.status).toBe(404);
         expect(await response.text()).not.toContain(erasedInput.notes);
+        for (const [id, status] of [
+          [keptMedia.recording, 200],
+          [erasedMedia.recording, 404],
+        ] as const) {
+          const recording = await fetch(`${origin}/v1/recordings/${id}`, {
+            headers: { 'x-dev-subject': subject },
+            signal: AbortSignal.timeout(5000),
+          });
+          expect(recording.status).toBe(status);
+          if (status === 200)
+            expect(await recording.json()).toMatchObject({
+              id,
+              state: 'ready',
+              verified_chunks: 1,
+            });
+          else expect(await recording.text()).not.toContain(erasedInput.notes);
+        }
         report = pitrAcceptanceReportSchema.parse({
-          version: 1,
+          version: 2,
           kind: 'controlled_postgresql_pitr',
           scope: 'synthetic_loopback_development_auth',
           execution:
@@ -338,7 +495,13 @@ describe.skipIf(process.env.SERVER_DATABASE_PITR_ACCEPTANCE !== '1')(
           usage_review: 'synthetic_no_provider_requests',
           provider_requests: 0,
           api_exposure: 'only_after_verified_replay_and_synthetic_review',
-          media_restore: 'not_exercised',
+          media_restore: 'verified_synthetic_private_s3_round_trip',
+          source_media_removed: true,
+          media_backup_objects: 2,
+          media_restored_objects: 2,
+          retained_media_verified_chunks: 1,
+          erased_media_purged_objects: 1,
+          media_verified_before_exposure: true,
           resources_cleaned: true,
         });
       } catch (error) {
@@ -354,6 +517,7 @@ describe.skipIf(process.env.SERVER_DATABASE_PITR_ACCEPTANCE !== '1')(
             Promise.resolve().then(() => archive.close()),
             lab?.close(),
             storage.close(),
+            media?.close(),
           ])),
         );
         failures.push(
