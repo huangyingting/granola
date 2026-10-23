@@ -33,6 +33,12 @@ const empty = {
 describe.skipIf(!databaseUrl)('transactional deployment task outcomes', () => {
   let admin: Database, db: Database, scopedUrl: string;
   const schema = `task_outcomes_${randomUUID().replaceAll('-', '')}`;
+  const run = (...args: string[]) =>
+    spawnSync(process.execPath, [cli, ...args], {
+      env: { ...process.env, DATABASE_URL: scopedUrl },
+      encoding: 'utf8',
+      timeout: 10_000,
+    });
   beforeAll(async () => {
     admin = new Database(databaseUrl!);
     await admin.pool.query(`CREATE SCHEMA "${schema}"`);
@@ -534,12 +540,6 @@ describe.skipIf(!databaseUrl)('transactional deployment task outcomes', () => {
     await db.pool.query(`UPDATE jobs SET state='cancelled' WHERE id=$1`, [
       queued.id,
     ]);
-    const run = (...args: string[]) =>
-      spawnSync(process.execPath, [cli, ...args], {
-        env: { ...process.env, DATABASE_URL: scopedUrl },
-        encoding: 'utf8',
-        timeout: 10_000,
-      });
     const result = run('task-outcomes');
     expect(result.status, result.stderr).toBe(0);
     const snapshot = taskOutcomesSnapshotSchema.parse(
@@ -549,34 +549,6 @@ describe.skipIf(!databaseUrl)('transactional deployment task outcomes', () => {
     expect(result.stdout).not.toContain(privateMarker);
     expect(result.stdout).not.toContain(scopedUrl);
     expect(result.stdout).not.toContain('breakdown');
-    const detailed = run('task-outcomes', '--by-kind');
-    expect(detailed.status, detailed.stderr).toBe(0);
-    expect(
-      taskOutcomeKindsSnapshotSchema.parse(JSON.parse(detailed.stdout)).entries
-        ?.jobs.summary,
-    ).toEqual({ ...empty, cancelled: '1' });
-    expect(detailed.stdout).not.toContain(privateMarker);
-    expect(detailed.stdout).not.toContain(scopedUrl);
-    for (const option of [
-      ['--user-id', randomUUID()],
-      ['--limit', '10'],
-      ['--restored-backup'],
-    ]) {
-      const invalid = run('task-outcomes', ...option);
-      expect(invalid.status).toBe(1);
-      expect(invalid.stdout).toBe('');
-      expect(invalid.stderr).toContain('invalid_task_outcomes');
-      const detailedInvalid = run('task-outcomes', '--by-kind', ...option);
-      expect(detailedInvalid.status).toBe(1);
-      expect(detailedInvalid.stdout).toBe('');
-      expect(detailedInvalid.stderr).toContain('invalid_task_outcomes');
-    }
-    for (const command of ['migrate', 'provision', 'operations', 'audit']) {
-      const invalid = run(command, '--by-kind');
-      expect(invalid.status).toBe(1);
-      expect(invalid.stdout).toBe('');
-      expect(invalid.stderr).toContain('invalid_task_outcomes');
-    }
     const operations = run('operations');
     expect(operations.status, operations.stderr).toBe(0);
     expect(
@@ -594,12 +566,54 @@ describe.skipIf(!databaseUrl)('transactional deployment task outcomes', () => {
       status: 'recovery_pending',
       entries: null,
     });
+  });
+  it('exposes a strict per-kind CLI without bodies and keeps unavailable counts explicit', async () => {
+    const source = await fixture(),
+      queued = await job(source);
+    await db.pool.query("UPDATE jobs SET state='cancelled' WHERE id=$1", [
+      queued.id,
+    ]);
+    const detailed = run('task-outcomes', '--by-kind');
+    expect(detailed.status, detailed.stderr).toBe(0);
+    expect(
+      taskOutcomeKindsSnapshotSchema.parse(JSON.parse(detailed.stdout)).entries
+        ?.jobs.summary,
+    ).toEqual({ ...empty, cancelled: '1' });
+    expect(detailed.stdout).not.toContain(privateMarker);
+    expect(detailed.stdout).not.toContain(scopedUrl);
+    await db.pool.query(
+      'UPDATE task_outcome_coverage SET recovery_pending=true',
+    );
     const detailedPending = run('task-outcomes', '--by-kind');
     expect(detailedPending.status, detailedPending.stderr).toBe(0);
     expect(
       taskOutcomeKindsSnapshotSchema.parse(JSON.parse(detailedPending.stdout)),
     ).toMatchObject({ status: 'recovery_pending', entries: null });
   });
+  it.each([
+    { label: 'user filter', options: ['--user-id', randomUUID()] },
+    { label: 'page limit', options: ['--limit', '10'] },
+    { label: 'restore flag', options: ['--restored-backup'] },
+  ])(
+    'rejects the unrelated $label in both task-outcome CLI modes',
+    ({ options }) => {
+      for (const mode of [[], ['--by-kind']]) {
+        const invalid = run('task-outcomes', ...mode, ...options);
+        expect(invalid.status).toBe(1);
+        expect(invalid.stdout).toBe('');
+        expect(invalid.stderr).toContain('invalid_task_outcomes');
+      }
+    },
+  );
+  it.each(['migrate', 'provision', 'operations', 'audit'])(
+    'refuses --by-kind for %s instead of ignoring it or mutating configuration',
+    (command) => {
+      const invalid = run(command, '--by-kind');
+      expect(invalid.status).toBe(1);
+      expect(invalid.stdout).toBe('');
+      expect(invalid.stderr).toContain('invalid_task_outcomes');
+    },
+  );
   it('fails explicitly for missing coverage or inconsistent database clocks instead of fabricating healthy zeroes', async () => {
     await db.pool.query(
       `UPDATE task_outcome_coverage SET observed_since=now()+interval '1 hour'`,
