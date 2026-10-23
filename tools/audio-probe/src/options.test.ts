@@ -29,6 +29,29 @@ describe('audio probe options', () => {
     expect(parseOptions(['--help'])).toEqual({ help: true });
   });
 
+  it('keeps calibration fixture creation portable and measurement read-only', () => {
+    const id = '75048e79-2b45-440f-8609-b80a37635b4a';
+    expect(parseOptions(['calibration-audio'])).toMatchObject({
+      command: 'calibration-audio',
+    });
+    expect(parseOptions(['calibrate', id])).toMatchObject({
+      command: 'calibrate',
+      recordingId: id,
+    });
+    for (const args of [
+      ['calibrate'],
+      ['calibrate', '../../outside'],
+      ['calibrate', id, '--accept-incomplete'],
+      ['calibrate', id, '--capture-clock', 'wasapi_qpc_v1'],
+      ['calibration-audio', id],
+      ['calibration-audio', '--accept-incomplete'],
+      ['calibration-audio', '--capture-clock', 'wasapi_qpc_v1'],
+      ['calibration-audio', '--seconds', '60'],
+      ['calibrate', id, '--microphone', 'off'],
+    ])
+      expect(() => parseOptions(args)).toThrow();
+  });
+
   it('requires an explicit command and bounded recording duration', () => {
     for (const args of [
       ['record', '--seconds', '0'],

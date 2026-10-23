@@ -4,10 +4,11 @@ import { audioRequestSchema } from '@windows-ai-notes/contracts';
 import { randomUUID } from 'node:crypto';
 
 export function parseOptions(args: string[]) {
-  const { values, positionals } = parseArgs({
+  const { values, positionals, tokens } = parseArgs({
     args,
     allowPositionals: true,
     strict: true,
+    tokens: true,
     options: {
       seconds: { type: 'string', default: '60' },
       microphone: { type: 'string', default: 'default' },
@@ -22,12 +23,29 @@ export function parseOptions(args: string[]) {
   });
   if (values.help || args.length === 0) return { help: true as const };
   const command = positionals[0];
-  if (!['devices', 'record', 'inspect', 'recover'].includes(command ?? '')) {
+  if (
+    ![
+      'devices',
+      'record',
+      'inspect',
+      'recover',
+      'calibration-audio',
+      'calibrate',
+    ].includes(command ?? '')
+  ) {
     throw new Error(
-      'Use devices, record, inspect <recording-id>, or recover <recording-id> --accept-incomplete.',
+      'Use devices, record, inspect <recording-id>, recover <recording-id> --accept-incomplete, calibration-audio, or calibrate <recording-id>.',
     );
   }
-  const archive = command === 'inspect' || command === 'recover';
+  const archive =
+    command === 'inspect' || command === 'recover' || command === 'calibrate';
+  if (command === 'calibration-audio' || command === 'calibrate') {
+    for (const token of tokens)
+      if (token.kind === 'option' && !['data-dir', 'help'].includes(token.name))
+        throw new Error(
+          'Calibration commands accept only --data-dir and --help.',
+        );
+  }
   const captureClock = values['capture-clock'];
   if (
     captureClock !== undefined &&

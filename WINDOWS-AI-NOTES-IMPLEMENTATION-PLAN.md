@@ -367,6 +367,8 @@ sequenceDiagram
 
 该实验 profile 还把相邻 QPC 时间差与前一个 packet 的实际帧时长核对：以一个原始 source frame 加 100 ns QPC 量化误差作为保守拒绝预算，使用整数计算边界，不宣称这是 SDK 精度保证或设备漂移验收。即使设备帧位置连续，超出预算且未带标志的时间缺口/重叠也必须失败；每个非空 packet 另读取新鲜单调 observation，标称结束时间不能超过 observation 加同一预算。不 clamp、重定时或补造静音；已经合法排队的前缀仍可加密检查，但记录保持 failed 而不是 sealed，不把不确定区间写成媒体。违反 guard 的设备继续阻断实验路径，需真实调查而不是自动放宽阈值。
 
+探针另提供固定一小时 `calibration-audio` 合成 WAV 与只读 `calibrate RECORDING_UUID`：在真实双路可接收同一信号的受控条件下，播放带静弱 carrier 和十三个带编号/校验 tone marker 的固定样本；分析仅接受 authenticated sealed、单一连续 `wasapi_qpc_v1` epoch，复用既有有界且完整校验的 WAV range，不导出录音明文文件或打印媒体/base64/设备名，并清零自有 range buffer。报告给出描述符指纹、缺失/重复/异常 marker、逐点双路偏移及相对首点的变化；按 chunk 已认证 clock endpoint 线性插值，不冒充逐采样硬件时钟。至少 3,550 秒媒体和 marker clock span、3,590 秒 capture span，以及含固定分析窗口 margin 的 200 ms sampled offset/change 检查全部满足才返回零状态；五分钟预算在 native 请求/range 之间核对。固定窗口 margin 不是任意声学/硬件精度保证，连续对齐及 production acceptance 始终为 false。真实一小时 capture build、声学连接、播放设置及设备矩阵仍须独立保存和人工验收；加速生成/解码测试不解除实机门禁，不默认启用实验后端。
+
 ## 8. AI 服务端设计
 
 ### 8.1 供应商适配与模型路由

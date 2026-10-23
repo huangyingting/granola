@@ -2791,7 +2791,71 @@ is never published as media or marked sealed. Devices that violate the guard
 remain unsupported by this opt-in path until physical investigation, rather than
 silently receiving a looser tolerance.
 
-The CLI prints the recording UUID and typed JSON events. Status reports
+### Sampled acoustic calibration
+
+Generate the fixed one-hour calibration WAV on any supported Node.js development
+host, without Azure credentials or an audio device:
+
+```sh
+pnpm audio:probe calibration-audio --data-dir ".probe-data"
+```
+
+This creates a new `dual-clock-fsk-v1.wav` (115,200,044 bytes, mono PCM16 at
+16 kHz); it never overwrites an existing file. Creation failure/cancellation
+removes only the newly created output whose file identity still matches. A quiet
+250 Hz carrier keeps playback active between thirteen numbered 1/2 kHz tone
+markers. The first marker starts at 20 seconds and the last at 3,580 seconds.
+This is synthetic test audio, not speech or a provider-quality fixture.
+
+On the actual Windows machine, use a consented, controlled speaker-to-microphone
+setup in which **both selected tracks can receive the same signal**. Keep playback
+at a comfortable low level. Start an uninterrupted capture and promptly play the
+entire WAV once at normal speed on the selected loopback endpoint:
+
+```sh
+pnpm audio:probe record --seconds 3600 --capture-clock wasapi_qpc_v1
+pnpm audio:probe calibrate RECORDING_UUID --data-dir ".probe-data"
+```
+
+Run the second command only after capture stops. Headphones without a controlled
+signal path into the microphone do not establish two-track alignment; missing
+markers fail rather than being treated as silence or inferred observations.
+Do not pause, seek, change playback speed, switch devices or run unrelated audio
+during this particular measurement. Separate physical tests are still required
+for those cases and for silence, sleep, unplug, disk exhaustion and forced exit.
+
+`calibrate` authenticates a sealed, two-track, single-epoch `wasapi_qpc_v1`
+archive and streams bounded, checksum-verified WAV ranges without exporting
+recorded audio to disk or printing media/base64/device names. Owned range buffers
+are cleared after processing. It rejects incomplete recovery, changed identities,
+pagination/sample inconsistencies, bad canonical WAV headers and range failures,
+including checksum failure after the final bytes. Input is capped at one hour
+plus 60 seconds per track, with a five-minute analysis budget checked between
+native requests/ranges; each native request retains its existing 30-second timeout.
+Ctrl+C cancels the measurement without changing recorded media.
+
+The body-free JSON includes an authenticated descriptor fingerprint, per-track
+marker positions, missing/duplicate/unexpected IDs, sampled microphone-minus-
+loopback clock offsets, end-to-end change and maximum change relative to the
+first pair. Marker positions use **linear interpolation of authenticated chunk
+clock endpoints**, not independent per-sample hardware observations. The fixed
+20 ms analysis windows contribute policy margins of 40 ms for a pair and 80 ms
+for a change between pairs; these are not a calibrated accuracy guarantee for
+arbitrary hardware, noise, reverberation or chunk interpolation.
+
+The CLI exits nonzero unless all thirteen unique markers appear in order, both
+tracks contain at least 3,550 seconds of media, the capture spans at least 3,590
+seconds, marker clocks span at least 3,550 seconds, and both sampled absolute
+offset and maximum relative change fit the 200 ms target with those margins.
+**A zero exit status applies only to these sampled checks.**
+`continuous_alignment_evaluated` and `production_accepted` remain `false`, even
+then. Preserve the report together with the exact capture build and controlled
+hardware/playback setup for human review; the archive's profile identifier alone
+does not establish capture-build provenance. Synthetic accelerated tests of this
+tool are not physical one-hour evidence and do not enable experimental capture
+or clear any release gate.
+
+`record` prints the recording UUID and typed JSON events. Status reports
 `saved_samples`, not merely received audio: short tails are not committed until a
 pause or clean stop. Ctrl+C asks the host to stop and seal. EOF also stops capture.
 Endpoints are pinned at start; resume never silently switches to a different

@@ -5,6 +5,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import type { Track } from '@windows-ai-notes/contracts';
 import { AudioHostClient } from './client.js';
 import { parseOptions } from './options.js';
+import { measureCalibration, writeCalibrationFixture } from './calibration.js';
 
 const help = `Windows AI Notes - P0 audio probe
 
@@ -14,17 +15,41 @@ pnpm audio:probe record --seconds 60 --pause-at 20 --pause-for 5
 pnpm audio:probe record --seconds 60 --capture-clock wasapi_qpc_v1
 pnpm audio:probe inspect RECORDING_ID [--data-dir PATH]
 pnpm audio:probe recover RECORDING_ID --accept-incomplete [--data-dir PATH]
+pnpm audio:probe calibration-audio [--data-dir PATH]
+pnpm audio:probe calibrate RECORDING_ID [--data-dir PATH]
 
 Capture is endpoint-wide, NOT application-isolated. Only record with consent.
 Both tracks default to the Windows multimedia endpoints. Ctrl+C requests a clean stop.
 Encrypted files default to .probe-data; keep them on the same Windows account.
 Device-clock capture is experimental, opt-in and not physical drift acceptance.
+Calibration measurements never automatically accept physical capture or production readiness.
 The probe makes no network or AI calls.`;
 
 async function main(): Promise<void> {
   const options = parseOptions(process.argv.slice(2));
   if (options.help) {
     console.log(help);
+    return;
+  }
+  if (options.command === 'calibration-audio') {
+    const interrupted = new AbortController();
+    const interrupt = () => interrupted.abort();
+    process.on('SIGINT', interrupt);
+    try {
+      const path = await writeCalibrationFixture(
+        options.dataDir,
+        interrupted.signal,
+      );
+      console.log(
+        JSON.stringify({
+          fixture_path: path,
+          seconds: 3600,
+          production_accepted: false,
+        }),
+      );
+    } finally {
+      process.off('SIGINT', interrupt);
+    }
     return;
   }
   if (process.platform !== 'win32') {
@@ -45,7 +70,7 @@ async function main(): Promise<void> {
     'dotnet',
     [hostPath, '--data-dir', options.dataDir],
     (event) => {
-      console.log(JSON.stringify(event));
+      if (options.command !== 'calibrate') console.log(JSON.stringify(event));
     },
   );
   const interrupted = new AbortController();
@@ -62,6 +87,19 @@ async function main(): Promise<void> {
     }
   }
   try {
+    if (options.command === 'calibrate') {
+      const report = await measureCalibration(
+        client,
+        options.recordingId,
+        interrupted.signal,
+      );
+      console.log(JSON.stringify(report));
+      if (!report.sampled_landmarks_within_target)
+        throw new Error(
+          'Calibration landmarks are missing, ambiguous, too short or outside the sampled alignment target. No physical gate was accepted.',
+        );
+      return;
+    }
     if (options.command === 'devices') {
       await client.request({ command: 'list_devices' });
       return;
