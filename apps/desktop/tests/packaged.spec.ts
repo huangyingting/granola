@@ -22,10 +22,11 @@ const executable = process.env.DESKTOP_EXECUTABLE;
 async function rejectedMainActivation(application: ElectronApplication) {
   return application.evaluate(async ({ app }) => {
     const { join } = process.getBuiltinModule('node:path');
-    const { pathToFileURL } = process.getBuiltinModule('node:url');
-    const main: typeof import('../src/main/main.js') = await import(
-      pathToFileURL(join(app.getAppPath(), 'dist/main/main.js')).href
-    );
+    const filename = join(app.getAppPath(), 'dist/main/main.js');
+    const require = process
+      .getBuiltinModule('node:module')
+      .createRequire(filename);
+    const main: typeof import('../src/main/main.js') = require(filename);
     try {
       await main.activateReadyUpdate();
     } catch (error) {
