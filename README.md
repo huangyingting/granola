@@ -1645,6 +1645,50 @@ after all other PostgreSQL tests and the controlled workload have finished. This
 a process-crash/WAL drill, not host power loss, storage failure, point-in-time restore,
 production capacity, OIDC/TLS or release acceptance.
 
+### Physical base backup and point-in-time recovery
+
+`packages/client/src/pitr.test.ts` creates its own two private PostgreSQL 16
+containers and fresh Docker volumes. It takes a real `pg_basebackup`, verifies its
+SHA-256 manifest with `pg_verifybackup`, then archives subsequent WAL. Recovery
+uses the same exact cached image, a fresh data volume, read-only backup/archive
+mounts and a named restore point. The drill waits for PostgreSQL's completed
+archive marker, not merely the appearance of a partially copied segment.
+
+The restored cluster must retain its physical identity and promote to a newer
+timeline. A note revision committed after the base backup must survive; a later
+revision after the selected target must not. A deletion published after that
+target remains in the **independent private S3 archive**, which is never restored.
+The raw recovered database initially contains the erased document; verified
+deletion replay must remove it and fence both old-request replay and recreation
+before exposure. API listening and a real usage reservation must remain blocked
+until explicit review. This fixture never dispatches a provider request, so its
+zero-usage attestation is valid only for these known synthetic inputs. After
+review, an actual owner-authenticated HTTP read must still deny the deleted note.
+
+After `pnpm build`, with Docker, the cached `postgres:16-alpine` image and the
+existing private synthetic S3 store running:
+
+```sh
+SERVER_DATABASE_PITR_ACCEPTANCE=1 \
+  TEST_S3_ENDPOINT=http://127.0.0.1:59000 \
+  pnpm test packages/client/src/pitr.test.ts
+```
+
+No existing database or container is accepted as a recovery target. Cleanup checks
+the exact owned image/container identities and removes only its own containers,
+volumes and private bucket. A strict body-free
+`artifacts/database-pitr-acceptance.json` is written without overwriting an earlier
+report **only after all assertions and cleanup succeed**. Server CI runs the
+opt-in drill separately and uploads the source-bound
+`controlled-database-pitr-acceptance` ZIP.
+
+The report explicitly retains `production_accepted=false` and
+`media_restore=not_exercised`. This controlled physical PITR test does not prove
+production backup immutability, media recovery, restore authorization, provider
+billing reconciliation, RPO/RTO, host/storage failure, TLS/OIDC or sustained
+capacity. Actual deployment restore and the independent deletion/usage procedure
+above remain required production gates.
+
 ### Controlled sync and overload acceptance
 
 The server CI job separately runs an opt-in real-HTTP/PostgreSQL/encrypted-SQLite

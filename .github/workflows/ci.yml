@@ -72,6 +72,21 @@ jobs:
           SERVER_DATABASE_CRASH_ACCEPTANCE: '1'
           TEST_POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
         run: pnpm test packages/client/src/database-recovery.test.ts
+      - name: Physical base backup, named-target WAL restore and independent deletion recovery
+        env:
+          SERVER_DATABASE_PITR_ACCEPTANCE: '1'
+          TEST_S3_ENDPOINT: http://127.0.0.1:59000
+        run: |
+          pnpm test packages/client/src/pitr.test.ts
+          test -s artifacts/database-pitr-acceptance.json
+      - name: Upload body-free controlled physical PITR acceptance
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          archive: true
+          name: controlled-database-pitr-acceptance
+          if-no-files-found: error
+          path: artifacts/database-pitr-acceptance.json
+          retention-days: 7
       - run: pnpm format:check
       - name: Build the unprivileged server image without credentials
         run: |

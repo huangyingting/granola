@@ -502,6 +502,8 @@ RBAC 负责工作区能力，文档 ACL 决定具体内容可见性。PostgreSQL
 
 数据库使用版本化迁移；部署前备份与演练，变更采用先兼容再切换。API/客户端版本有最小兼容窗口，不能通过强制升级打断正在录音的客户端。
 
+已提供独立 opt-in 的物理 PITR 合成演练：自建两个私有 PostgreSQL 16 容器，以真实 `pg_basebackup` / `pg_verifybackup` 和归档 WAL 恢复到命名目标；旧数据库、既有容器和外部数据目录不作为恢复目标。备份及 WAL 以只读 volume 挂入全新数据目录，独立 S3 删除档案不随主库恢复。它补充已有逻辑备份和进程 crash 演练，不代替生产备份不可变性、媒体恢复、恢复授权、真实用量核对及 RPO/RTO 验收。
+
 ### 11.2 监控和容量
 
 核心指标包括活跃录音连接、音频帧积压/缺口、上传校验失败、队列等待、租约失效、转写延迟、首 token 延迟、任务成功率、对象清理积压、ASR 分钟数、模型 tokens 和预算超支。
@@ -655,6 +657,8 @@ Linux 集成测试另执行实际编译的 API/Worker 子进程，以真实 Post
 运行中取消和正常关闭另覆盖真实认证 API cancel、SIGTERM、SIGINT，在未收到 usage 和已收到合法合成 wire receipt 两种时序下分别执行。后者持有真实 usage-period 行锁，以自有 Worker 的 pg_stat_activity / pg_blocking_pids 锁等待确认结算已开始，不使用 sleep 或替换 provider。取消后的已知 receipt 必须仍被结算但不能发布输出；关闭必须等结算后自然零码退出，新 Worker 不得自动重发中断的总结。未收到 receipt 则保留不确定预留，所有路径保持原手写笔记。这是实际服务生命周期和合成协议记账覆盖，不是供应商账单或语义质量认证。
 
 PostgreSQL 进程故障另增加显式 opt-in 的破坏性隔离演练：仅接受完整容器 ID、literal-loopback 映射、空的专属数据库/cluster、非自动删除的 PostgreSQL 16 容器及持久 Docker volume；拒绝共享数据、bind mount 和 tmpfs。正常 fsync/full-page-write/synchronous-commit 下，真实已提交 HTTP 回应丢失及加密 SQLite 新输入之后，以 SIGKILL 同时打断控制事务和真实 Worker 的锁等待，离线 pg_controldata 必须证实未正常关闭。原容器/volume 重启后 cluster 身份不变、postmaster 更新，已提交笔记保留、未提交控制行消失，原 API/Worker 进程不崩溃，冻结重放不重复且保留新输入。已修复 checked-out pg client 无 error listener 导致的未捕获异常、ROLLBACK 失败覆盖原错误，以及连接中断被返回为不可重试 500；故障连接显式丢弃，原错误保留，已知连接/关闭/容量故障返回无敏感信息的 retryable 503，不覆盖 domain/permanent/query/protocol 错误，不自动重试事务或假定不确定 COMMIT 已回滚。CI 只在其他数据库测试全部结束后单独运行此演练；它不冒充断电、存储故障、PITR restore 或生产部署/容量验收。
+
+物理备份/PITR 演练另验证真实 SHA-256 manifest、PostgreSQL 完成归档标记、同一物理 cluster 的新 timeline，以及备份后/目标前的笔记版本保留、目标后版本排除。目标后的独立删除意图必须在 API 暴露前重放，旧幂等请求及新请求都不能复活已删 ID；真实 usage 预留和 API listen 在显式用量审查前拒绝。该合成样机不启动供应商，仅能据已核实的零请求提交本次零用量证明，不能用作生产计费核对。全部断言及自有容器、volume、bucket 清理成功后才写严格无正文报告，GitHub 执行绑定完整源码并明确 `production_accepted=false` / `media_restore=not_exercised`；服务端 CI 单独执行并上传命名 ZIP，不替代真实部署、生产备份/媒体恢复、RPO/RTO、签名、设备及质量门禁。
 
 API 部署探针另分离进程存活与数据库就绪：兼容原 `/health` 数据库检查，新增无数据库依赖的 `/health/live`，各自保留每 IP 每分钟 120 次的独立预算，不占用普通 API 配额，也不因正常 API 饱和误报不健康。并发 readiness 只共享一个实际 SQL，不缓存成功或失败；真实 PostgreSQL SIGKILL 演练要求存活探针保持 200、就绪探针返回无敏感信息的可重试 503，恢复后原进程重新返回 200。启动迁移/独立删除档案准入和普通路由鉴权不变；这些是 API 探针，不是 Worker、Azure/storage 或生产发行认证。
 
