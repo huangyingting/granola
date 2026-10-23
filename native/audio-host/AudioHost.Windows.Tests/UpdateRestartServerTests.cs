@@ -25,7 +25,6 @@ public sealed class UpdateRestartServerTests
         Assert.False(server.IsCreatorOf(server));
         var handle = server.ProcessHandle;
         Assert.Same(handle, server.ProcessHandle);
-        Assert.Equal(73, await ReadByte(pipe, fixture.Deadline.Token));
         using var cancelled = new CancellationTokenSource();
         cancelled.Cancel();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => server.WaitForExitAsync(cancelled.Token));
@@ -132,7 +131,6 @@ public sealed class UpdateRestartServerTests
         if (mode == "disposed-main") fixture.Main.Dispose();
         if (mode == "disconnected")
         {
-            Assert.Equal(73, await ReadByte(pipe, fixture.Deadline.Token));
             File.WriteAllText(Path.Combine(fixture.Root, "disconnect"), "close");
             await fixture.WaitForFile(Path.Combine(fixture.Root, "disconnected"));
             Assert.Equal(-1, await ReadByte(pipe, fixture.Deadline.Token));
@@ -156,7 +154,6 @@ public sealed class UpdateRestartServerTests
         Assert.False(fixture.Main.HasExited);
         Assert.False(fixture.Server.HasExited);
         Assert.True(pipe.IsConnected);
-        Assert.Equal(73, await ReadByte(pipe, fixture.Deadline.Token));
     }
 
     [Theory]
@@ -258,6 +255,7 @@ public sealed class UpdateRestartServerTests
     {
         private UpdateParentLease? main;
         private Process? child;
+        private readonly Task<string> diagnostics;
         internal string Root { get; } = Path.Combine(Path.GetTempPath(), $"notes-restart-server-{Guid.NewGuid():N}");
         internal string Endpoint { get; } = $"notes-restart-server-{Guid.NewGuid():N}";
         internal CancellationTokenSource Deadline { get; } = new(TimeSpan.FromSeconds(30));
@@ -318,10 +316,16 @@ public sealed class UpdateRestartServerTests
                 }
                 finally {$p.Dispose()}
                 """);
-            var start = new ProcessStartInfo(UpdateTrustTests.Reference) { UseShellExecute = false, CreateNoWindow = true };
+            var start = new ProcessStartInfo(UpdateTrustTests.Reference)
+            {
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardError = true
+            };
             foreach (var argument in new[] { "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", serverPath })
                 start.ArgumentList.Add(argument);
             Server = Process.Start(start) ?? throw new InvalidOperationException("The server fixture did not start.");
+            diagnostics = Server.StandardError.ReadToEndAsync();
         }
 
         internal static async Task<Fixture> StartAsync()
@@ -332,6 +336,7 @@ public sealed class UpdateRestartServerTests
                 var ready = Path.Combine(fixture.Root, "child-ready");
                 await fixture.WaitForFile(ready);
                 fixture.child = Process.GetProcessById(int.Parse(File.ReadAllText(ready), CultureInfo.InvariantCulture));
+                _ = fixture.child.SafeHandle;
                 var result = UpdateParentLease.OpenProcess(fixture.child.Id, UpdateTrustTests.Reference, out fixture.main);
                 Assert.True(result.Matched, result.Code);
                 Assert.NotNull(fixture.main);
@@ -350,6 +355,7 @@ public sealed class UpdateRestartServerTests
             try
             {
                 await pipe.ConnectAsync(Deadline.Token);
+                Assert.Equal(73, await ReadByte(pipe, Deadline.Token));
                 await WaitForFile(Path.Combine(Root, "connected"));
                 return pipe;
             }
@@ -390,12 +396,11 @@ public sealed class UpdateRestartServerTests
                 File.WriteAllText(Path.Combine(Root, "child-finish"), "finish");
                 using var cleanup = new CancellationTokenSource(TimeSpan.FromSeconds(30));
                 await Server.WaitForExitAsync(cleanup.Token);
-                Assert.Equal(0, Server.ExitCode);
                 if (child is not null)
-                {
                     await child.WaitForExitAsync(cleanup.Token);
-                    Assert.Equal(0, child.ExitCode);
-                }
+                var errors = await diagnostics.WaitAsync(cleanup.Token);
+                Assert.True(Server.ExitCode == 0, $"Server fixture exited with {Server.ExitCode}: {errors}");
+                if (child is not null) Assert.Equal(0, child.ExitCode);
             }
             finally
             {

@@ -165,6 +165,10 @@ public sealed class UpdateFreshAdmissionTests
             var mainPath = Path.Combine(Root, "main.ps1");
             File.WriteAllText(mainPath, $$"""
                 $ErrorActionPreference='Stop'
+                trap {
+                  [IO.File]::WriteAllText('{{Literal(Path.Combine(Root, "fixture-error"))}}',$_.ToString())
+                  exit 1
+                }
                 [IO.File]::WriteAllText('{{Literal(Path.Combine(Root, "ready"))}}','ready')
                 $finish='{{Literal(Path.Combine(Root, "finish"))}}'
                 $launch='{{Literal(Path.Combine(Root, "launch"))}}'
@@ -226,6 +230,7 @@ public sealed class UpdateFreshAdmissionTests
             Admission = UpdateOperationLock.Open(Locks, admission: true);
             Main = UpdateLaunchedProcess.StartIsolated(start);
             Observed = Process.GetProcessById(Main.Id);
+            _ = Observed.SafeHandle;
         }
 
         internal static async Task<Fixture> StartAsync()
@@ -249,6 +254,7 @@ public sealed class UpdateFreshAdmissionTests
             var path = Path.Combine(Root, "descendant-ready");
             await WaitForFile(path);
             descendant = Process.GetProcessById(int.Parse(File.ReadAllText(path), System.Globalization.CultureInfo.InvariantCulture));
+            _ = descendant.SafeHandle;
         }
 
         private async Task WaitForFile(string path)
@@ -256,7 +262,7 @@ public sealed class UpdateFreshAdmissionTests
             while (!File.Exists(path))
             {
                 if (Observed.HasExited)
-                    throw new InvalidOperationException($"The Main fixture exited with code {Observed.ExitCode} before {Path.GetFileName(path)}.");
+                    throw new InvalidOperationException($"The Main fixture exited with code {Observed.ExitCode} before {Path.GetFileName(path)}. {Diagnostic()}");
                 await Task.Delay(10, Deadline.Token);
             }
         }
@@ -265,7 +271,7 @@ public sealed class UpdateFreshAdmissionTests
         {
             File.WriteAllText(Path.Combine(Root, "finish"), "finish");
             await Observed.WaitForExitAsync(Deadline.Token);
-            Assert.Equal(0, Observed.ExitCode);
+            Assert.True(Observed.ExitCode == 0, Diagnostic());
         }
 
         public async ValueTask DisposeAsync()
@@ -276,7 +282,7 @@ public sealed class UpdateFreshAdmissionTests
                 File.WriteAllText(Path.Combine(Root, "descendant-finish"), "finish");
                 using var cleanup = new CancellationTokenSource(TimeSpan.FromSeconds(30));
                 await Observed.WaitForExitAsync(cleanup.Token);
-                Assert.Equal(0, Observed.ExitCode);
+                Assert.True(Observed.ExitCode == 0, Diagnostic());
                 if (descendant is not null)
                 {
                     await descendant.WaitForExitAsync(cleanup.Token);
@@ -292,6 +298,12 @@ public sealed class UpdateFreshAdmissionTests
                 Deadline.Dispose();
                 Directory.Delete(Root, recursive: true);
             }
+        }
+
+        private string Diagnostic()
+        {
+            var path = Path.Combine(Root, "fixture-error");
+            return File.Exists(path) ? File.ReadAllText(path) : "No Main fixture diagnostic was recorded.";
         }
 
         private static string Literal(string path) => path.Replace("'", "''", StringComparison.Ordinal);
