@@ -52,6 +52,10 @@ import {
 import { DesktopUpdateController } from './update-controller.js';
 import { DesktopShutdown } from './shutdown.js';
 import {
+  closeUpdateWorkerForExit,
+  updateWorkerAllowsExit,
+} from './update-worker.js';
+import {
   acquireStartupAdmission,
   cleanupRetiredUpdateSessions,
   inspectUpdateSessions,
@@ -451,7 +455,7 @@ async function start() {
               'invalid_close_request',
               'No matching close operation is pending.',
             );
-          await closing.close();
+          await Promise.all([closing.close(), closeUpdateWorkerForExit()]);
           allowClose = true;
           current.close();
           return { ok: true, closing: true };
@@ -913,7 +917,7 @@ async function start() {
     },
   );
   current.on('close', (event) => {
-    if (allowClose) return;
+    if (allowClose && updateWorkerAllowsExit()) return;
     event.preventDefault();
     closeNonce ??= randomUUID();
     current.webContents.send('notes:flush', closeNonce);
@@ -970,7 +974,7 @@ else {
     window?.focus();
   });
   const finishQuit = () => {
-    void (shutdown?.close() ?? Promise.resolve())
+    void Promise.all([shutdown?.close(), closeUpdateWorkerForExit()])
       .then(() => app.quit())
       .catch((error: unknown) => {
         console.error(
@@ -982,7 +986,7 @@ else {
       });
   };
   app.on('before-quit', (event) => {
-    if (!shutdown || shutdown.complete) return;
+    if ((!shutdown || shutdown.complete) && updateWorkerAllowsExit()) return;
     event.preventDefault();
     if (window) window.close();
     else finishQuit();

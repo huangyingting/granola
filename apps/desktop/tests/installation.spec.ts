@@ -453,6 +453,8 @@ test('preserves encrypted data and new edits through actual installation, compat
         let locked = false;
         let rejection: string | null = null;
         let outcome: unknown = null;
+        let exitBlockedDuringPreparation = false;
+        let exitAllowedAfterStop = false;
         try {
           lease.assertHeld();
           try {
@@ -490,7 +492,7 @@ test('preserves encrypted data and new edits through actual installation, compat
           );
           try {
             const version = input.version.split('.').map(Number);
-            const session = await worker.prepareUpdateWorker(lease, {
+            const preparation = worker.prepareUpdateWorker(lease, {
               application: process.execPath,
               user_data: _electron.app.getPath('userData'),
               current_version: input.version,
@@ -499,6 +501,8 @@ test('preserves encrypted data and new edits through actual installation, compat
               bytes: 1,
               sha512: Buffer.alloc(64).toString('base64'),
             });
+            exitBlockedDuringPreparation = !worker.updateWorkerAllowsExit();
+            const session = await preparation;
             await session.cancel();
             throw new Error(
               'The unsigned installation must not prepare an update.',
@@ -512,6 +516,7 @@ test('preserves encrypted data and new edits through actual installation, compat
             )
               throw error;
             rejection = error.code;
+            exitAllowedAfterStop = worker.updateWorkerAllowsExit();
             outcome = JSON.parse(
               fs.readFileSync(
                 path.join(lease.runtime.directory, 'update-outcome.json'),
@@ -533,6 +538,8 @@ test('preserves encrypted data and new edits through actual installation, compat
           locked,
           rejection,
           outcome,
+          exitBlockedDuringPreparation,
+          exitAllowedAfterStop,
         };
       },
       {
@@ -547,6 +554,8 @@ test('preserves encrypted data and new edits through actual installation, compat
     try {
       expect(guarded.parent.pid).toBe(guarded.pid);
       expect(guarded.locked).toBe(true);
+      expect(guarded.exitBlockedDuringPreparation).toBe(true);
+      expect(guarded.exitAllowedAfterStop).toBe(true);
       expect(guarded.rejection).toBe('update_signature_invalid');
       expect(updateWorkerOutcomeSchema.parse(guarded.outcome)).toMatchObject({
         phase: 'failed',

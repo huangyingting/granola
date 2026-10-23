@@ -451,6 +451,14 @@ authorization.
 Main also retains a physical-close promise for every audio helper it creates.
 A child error, expired EOF deadline or unsuccessful kill is not process-exit
 evidence; a later retry still cannot release SQLite before those helpers close.
+Main also retains the actual installer-worker session until physical closure.
+`closeReady`, application quit and the last-window path share an exit fence:
+ordinary exit seals new worker preparation and waits for cancellation, while only
+an explicitly released, error-free durable commit can own an update exit. A
+failed or expired released worker immediately loses that permission; uncertain
+cancellation keeps every later window/application exit blocked until the worker
+actually closes. Workspace shutdown seals commands while that fence drains.
+This adds no installation command or enabled update control.
 
 Packaged startup now claims a separate current-user admission lease before
 unlocking the content key or opening SQLite. A short-lived bundled native helper

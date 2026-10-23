@@ -5,7 +5,9 @@ import { FrameDecoder, encodeJsonFrame } from '@windows-ai-notes/contracts';
 import type { HeldUpdateRuntime } from './update-runtime.js';
 import type {
   PreparedUpdateWorker,
+  closeUpdateWorkerForExit,
   prepareUpdateWorker,
+  updateWorkerAllowsExit,
 } from './update-worker.js';
 
 const native = vi.hoisted(() => ({ spawn: vi.fn() }));
@@ -74,9 +76,15 @@ let guard: HeldUpdateRuntime & {
   assertHeld: ReturnType<typeof vi.fn>;
 };
 let prepare: typeof prepareUpdateWorker;
+let closeForExit: typeof closeUpdateWorkerForExit;
+let allowsExit: typeof updateWorkerAllowsExit;
 beforeEach(async () => {
   vi.resetModules();
-  ({ prepareUpdateWorker: prepare } = await import('./update-worker.js'));
+  ({
+    prepareUpdateWorker: prepare,
+    closeUpdateWorkerForExit: closeForExit,
+    updateWorkerAllowsExit: allowsExit,
+  } = await import('./update-worker.js'));
   child = new Worker();
   native.spawn.mockReset().mockReturnValue(child);
   guard = {
@@ -105,6 +113,143 @@ async function prepared(signal?: AbortSignal): Promise<PreparedUpdateWorker> {
 }
 
 describe('authenticated Main installer worker client', () => {
+  it('makes ordinary exit terminal without consuming a later caller’s guard', async () => {
+    expect(allowsExit()).toBe(true);
+    await closeForExit();
+    await closeForExit();
+    await expect(prepare(guard, candidate)).rejects.toMatchObject({
+      code: 'update_worker_closing',
+    });
+    expect(guard.release).not.toHaveBeenCalled();
+    expect(native.spawn).not.toHaveBeenCalled();
+    expect(allowsExit()).toBe(true);
+  });
+
+  it.each(['preparing', 'prepared', 'committing', 'committed'] as const)(
+    'keeps ordinary exit blocked until the actual %s worker closes',
+    async (phase) => {
+      const pending = prepare(guard, candidate);
+      const rejected: Promise<unknown>[] = [];
+      let session: PreparedUpdateWorker | null = null;
+      if (phase === 'preparing')
+        rejected.push(
+          expect(pending).rejects.toMatchObject({
+            code: 'update_worker_cancelled',
+          }),
+        );
+      else {
+        child.frame(ready);
+        session = await pending;
+        if (phase === 'committing' || phase === 'committed') {
+          const commit = session.commit();
+          if (phase === 'committed') {
+            child.frame(committed);
+            await commit;
+          } else
+            rejected.push(
+              expect(commit).rejects.toMatchObject({
+                code: 'update_worker_cancelled',
+              }),
+            );
+        }
+      }
+      child.closeOnEnd = false;
+      child.closeOnKill = false;
+      expect(allowsExit()).toBe(false);
+      let finished = false;
+      const closing = closeForExit().then(() => {
+        finished = true;
+      });
+      await Promise.resolve();
+      expect(finished).toBe(false);
+      expect(allowsExit()).toBe(false);
+      if (phase === 'preparing') child.frame(ready);
+      if (session) expect(() => session.releaseForExit()).toThrow();
+      child.finish();
+      await closing;
+      await Promise.all(rejected);
+      expect(finished).toBe(true);
+      expect(allowsExit()).toBe(true);
+      await expect(prepare(guard, candidate)).rejects.toMatchObject({
+        code: 'update_worker_closing',
+      });
+    },
+  );
+
+  it('permits only the clean explicitly released durable commit to own Main exit', async () => {
+    const session = await prepared();
+    const commit = session.commit();
+    child.frame(committed);
+    await commit;
+    expect(allowsExit()).toBe(false);
+    session.releaseForExit();
+    expect(allowsExit()).toBe(true);
+    await closeForExit();
+    expect(child.kill).not.toHaveBeenCalled();
+    expect(child.ended).toBe(false);
+    await session.cancel();
+    expect(allowsExit()).toBe(true);
+  });
+
+  it('revokes released exit ownership on failure and retains the worker after uncertain cancellation', async () => {
+    vi.useFakeTimers();
+    const session = await prepared();
+    const commit = session.commit();
+    child.frame(committed);
+    await commit;
+    child.closeOnEnd = false;
+    child.closeOnKill = false;
+    session.releaseForExit();
+    expect(allowsExit()).toBe(true);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(allowsExit()).toBe(false);
+    await expect(session.failed).resolves.toMatchObject({
+      code: 'update_parent_exit_timeout',
+    });
+    const closing = closeForExit();
+    const rejected = expect(closing).rejects.toMatchObject({
+      code: 'update_worker_cleanup_uncertain',
+    });
+    await vi.advanceTimersByTimeAsync(10_000);
+    await rejected;
+    expect(allowsExit()).toBe(false);
+    await expect(closeForExit()).rejects.toMatchObject({
+      code: 'update_worker_cleanup_uncertain',
+    });
+    child.finish();
+    await closeForExit();
+    expect(allowsExit()).toBe(true);
+    await expect(prepare(guard, candidate)).rejects.toMatchObject({
+      code: 'update_worker_closing',
+    });
+  });
+
+  it('retains exit ownership when failed preparation never returns a session to its caller', async () => {
+    vi.useFakeTimers();
+    child.closeOnEnd = false;
+    child.closeOnKill = false;
+    const pending = prepare(guard, candidate);
+    const rejected = expect(pending).rejects.toMatchObject({
+      code: 'update_worker_cleanup_uncertain',
+    });
+    child.frame({
+      version: 1,
+      event: 'update_worker_failed',
+      code: 'update_signature_invalid',
+    });
+    await vi.advanceTimersByTimeAsync(10_000);
+    await rejected;
+    expect(guard.release).toHaveBeenCalledOnce();
+    expect(allowsExit()).toBe(false);
+    await expect(closeForExit()).rejects.toMatchObject({
+      code: 'update_worker_cleanup_uncertain',
+    });
+    expect(allowsExit()).toBe(false);
+    child.finish();
+    await closeForExit();
+    expect(allowsExit()).toBe(true);
+  });
+
   it('constructs private OS-only detached worker input without accepting caller pins or process identity', async () => {
     vi.stubEnv('AZURE_OPENAI_API_KEY', 'synthetic-not-a-key');
     vi.stubEnv(

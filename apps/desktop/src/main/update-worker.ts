@@ -27,6 +27,8 @@ type Phase =
   | 'cancelling'
   | 'closed';
 let active = false;
+let closing = false;
+let ownedWorker: WorkerSession | null = null;
 
 export interface PreparedUpdateWorker {
   readonly failed: Promise<LocalError>;
@@ -36,12 +38,28 @@ export interface PreparedUpdateWorker {
   releaseForExit(): void;
 }
 
-// After the single-flight gate, this call owns the guard on both success and failure.
+export function updateWorkerAllowsExit(): boolean {
+  return ownedWorker === null || ownedWorker.allowsExit;
+}
+
+// Ordinary exit is terminal; workspace drainage for an update is not.
+export async function closeUpdateWorkerForExit(): Promise<void> {
+  closing = true;
+  const worker = ownedWorker;
+  if (worker && !worker.allowsExit) await worker.cancel();
+}
+
+// After the exit and single-flight gates, this call owns the guard on success and failure.
 export async function prepareUpdateWorker(
   guard: HeldUpdateRuntime,
   candidate: unknown,
   signal?: AbortSignal,
 ): Promise<PreparedUpdateWorker> {
+  if (closing)
+    throw new LocalError(
+      'update_worker_closing',
+      'Main exit has begun. No new installation handoff can start.',
+    );
   if (active)
     throw new LocalError(
       'update_worker_busy',
@@ -108,8 +126,10 @@ export async function prepareUpdateWorker(
     guard.assertHeld();
     session = new WorkerSession(guard, request, signal, () => {
       exited = true;
+      if (ownedWorker === session) ownedWorker = null;
       release();
     });
+    ownedWorker = session;
     await session.ready;
     guard.assertHeld();
     await guard.release();
@@ -305,6 +325,10 @@ class WorkerSession implements PreparedUpdateWorker {
       parent.pid === process.pid &&
       parent.creation_file_time === this.parent.creation_file_time
     );
+  }
+
+  get allowsExit(): boolean {
+    return this.exited || (this.phase === 'released' && this.error === null);
   }
 
   assertPrepared() {
