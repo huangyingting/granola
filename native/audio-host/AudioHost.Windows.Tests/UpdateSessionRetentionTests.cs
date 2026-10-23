@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Runtime.InteropServices;
+using System.Security.AccessControl;
 using System.Security.Cryptography;
 using System.Text.Json.Nodes;
 using WindowsAiNotes.AudioHost;
@@ -343,8 +344,13 @@ public sealed class UpdateSessionRetentionTests : IDisposable
     public void UnexpectedActiveSessionContentsAreNotEvenMovedIntoTheRetirementQueue(string kind)
     {
         var oldest = ThreeHealthy();
-        if (kind == "notes") File.WriteAllText(Path.Combine(oldest, "notes.sqlite"), "Synthetic unexpected notes must not move.");
-        else Directory.CreateDirectory(Path.Combine(oldest, "local profile"));
+        if (kind == "notes")
+        {
+            var path = Path.Combine(oldest, "notes.sqlite");
+            File.WriteAllText(path, "Synthetic unexpected notes must not move.");
+            new FileInfo(path).SetAccessControl(UpdatePrivateDirectory.LockSecurity());
+        }
+        else new DirectoryInfo(Path.Combine(oldest, "local profile")).Create(UpdatePrivateDirectory.Security());
         var before = Snapshot(oldest);
         var result = UpdateSessionRetention.Retire(Workers, Retired);
         Assert.Equal(0, result.Retired);

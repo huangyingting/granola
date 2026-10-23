@@ -74,9 +74,10 @@ public static class UpdateRuntimeStager
             foreach (var (relative, stream) in inventory.Files)
             {
                 var target = Path.Combine(destination, relative);
-                Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+                new DirectoryInfo(Path.GetDirectoryName(target)!).Create(UpdatePrivateDirectory.Security());
                 using var digest = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-                using (var output = new FileStream(target, FileMode.CreateNew, FileAccess.Write, FileShare.Read))
+                using (var output = new FileInfo(target).Create(FileMode.CreateNew, FileSystemRights.FullControl,
+                    FileShare.Read, 4096, FileOptions.WriteThrough, UpdatePrivateDirectory.LockSecurity()))
                 {
                     var buffer = ArrayPool<byte>.Shared.Rent(64 * 1024);
                     try
