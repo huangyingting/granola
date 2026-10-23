@@ -646,6 +646,8 @@ Linux 集成测试另执行实际编译的 API/Worker 子进程，以真实 Post
 
 PostgreSQL 进程故障另增加显式 opt-in 的破坏性隔离演练：仅接受完整容器 ID、literal-loopback 映射、空的专属数据库/cluster、非自动删除的 PostgreSQL 16 容器及持久 Docker volume；拒绝共享数据、bind mount 和 tmpfs。正常 fsync/full-page-write/synchronous-commit 下，真实已提交 HTTP 回应丢失及加密 SQLite 新输入之后，以 SIGKILL 同时打断控制事务和真实 Worker 的锁等待，离线 pg_controldata 必须证实未正常关闭。原容器/volume 重启后 cluster 身份不变、postmaster 更新，已提交笔记保留、未提交控制行消失，原 API/Worker 进程不崩溃，冻结重放不重复且保留新输入。已修复 checked-out pg client 无 error listener 导致的未捕获异常、ROLLBACK 失败覆盖原错误，以及连接中断被返回为不可重试 500；故障连接显式丢弃，原错误保留，已知连接/关闭/容量故障返回无敏感信息的 retryable 503，不覆盖 domain/permanent/query/protocol 错误，不自动重试事务或假定不确定 COMMIT 已回滚。CI 只在其他数据库测试全部结束后单独运行此演练；它不冒充断电、存储故障、PITR restore 或生产部署/容量验收。
 
+API 部署探针另分离进程存活与数据库就绪：兼容原 `/health` 数据库检查，新增无数据库依赖的 `/health/live`，各自保留每 IP 每分钟 120 次的独立预算，不占用普通 API 配额，也不因正常 API 饱和误报不健康。并发 readiness 只共享一个实际 SQL，不缓存成功或失败；真实 PostgreSQL SIGKILL 演练要求存活探针保持 200、就绪探针返回无敏感信息的可重试 503，恢复后原进程重新返回 200。启动迁移/独立删除档案准入和普通路由鉴权不变；这些是 API 探针，不是 Worker、Azure/storage 或生产发行认证。
+
 ## 15. 风险、降级与启动条件
 
 | 风险 | 策略与可接受降级 |

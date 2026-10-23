@@ -84,7 +84,9 @@ export async function createServer(
       .header('Cache-Control', 'no-store')
       .header('X-Request-ID', request.id);
     if (
-      !['/health', '/v1/client-config'].includes(request.routeOptions.url ?? '')
+      !['/health', '/health/live', '/v1/client-config'].includes(
+        request.routeOptions.url ?? '',
+      )
     ) {
       request.principal = await authenticate(request);
       setAuditActor(request.principal.userId);
@@ -162,19 +164,35 @@ export async function createServer(
   registerRealtime();
   registerRecordingRoutes(app, db, storage);
   registerChatRoutes(app, db, streams, shutdown.signal);
-  app.get('/health', async () => {
-    try {
-      await db.pool.query('SELECT 1');
-      return { status: 'ok' };
-    } catch {
-      throw new ServiceError(
-        'database_unavailable',
-        'Database health check failed.',
-        503,
-        true,
-      );
-    }
-  });
+  let healthQuery: Promise<void> | undefined;
+  app.get(
+    '/health',
+    { config: { rateLimit: { groupId: 'health/readiness' } } },
+    async () => {
+      try {
+        healthQuery ??= db.pool
+          .query('SELECT 1')
+          .then(() => undefined)
+          .finally(() => {
+            healthQuery = undefined;
+          });
+        await healthQuery;
+        return { status: 'ok' };
+      } catch {
+        throw new ServiceError(
+          'database_unavailable',
+          'Database health check failed.',
+          503,
+          true,
+        );
+      }
+    },
+  );
+  app.get(
+    '/health/live',
+    { config: { rateLimit: { groupId: 'health/liveness' } } },
+    async () => ({ status: 'ok' }),
+  );
   app.get('/v1/me', async (request) => ({ id: principal(request).userId }));
   app.get('/v1/usage', async (request) =>
     db.usage.snapshot(principal(request).userId),

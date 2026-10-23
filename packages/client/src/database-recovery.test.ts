@@ -191,6 +191,22 @@ describe.skipIf(!enabled)(
           durationMs: 90_000,
         });
         await child.observed('api_ready');
+        const base = child.base;
+        const probe = async (path: '/health' | '/health/live') => {
+          const response = await fetch(new URL(path, base), {
+            signal: AbortSignal.timeout(10_000),
+          });
+          const body: unknown = await response.json();
+          return { status: response.status, body };
+        };
+        expect(await probe('/health')).toEqual({
+          status: 200,
+          body: { status: 'ok' },
+        });
+        expect(await probe('/health/live')).toEqual({
+          status: 200,
+          body: { status: 'ok' },
+        });
         proxy = await responseLossProxy(child.base);
         directory = await mkdtemp(join(tmpdir(), 'notes-pg-crash-'));
         store = new LocalStore(join(directory, 'notes.sqlite'), key);
@@ -293,6 +309,14 @@ describe.skipIf(!enabled)(
         const failed = await unfinished;
         expect(original).toBeInstanceOf(Error);
         expect.soft(failed).toBe(original);
+        expect(await probe('/health/live')).toEqual({
+          status: 200,
+          body: { status: 'ok' },
+        });
+        expect(await probe('/health')).toMatchObject({
+          status: 503,
+          body: { code: 'database_unavailable', retryable: true },
+        });
         await expect.soft(engine.synchronize()).rejects.toMatchObject({
           code: 'database_unavailable',
           status: 503,
@@ -351,6 +375,10 @@ describe.skipIf(!enabled)(
         );
         expect(child.result).toBeUndefined();
         expect(worker.result).toBeUndefined();
+        expect(await probe('/health')).toEqual({
+          status: 200,
+          body: { status: 'ok' },
+        });
         await vi.waitFor(
           async () =>
             expect(

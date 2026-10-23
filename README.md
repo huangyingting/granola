@@ -1993,9 +1993,20 @@ Contracts are in `packages/contracts/src/server.ts`. Errors include `code`,
 `current_revision`. Create operations require an `Idempotency-Key` of 8-128
 letters, digits, dots, colons, underscores or hyphens.
 
+Use `/health/live` for API process liveness and `/health` for database readiness.
+Both are anonymous GET/HEAD endpoints without meeting content, with independent
+per-IP 120-request/minute budgets, separate from each other and ordinary API traffic.
+Overlapping readiness probes share one database query; neither successful nor
+failed results are cached. Readiness returns a sanitized retryable `503` during a
+database outage and recovers on the next successful query, while liveness remains
+`200`. Existing startup migration/deletion-archive admission still applies.
+These are API probes, not Worker endpoints or Azure/storage, signing or production
+acceptance. Keep each probe below its budget and configure bounded HTTP timeouts.
+
 | Method               | Path                                                                 | Input / behavior                                                                                                                   |
 | -------------------- | -------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
 | GET                  | `/health`                                                            | Database readiness; no authentication or meeting content                                                                           |
+| GET                  | `/health/live`                                                       | API process liveness; no database, authentication or meeting content                                                               |
 | GET                  | `/v1/client-config`                                                  | Public native OIDC registration; no secrets, bootstrap accounts or access grants                                                   |
 | GET                  | `/v1/me`, `/v1/workspaces`                                           | Current provisioned user and active memberships                                                                                    |
 | GET                  | `/v1/usage`                                                          | Current account's UTC-month allowances, known usage and uncertain holds                                                            |
