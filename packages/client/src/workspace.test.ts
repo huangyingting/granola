@@ -1151,6 +1151,72 @@ describe.skipIf(!databaseUrl)(
         Date.now(),
       );
     });
+    it('retains the account and queued edits through a retryable identity-key outage and automatically resumes', async () => {
+      await connect();
+      await activate();
+      const created = await create(
+        'Queued notes survive a key-service outage.',
+      );
+      const profile = controller.profile;
+      const scope = controller.scope;
+      const realFetch = globalThis.fetch;
+      const spy = vi
+        .spyOn(globalThis, 'fetch')
+        .mockImplementation(async (input, init) =>
+          String(input).startsWith(`${base}/`)
+            ? new Response(
+                JSON.stringify({
+                  code: 'identity_provider_unavailable',
+                  message: 'Synthetic key-service outage.',
+                  retryable: true,
+                  request_id: randomUUID(),
+                }),
+                { status: 503 },
+              )
+            : realFetch(input, init),
+        );
+      await expect(controller.synchronize()).rejects.toMatchObject({
+        code: 'identity_provider_unavailable',
+        status: 503,
+        retryable: true,
+      });
+      expect(controller.snapshot().connection).toMatchObject({
+        status: 'attention',
+        user_id: actor.user_id,
+        active_workspace: actor.workspace_id,
+        unsent_count: 1,
+        error: { code: 'identity_provider_unavailable', retryable: true },
+      });
+      expect(controller.snapshot().selected).toMatchObject({
+        content: richTextFromPlainText(
+          'Queued notes survive a key-service outage.',
+        ),
+      });
+      expect(controller.profile).toBe(profile);
+      expect(controller.scope).toBe(scope);
+      expect(accountSession().summary().status).toBe('active');
+      expect(issuer.state.refreshCalls).toBe(0);
+      const calls = spy.mock.calls.length;
+      await expect(controller.synchronize()).rejects.toMatchObject({
+        code: 'sync_backoff',
+      });
+      expect(spy.mock.calls).toHaveLength(calls);
+      expect(controller.snapshot().connection.next_retry_at).toBeGreaterThan(
+        Date.now(),
+      );
+      spy.mockRestore();
+      controller.start();
+      await vi.waitFor(
+        () => expect(controller.snapshot().connection.status).toBe('ready'),
+        { timeout: 5000 },
+      );
+      expect(
+        (await db.document(actor.user_id, created.selected_id!)).notes,
+      ).toBe('Queued notes survive a key-service outage.');
+      expect(controller.snapshot().connection.unsent_count).toBe(0);
+      expect(issuer.state.refreshCalls).toBe(0);
+      expect(accountSession().summary().status).toBe('active');
+    }, 10_000);
     it('does not replace a cached account with a different browser identity without disconnecting first', async () => {
       await seed();
       await connect();

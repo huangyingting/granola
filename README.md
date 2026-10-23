@@ -2000,6 +2000,17 @@ identity lookup; exhausted requests receive a typed retryable `429` and
 precedes body parsing, including malformed JSON, and admitted payloads are
 forwarded unchanged. These are per-instance budgets, not a cluster-wide limiter.
 
+Remote OIDC key-fetch, network, timeout and unusable key-document failures fail
+closed with retryable `503 identity_provider_unavailable`, not an invalid-login
+`401`. Diagnostics contain only the error code and generated request ID. The
+five-second fetch timeout and JOSE cache/cooldown remain unchanged; fresh cached
+keys can still verify tokens during an outage. Invalid signatures, claims or
+scopes and missing/ambiguous matching keys remain nonretryable `401`, without
+identity lookup. Desktop synchronization retains the active account and queued
+notes, backs off and resumes after availability returns instead of forcing a
+token refresh. Loopback key-service recovery coverage does not replace production
+OIDC/TLS acceptance.
+
 Use `/health/live` for API process liveness and `/health` for database readiness.
 Both are anonymous GET/HEAD endpoints without meeting content, with independent
 per-IP 120-request/minute budgets, separate from each other and ordinary API traffic.

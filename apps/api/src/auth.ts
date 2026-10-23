@@ -1,4 +1,9 @@
-import { createRemoteJWKSet, jwtVerify } from 'jose';
+import {
+  createRemoteJWKSet,
+  errors,
+  jwtVerify,
+  type JWTVerifyGetKey,
+} from 'jose';
 import type { FastifyRequest } from 'fastify';
 import type { Database } from '@windows-ai-notes/db';
 import {
@@ -104,11 +109,27 @@ export function loadAuthConfig(
   };
 }
 
+class IdentityKeysUnavailable extends Error {}
+
 export function createAuthenticator(config: AuthConfig, db: Database) {
-  const keys =
+  const remoteKeys =
     config.mode === 'oidc'
       ? createRemoteJWKSet(new URL(config.jwksUrl!), { timeoutDuration: 5000 })
       : null;
+  const keys: JWTVerifyGetKey | null = remoteKeys
+    ? async (header, token) => {
+        try {
+          return await remoteKeys(header, token);
+        } catch (error) {
+          if (
+            error instanceof errors.JWKSNoMatchingKey ||
+            error instanceof errors.JWKSMultipleMatchingKeys
+          )
+            throw error;
+          throw new IdentityKeysUnavailable();
+        }
+      }
+    : null;
   return async (request: FastifyRequest): Promise<Principal> => {
     if (config.mode === 'development') {
       const subject = resourceId.safeParse(request.headers['x-dev-subject']);
@@ -159,7 +180,21 @@ export function createAuthenticator(config: AuthConfig, db: Database) {
       subject = payload.sub;
       expiresAt = payload.exp * 1000;
       if (expiresAt <= Date.now()) throw new Error('Expired token.');
-    } catch {
+    } catch (error) {
+      if (error instanceof IdentityKeysUnavailable) {
+        console.error(
+          JSON.stringify({
+            code: 'identity_provider_unavailable',
+            request_id: request.id,
+          }),
+        );
+        throw new ServiceError(
+          'identity_provider_unavailable',
+          'The identity provider keys are temporarily unavailable. Retry this request.',
+          503,
+          true,
+        );
+      }
       throw new ServiceError(
         'unauthorized',
         'The access token failed issuer, audience, signature, time or scope validation.',
