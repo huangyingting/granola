@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { taskOutcomesSnapshotSchema } from './operations.js';
+import {
+  taskOutcomesSnapshotSchema,
+  taskOutcomeKindsSnapshotSchema,
+} from './operations.js';
 
 const empty = {
   succeeded: '0',
@@ -48,6 +51,108 @@ describe('deployment task-outcome contract', () => {
       },
     ])
       expect(taskOutcomesSnapshotSchema.safeParse(value).success).toBe(false);
+  });
+
+  describe('deployment task-kind outcome contract', () => {
+    const detailed = {
+      ...snapshot,
+      breakdown: 'job_kind',
+      entries: {
+        jobs: {
+          summary: empty,
+          transcription: empty,
+          recording_transcription: empty,
+          unclassified: empty,
+        },
+        chat: empty,
+      },
+    };
+    it('requires every fixed label, preserves unknown historical entries and keeps aggregate v1 distinct', () => {
+      const legacy = {
+        ...empty,
+        failed: '3',
+        non_cancelled_terminal_entries: '3',
+        success_share_ppm: 0,
+      };
+      const value = {
+        ...detailed,
+        entries: {
+          ...detailed.entries,
+          jobs: { ...detailed.entries.jobs, unclassified: legacy },
+        },
+      };
+      expect(taskOutcomeKindsSnapshotSchema.parse(value)).toEqual(value);
+      expect(taskOutcomesSnapshotSchema.safeParse(value).success).toBe(false);
+      expect(taskOutcomeKindsSnapshotSchema.safeParse(snapshot).success).toBe(
+        false,
+      );
+      for (const jobs of [
+        {},
+        { ...detailed.entries.jobs, private_identifier: empty },
+        { ...detailed.entries.jobs, summary: { ...empty, notes: 'private' } },
+      ]) {
+        expect(
+          taskOutcomeKindsSnapshotSchema.safeParse({
+            ...detailed,
+            entries: { ...detailed.entries, jobs },
+          }).success,
+        ).toBe(false);
+      }
+    });
+    it.each([
+      'summary',
+      'transcription',
+      'recording_transcription',
+      'unclassified',
+    ])('validates exact terminal accounting for %s', (kind) => {
+      const counts = {
+        succeeded: '9007199254740993',
+        failed: '18014398509481986',
+        cancelled: '9',
+        non_cancelled_terminal_entries: '27021597764222979',
+        success_share_ppm: 333333,
+      };
+      for (const [change, valid] of [
+        [{}, true],
+        [{ failed: 'private' }, false],
+        [{ non_cancelled_terminal_entries: '0' }, false],
+        [{ success_share_ppm: 333334 }, false],
+      ] as const) {
+        expect(
+          taskOutcomeKindsSnapshotSchema.safeParse({
+            ...detailed,
+            entries: {
+              ...detailed.entries,
+              jobs: {
+                ...detailed.entries.jobs,
+                [kind]: { ...counts, ...change },
+              },
+            },
+          }).success,
+        ).toBe(valid);
+      }
+    });
+    it('retains recovery quarantine and truthful window checks for the breakdown', () => {
+      expect(
+        taskOutcomeKindsSnapshotSchema.parse({
+          ...detailed,
+          status: 'recovery_pending',
+          entries: null,
+        }).entries,
+      ).toBeNull();
+      for (const change of [
+        { status: 'recovery_pending' },
+        { entries: null },
+        { window_complete: false },
+        { coverage_since: '2026-06-21T12:00:00.123456Z' },
+        { window_start: '2026-06-19T12:00:00.123457Z' },
+      ]) {
+        expect(
+          taskOutcomeKindsSnapshotSchema.safeParse({ ...detailed, ...change })
+            .success,
+        ).toBe(false);
+      }
+    });
   });
   it('checks the exact non-cancelled denominator and truncated millionths above safe integers', () => {
     const jobs = {

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { readFile } from 'node:fs/promises';
 import {
   afterAll,
   afterEach,
@@ -14,6 +15,7 @@ import {
 import {
   operationsSnapshotSchema,
   taskOutcomesSnapshotSchema,
+  taskOutcomeKindsSnapshotSchema,
 } from '@windows-ai-notes/contracts/operations';
 import { Database, type Transaction } from './index.js';
 
@@ -97,6 +99,20 @@ describe.skipIf(!databaseUrl)('transactional deployment task outcomes', () => {
     );
     return id;
   }
+  async function beforeKindCapture() {
+    const previous = (
+      await readFile(
+        new URL('../migrations/011_audit.sql', import.meta.url),
+        'utf8',
+      )
+    ).match(/CREATE FUNCTION write_audit_event[\s\S]*?\n\$\$;/)?.[0];
+    if (!previous)
+      throw new Error('The previous audit writer fixture is missing.');
+    await db.pool
+      .query(`${previous.replace('CREATE FUNCTION', 'CREATE OR REPLACE FUNCTION')}
+      ALTER TABLE audit_events DROP COLUMN job_kind;
+      DELETE FROM schema_migrations WHERE version=17;`);
+  }
   it('reads a consistent read-only snapshot, with null success share for an empty denominator', async () => {
     const original = db.transaction.bind(db);
     vi.spyOn(db, 'transaction').mockImplementation(
@@ -125,6 +141,155 @@ describe.skipIf(!databaseUrl)('transactional deployment task outcomes', () => {
       entries: { jobs: empty, chat: empty },
     });
     expect(snapshot.window_start).toBe(snapshot.coverage_since);
+    expect((await db.taskOutcomeKinds()).entries).toEqual({
+      jobs: {
+        summary: empty,
+        transcription: empty,
+        recording_transcription: empty,
+        unclassified: empty,
+      },
+      chat: empty,
+    });
+  });
+  it('captures each fixed job kind at the terminal entry and retains it after kind changes and erasure', async () => {
+    const source = await fixture();
+    const ids: string[] = [];
+    for (const [kind, state] of [
+      ['summary', 'failed'],
+      ['transcription', 'succeeded'],
+      ['recording_transcription', 'cancelled'],
+    ] as const) {
+      const entry = await job(source);
+      ids.push(entry.id);
+      await db.pool.query('UPDATE jobs SET kind=$2,state=$3 WHERE id=$1', [
+        entry.id,
+        kind,
+        state,
+      ]);
+    }
+    await db.pool.query("UPDATE jobs SET kind='transcription' WHERE id=$1", [
+      ids[0],
+    ]);
+    const measured = await db.taskOutcomeKinds();
+    expect(measured).toMatchObject({
+      breakdown: 'job_kind',
+      entries: {
+        jobs: {
+          summary: {
+            ...empty,
+            failed: '1',
+            non_cancelled_terminal_entries: '1',
+            success_share_ppm: 0,
+          },
+          transcription: {
+            ...empty,
+            succeeded: '1',
+            non_cancelled_terminal_entries: '1',
+            success_share_ppm: 1_000_000,
+          },
+          recording_transcription: { ...empty, cancelled: '1' },
+          unclassified: empty,
+        },
+        chat: empty,
+      },
+    });
+    const aggregate = await db.taskOutcomes();
+    if (!measured.entries || !aggregate.entries)
+      throw new Error('Expected observing task outcomes.');
+    for (const field of [
+      'succeeded',
+      'failed',
+      'cancelled',
+      'non_cancelled_terminal_entries',
+    ] as const)
+      expect(
+        Object.values(measured.entries.jobs)
+          .reduce((total, entry) => total + BigInt(entry[field]), 0n)
+          .toString(),
+      ).toBe(aggregate.entries.jobs[field]);
+    expect(
+      (await db.audit.page()).events.every((event) => !('job_kind' in event)),
+    ).toBe(true);
+    await db.deleteDocument(source.user.user_id, source.document.id);
+    await db.pool.query('DELETE FROM jobs WHERE document_id=$1', [
+      source.document.id,
+    ]);
+    const erased = await db.taskOutcomeKinds();
+    expect(erased.entries).toEqual(measured.entries);
+    expect(erased.coverage_since).toBe(measured.coverage_since);
+    for (const marker of [
+      privateMarker,
+      source.document.id,
+      source.user.user_id,
+      ...ids,
+    ])
+      expect(JSON.stringify(erased)).not.toContain(marker);
+    await expect(
+      db.pool.query(
+        "UPDATE audit_events SET job_kind='private' WHERE resource_type='job'",
+      ),
+    ).rejects.toMatchObject({ code: '23514' });
+    await expect(
+      db.pool.query(
+        "UPDATE audit_events SET job_kind='summary' WHERE resource_type='document'",
+      ),
+    ).rejects.toMatchObject({ code: '23514' });
+  });
+  it('upgrades real pre-kind audit history without guessing kinds, losing erased outcomes or resetting coverage', async () => {
+    const source = await fixture();
+    const erased = await job(source),
+      retained = await job(source);
+    const coverage = (await db.taskOutcomes()).coverage_since;
+    await beforeKindCapture();
+    await db.pool.query("UPDATE jobs SET state='failed' WHERE id=$1", [
+      erased.id,
+    ]);
+    await db.pool.query("UPDATE jobs SET state='cancelled' WHERE id=$1", [
+      retained.id,
+    ]);
+    await db.pool.query('DELETE FROM jobs WHERE id=$1', [erased.id]);
+    await expect(db.taskOutcomeKinds()).rejects.toThrow(
+      'Apply database migrations',
+    );
+    await db.migrate();
+    const upgraded = await db.taskOutcomeKinds();
+    expect(upgraded.coverage_since).toBe(coverage);
+    expect(upgraded.entries?.jobs).toEqual({
+      summary: empty,
+      transcription: empty,
+      recording_transcription: empty,
+      unclassified: {
+        ...empty,
+        failed: '1',
+        cancelled: '1',
+        non_cancelled_terminal_entries: '1',
+        success_share_ppm: 0,
+      },
+    });
+    expect((await db.taskOutcomes()).entries?.jobs).toEqual(
+      upgraded.entries?.jobs.unclassified,
+    );
+    await db.pool.query("UPDATE jobs SET state='queued' WHERE id=$1", [
+      retained.id,
+    ]);
+    await db.pool.query("UPDATE jobs SET state='succeeded' WHERE id=$1", [
+      retained.id,
+    ]);
+    expect((await db.taskOutcomeKinds()).entries?.jobs.summary.succeeded).toBe(
+      '1',
+    );
+    await db.migrate();
+    const restarted = new Database(scopedUrl);
+    try {
+      expect((await restarted.taskOutcomeKinds()).coverage_since).toBe(
+        coverage,
+      );
+      expect((await restarted.taskOutcomeKinds()).entries).toEqual(
+        (await db.taskOutcomeKinds()).entries,
+      );
+    } finally {
+      await restarted.close();
+    }
   });
   it('counts terminal entries, not no-op writes, transient retries, lease replacements or rolled-back work', async () => {
     const source = await fixture();
@@ -171,6 +336,9 @@ describe.skipIf(!databaseUrl)('transactional deployment task outcomes', () => {
       non_cancelled_terminal_entries: '2',
       success_share_ppm: 500_000,
     });
+    expect((await db.taskOutcomeKinds()).entries?.jobs.summary).toEqual(
+      snapshot.entries?.jobs,
+    );
     expect((await db.operations()).jobs).toMatchObject({
       succeeded: '1',
       failed: '0',
@@ -273,6 +441,9 @@ describe.skipIf(!databaseUrl)('transactional deployment task outcomes', () => {
       non_cancelled_terminal_entries: '6',
       success_share_ppm: 1_000_000,
     });
+    expect((await db.taskOutcomeKinds()).entries?.jobs.summary.succeeded).toBe(
+      '6',
+    );
   });
   it('uses a database-clock 24-hour event window, excludes future entries and keeps retention cleanup bounded', async () => {
     const source = await fixture();
@@ -328,6 +499,7 @@ describe.skipIf(!databaseUrl)('transactional deployment task outcomes', () => {
         'UPDATE deletion_recovery_state SET usage_review_required=$1',
         [pending],
       );
+      await beforeKindCapture();
       await db.pool.query(`DROP TABLE task_outcome_coverage;
       DROP INDEX audit_events_terminal_outcomes;
       DELETE FROM schema_migrations WHERE version=16`);
@@ -376,12 +548,31 @@ describe.skipIf(!databaseUrl)('transactional deployment task outcomes', () => {
     expect(snapshot.entries?.jobs).toEqual({ ...empty, cancelled: '1' });
     expect(result.stdout).not.toContain(privateMarker);
     expect(result.stdout).not.toContain(scopedUrl);
+    expect(result.stdout).not.toContain('breakdown');
+    const detailed = run('task-outcomes', '--by-kind');
+    expect(detailed.status, detailed.stderr).toBe(0);
+    expect(
+      taskOutcomeKindsSnapshotSchema.parse(JSON.parse(detailed.stdout)).entries
+        ?.jobs.summary,
+    ).toEqual({ ...empty, cancelled: '1' });
+    expect(detailed.stdout).not.toContain(privateMarker);
+    expect(detailed.stdout).not.toContain(scopedUrl);
     for (const option of [
       ['--user-id', randomUUID()],
       ['--limit', '10'],
       ['--restored-backup'],
     ]) {
       const invalid = run('task-outcomes', ...option);
+      expect(invalid.status).toBe(1);
+      expect(invalid.stdout).toBe('');
+      expect(invalid.stderr).toContain('invalid_task_outcomes');
+      const detailedInvalid = run('task-outcomes', '--by-kind', ...option);
+      expect(detailedInvalid.status).toBe(1);
+      expect(detailedInvalid.stdout).toBe('');
+      expect(detailedInvalid.stderr).toContain('invalid_task_outcomes');
+    }
+    for (const command of ['migrate', 'provision', 'operations', 'audit']) {
+      const invalid = run(command, '--by-kind');
       expect(invalid.status).toBe(1);
       expect(invalid.stdout).toBe('');
       expect(invalid.stderr).toContain('invalid_task_outcomes');
@@ -403,6 +594,11 @@ describe.skipIf(!databaseUrl)('transactional deployment task outcomes', () => {
       status: 'recovery_pending',
       entries: null,
     });
+    const detailedPending = run('task-outcomes', '--by-kind');
+    expect(detailedPending.status, detailedPending.stderr).toBe(0);
+    expect(
+      taskOutcomeKindsSnapshotSchema.parse(JSON.parse(detailedPending.stdout)),
+    ).toMatchObject({ status: 'recovery_pending', entries: null });
   });
   it('fails explicitly for missing coverage or inconsistent database clocks instead of fabricating healthy zeroes', async () => {
     await db.pool.query(
@@ -411,8 +607,12 @@ describe.skipIf(!databaseUrl)('transactional deployment task outcomes', () => {
     await expect(db.taskOutcomes()).rejects.toThrow(
       'observation window is inconsistent',
     );
+    await expect(db.taskOutcomeKinds()).rejects.toThrow(
+      'observation window is inconsistent',
+    );
     await db.pool.query('DELETE FROM task_outcome_coverage');
     await expect(db.taskOutcomes()).rejects.toThrow('did not return a row');
+    await expect(db.taskOutcomeKinds()).rejects.toThrow('did not return a row');
     const failed = spawnSync(process.execPath, [cli, 'task-outcomes'], {
       env: { ...process.env, DATABASE_URL: scopedUrl },
       encoding: 'utf8',
@@ -437,5 +637,10 @@ describe.skipIf(!databaseUrl)('transactional deployment task outcomes', () => {
     const after = await db.taskOutcomes();
     expect(after).toMatchObject({ status: 'recovery_pending', entries: null });
     expect(after.coverage_since).toBe(before.coverage_since);
+    expect(await db.taskOutcomeKinds()).toMatchObject({
+      status: 'recovery_pending',
+      entries: null,
+      coverage_since: before.coverage_since,
+    });
   });
 });

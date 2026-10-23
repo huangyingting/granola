@@ -848,6 +848,9 @@ describe.skipIf(!url || !endpoint)(
       await db.deletions.initialize(signal());
       const before = await db.taskOutcomes();
       expect(before.entries?.jobs.failed).toBe('1');
+      expect((await db.taskOutcomeKinds()).entries?.jobs.summary.failed).toBe(
+        '1',
+      );
       const verify = vi
         .spyOn(archive, 'verify')
         .mockRejectedValueOnce(
@@ -866,6 +869,11 @@ describe.skipIf(!url || !endpoint)(
         coverage_since: before.coverage_since,
       });
       expect((await db.operations()).jobs.failed).toBe('1');
+      expect(await db.taskOutcomeKinds()).toMatchObject({
+        status: 'recovery_pending',
+        entries: null,
+        coverage_since: before.coverage_since,
+      });
       verify.mockRestore();
       await expect(db.deletions.recover(signal())).rejects.toMatchObject({
         code: 'deletion_usage_review_required',
@@ -883,6 +891,13 @@ describe.skipIf(!url || !endpoint)(
         },
       });
       expect(recovered.coverage_since > before.coverage_since).toBe(true);
+      expect(await db.taskOutcomeKinds()).toMatchObject({
+        status: 'observing',
+        coverage_since: recovered.coverage_since,
+        entries: {
+          jobs: { summary: { failed: '0' }, unclassified: { failed: '0' } },
+        },
+      });
       await db.deletions.reviewUsage(
         digest({ fixture: 'outcome-restart-reviewed' }, true),
         signal(),
@@ -933,6 +948,9 @@ describe.skipIf(!url || !endpoint)(
       expect(after.coverage_since > before.coverage_since).toBe(true);
       expect(after.status).toBe('observing');
       expect(after.entries?.jobs.cancelled).toBe('0');
+      expect(
+        (await db.taskOutcomeKinds()).entries?.jobs.summary.cancelled,
+      ).toBe('0');
       expect(
         (
           await db.pool.query(`SELECT count(*)::text n FROM audit_events
@@ -1164,6 +1182,16 @@ describe.skipIf(!url || !endpoint)(
             restored.deletions.recover(AbortSignal.timeout(60_000), true),
           ).rejects.toMatchObject({ code: 'deletion_usage_review_required' });
           const restoredOutcomes = await restored.taskOutcomes();
+          expect(await restored.taskOutcomeKinds()).toMatchObject({
+            status: 'observing',
+            coverage_since: restoredOutcomes.coverage_since,
+            entries: {
+              jobs: {
+                summary: { failed: '0', cancelled: '0' },
+                unclassified: { failed: '0', cancelled: '0' },
+              },
+            },
+          });
           expect(
             restoredOutcomes.coverage_since > beforeDump.coverage_since,
           ).toBe(true);

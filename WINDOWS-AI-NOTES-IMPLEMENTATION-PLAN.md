@@ -516,6 +516,8 @@ request ID 串联 API、job、worker 和 provider request，生产 trace 默认�
 
 月成本按录音小时、双路识别方式、最终稿重处理比例、模型输入输出 tokens、embedding、对象保留和流量计算。实时加批量可能重复计费，必须单独列项；没有选定供应商与样本前不承诺每小时价格。
 
+运维任务结果另提供可选 `pnpm task:outcomes --by-kind`：迁移 017 在同一生命周期审计事务捕获固定 job kind，分别报告 summary、transcription、recording_transcription 及没有已捕获分类的 unclassified 历史，chat 仍独立。每组复用精确计数、非取消分母和空分母 null；旧聚合报告及 audit v1 形状保持不变。分类不依赖当前 job 是否保留或后来变更，不猜测历史、不重置覆盖起点，沿用只读 repeatable-read、完整恢复前暂停和验证重放后重建窗口。此输出支持区分转写/总结故障，不冒充未保存本地录音检测、供应商成功率、真实告警送达或生产容量验收。
+
 ### 11.3 发布和安装包
 
 首批 Windows x64 构建采用独立 Windows CI runner；固定依赖和 AudioHost 发布产物。Electron、helper、原生依赖一起打包，并验证清洁 Windows 机器上的启动和录音。

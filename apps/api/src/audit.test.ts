@@ -697,14 +697,14 @@ describe.skipIf(!databaseUrl)(
         auditPageSchema.safeParse({ ...first, notes: secret }).success,
       ).toBe(false);
     });
-    it('keeps SQL action allowlists and persisted columns aligned with the strict body-free contract', async () => {
+    it('keeps SQL allowlists and internal classification body-free without changing audit v1', async () => {
       const user = await owner();
       const columns = await db.pool.query<{ column_name: string }>(
         `SELECT column_name FROM information_schema.columns
          WHERE table_schema=current_schema() AND table_name='audit_events'`,
       );
       expect(columns.rows.map((row) => row.column_name).sort()).toEqual(
-        [...auditEventSchema.keyof().options].sort(),
+        [...auditEventSchema.keyof().options, 'job_kind'].sort(),
       );
       await db.pool.query(
         `INSERT INTO audit_events(action,resource_type,resource_id,source)
@@ -712,6 +712,7 @@ describe.skipIf(!databaseUrl)(
         [user.user_id, [...auditActionSchema.options]],
       );
       const rows = await events();
+      expect(rows.every((row) => !('job_kind' in row))).toBe(true);
       for (const action of auditActionSchema.options)
         expect(rows.some((row) => row.action === action)).toBe(true);
       await expect(
@@ -721,6 +722,13 @@ describe.skipIf(!databaseUrl)(
           [secret, user.user_id],
         ),
       ).rejects.toThrow();
+      await expect(
+        db.pool.query(
+          `INSERT INTO audit_events(action,resource_type,resource_id,source,job_kind)
+        VALUES('job_created','job',$1,'system',$2)`,
+          [randomUUID(), secret],
+        ),
+      ).rejects.toMatchObject({ code: '23514' });
     });
     it('fails audit writes atomically rather than committing unaudited mutations', async () => {
       const user = await owner();

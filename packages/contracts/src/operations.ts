@@ -90,17 +90,42 @@ const terminalEntriesSchema = z
       });
   });
 
-export const taskOutcomesSnapshotSchema = z
-  .strictObject({
-    version: z.literal(1),
-    scope: z.literal('deployment'),
-    basis: z.literal('audit_terminal_state_entries'),
-    status: z.enum(['observing', 'recovery_pending']),
-    observed_at: z.iso.datetime({ precision: 6 }),
-    coverage_since: z.iso.datetime({ precision: 6 }),
-    window_start: z.iso.datetime({ precision: 6 }),
-    window_hours: z.literal(24),
-    window_complete: z.boolean(),
+const taskOutcomesHeaderSchema = z.strictObject({
+  version: z.literal(1),
+  scope: z.literal('deployment'),
+  basis: z.literal('audit_terminal_state_entries'),
+  status: z.enum(['observing', 'recovery_pending']),
+  observed_at: z.iso.datetime({ precision: 6 }),
+  coverage_since: z.iso.datetime({ precision: 6 }),
+  window_start: z.iso.datetime({ precision: 6 }),
+  window_hours: z.literal(24),
+  window_complete: z.boolean(),
+});
+function consistentWindow(value: z.infer<typeof taskOutcomesHeaderSchema>) {
+  const end = Date.parse(value.observed_at);
+  if (!Number.isFinite(end)) return false;
+  const cutoff =
+    new Date(end - 86_400_000).toISOString().slice(0, 23) +
+    value.observed_at.slice(23);
+  const complete = value.coverage_since <= cutoff;
+  return (
+    value.coverage_since <= value.observed_at &&
+    value.window_start ===
+      (value.coverage_since > cutoff ? value.coverage_since : cutoff) &&
+    value.window_complete === complete
+  );
+}
+const windowMessage = 'Task-outcome observation window is inconsistent.';
+const recoveryMessage = 'Recovery-pending observations must not report counts.';
+function consistentRecovery(value: {
+  status: 'observing' | 'recovery_pending';
+  entries: unknown;
+}) {
+  return (value.status === 'recovery_pending') === (value.entries === null);
+}
+
+export const taskOutcomesSnapshotSchema = taskOutcomesHeaderSchema
+  .extend({
     entries: z
       .strictObject({
         jobs: terminalEntriesSchema,
@@ -108,23 +133,27 @@ export const taskOutcomesSnapshotSchema = z
       })
       .nullable(),
   })
-  .refine(
-    (value) =>
-      (value.status === 'recovery_pending') === (value.entries === null),
-    'Recovery-pending observations must not report counts.',
-  )
-  .refine((value) => {
-    const end = Date.parse(value.observed_at);
-    if (!Number.isFinite(end)) return false;
-    const cutoff =
-      new Date(end - 86_400_000).toISOString().slice(0, 23) +
-      value.observed_at.slice(23);
-    const complete = value.coverage_since <= cutoff;
-    return (
-      value.coverage_since <= value.observed_at &&
-      value.window_start ===
-        (value.coverage_since > cutoff ? value.coverage_since : cutoff) &&
-      value.window_complete === complete
-    );
-  }, 'Task-outcome observation window is inconsistent.');
+  .refine(consistentRecovery, recoveryMessage)
+  .refine(consistentWindow, windowMessage);
 export type TaskOutcomesSnapshot = z.infer<typeof taskOutcomesSnapshotSchema>;
+
+export const taskOutcomeKindsSnapshotSchema = taskOutcomesHeaderSchema
+  .extend({
+    breakdown: z.literal('job_kind'),
+    entries: z
+      .strictObject({
+        jobs: z.strictObject({
+          summary: terminalEntriesSchema,
+          transcription: terminalEntriesSchema,
+          recording_transcription: terminalEntriesSchema,
+          unclassified: terminalEntriesSchema,
+        }),
+        chat: terminalEntriesSchema,
+      })
+      .nullable(),
+  })
+  .refine(consistentRecovery, recoveryMessage)
+  .refine(consistentWindow, windowMessage);
+export type TaskOutcomeKindsSnapshot = z.infer<
+  typeof taskOutcomeKindsSnapshotSchema
+>;

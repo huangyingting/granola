@@ -33,6 +33,7 @@ async function main() {
       limit: { type: 'string' },
       'restored-backup': { type: 'boolean' },
       'proof-sha256': { type: 'string' },
+      'by-kind': { type: 'boolean' },
     },
   });
   const archiveConfig = loadDeletionArchiveConfig(process.env, false);
@@ -42,6 +43,12 @@ async function main() {
     if (positionals.length !== 1)
       throw new Error(
         'Choose migrate, provision, usage-limits, audio-retention, operations, task-outcomes, audit, deletion-init, deletion-recover or deletion-usage-reviewed.',
+      );
+    if (values['by-kind'] && positionals[0] !== 'task-outcomes')
+      throw new ServiceError(
+        'invalid_task_outcomes',
+        '--by-kind is supported only for task-outcomes.',
+        400,
       );
     if (positionals[0] === 'migrate') {
       await database.migrate();
@@ -96,13 +103,23 @@ async function main() {
         );
       console.log(JSON.stringify(await database.operations()));
     } else if (positionals[0] === 'task-outcomes') {
-      if (tokens.some((token) => token.kind === 'option'))
+      if (
+        tokens.some(
+          (token) => token.kind === 'option' && token.name !== 'by-kind',
+        )
+      )
         throw new ServiceError(
           'invalid_task_outcomes',
-          'Task outcomes are deployment-wide and do not accept filters or other options.',
+          'Task outcomes are deployment-wide and accept only --by-kind.',
           400,
         );
-      console.log(JSON.stringify(await database.taskOutcomes()));
+      console.log(
+        JSON.stringify(
+          values['by-kind']
+            ? await database.taskOutcomeKinds()
+            : await database.taskOutcomes(),
+        ),
+      );
     } else if (positionals[0] === 'audit') {
       if (
         tokens.some(

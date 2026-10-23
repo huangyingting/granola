@@ -1742,11 +1742,12 @@ and real alert routing/delivery remain release gates.
 pnpm build
 pnpm db:migrate
 pnpm task:outcomes
+pnpm task:outcomes --by-kind
 ```
 
 This separate, version-1 deployment-only JSON report reuses transactional lifecycle
 audits, not retained job rows or best-effort logs. It adds no HTTP endpoint and
-accepts no options. It returns only fixed labels, timestamps, counts and ratios;
+accepts only the optional `--by-kind` breakdown. It returns only fixed labels, timestamps, counts and ratios;
 no actor, document, job, turn, provider or request IDs are projected.
 
 For jobs and chat separately, the **preceding 24 hours** of terminal SQL state
@@ -1756,8 +1757,19 @@ entries are counted as `succeeded`, `failed` or `cancelled`. The explicit
 succeeded × 1,000,000 / denominator, truncated down; 1,000,000 means 100%.
 An empty denominator, including a cancellation-only window, has a **null** share,
 not zero or 100%. Cancellations remain visible but are not silently classified
-as provider failures. Jobs combine all supported job kinds; this is not a
-per-provider or per-transcription/summary breakdown.
+as provider failures. The unchanged default report combines all supported job kinds.
+With `--by-kind`, the separate strict `breakdown=job_kind` shape splits jobs into
+`summary`, `transcription`, `recording_transcription` and `unclassified`, with chat
+still reported separately. Each group has its own exact denominator and null
+empty share; these are not provider-attempt or quality metrics.
+
+Migration **017** captures a fixed job-kind label when the lifecycle audit is
+written, in the same transaction. Later job changes or erasure do not rewrite that
+classification. Historical entries without a captured kind remain explicitly
+`unclassified`, including entries for jobs that are still present: the command
+never guesses old kinds from current job rows. The upgrade neither backfills
+history nor resets the existing coverage boundary. Audit inspection's existing
+version-1 event shape is unchanged.
 
 These are **state-entry observations, not unique accepted-task, provider-attempt,
 billing or lifetime success rates**. A failed task resumed to success contributes
@@ -1793,8 +1805,10 @@ deletion archive is not a metrics or billing authority.
 
 Collectors must alert on non-observing status, missing/failed polls and incomplete
 windows, and require a meaningful sample size before judging the success share.
-Route recording/transcription/summary faults using their task-specific lifecycle
-and worker diagnostics, not this combined job ratio alone. Actual thresholds,
+Use the per-kind breakdown alongside recording-specific lifecycle and worker
+diagnostics to distinguish transcription and summary faults; it does not detect
+unsaved local recordings or identify individual failed tasks. Do not route all
+faults from the combined job ratio alone. Actual thresholds,
 retention of external aggregate snapshots, alert delivery and production
 load/restore drills remain deployment responsibilities.
 
