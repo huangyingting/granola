@@ -111,6 +111,12 @@ jobs:
         run: dotnet test native/audio-host/AudioHost.Windows.Tests/AudioHost.Windows.Tests.csproj --configuration Release --no-build
       - run: pnpm build
       - run: pnpm test
+      - name: HTTP-date backoff in a verified non-UTC time zone
+        env:
+          TZ: Pacific/Honolulu
+        run: |
+          node -e "if (new Date('2030-01-01T00:00:00Z').getTimezoneOffset() !== 600) throw new Error('Expected the non-UTC backoff fixture time zone.');"
+          pnpm test packages/client/src/http.test.ts
       - run: pnpm format:check
       - name: Native formatting
         run: |

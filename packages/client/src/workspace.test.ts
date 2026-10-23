@@ -1152,6 +1152,40 @@ describe.skipIf(!databaseUrl)(
       expect(spy.mock.calls).toHaveLength(calls);
       expect(controller.snapshot().connection.next_retry_at).toBe(now + 2500);
     });
+    it('keeps a raw HTTP-date service floor under jitter without early sync or credential replay', async () => {
+      await connect();
+      await activate();
+      const now = Math.floor(Date.now() / 1000) * 1000;
+      vi.spyOn(Date, 'now').mockReturnValue(now);
+      vi.spyOn(Math, 'random').mockReturnValue(0.5);
+      const requests = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+        Response.json(
+          {
+            code: 'service_unavailable',
+            message: 'Synthetic date-form backoff.',
+            retryable: true,
+            request_id: randomUUID(),
+          },
+          {
+            status: 503,
+            headers: {
+              'Retry-After': new Date(now + 9000).toUTCString(),
+            },
+          },
+        ),
+      );
+      await expect(controller.synchronize()).rejects.toMatchObject({
+        code: 'service_unavailable',
+        retryAfterSeconds: 9,
+      });
+      expect(controller.snapshot().connection.next_retry_at).toBe(now + 9500);
+      await expect(controller.synchronize()).rejects.toMatchObject({
+        code: 'sync_backoff',
+      });
+      expect(requests).toHaveBeenCalledTimes(1);
+      expect(issuer.state.refreshCalls).toBe(0);
+      expect(accountSession().summary().status).toBe('active');
+    });
     it('retains the account and queued edits through a retryable identity-key outage and automatically resumes', async () => {
       await connect();
       await activate();

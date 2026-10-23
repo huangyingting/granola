@@ -244,6 +244,12 @@ does not authorize repeating paid AI work or replaying consumed refresh tokens.
 An early synchronization timer wake reschedules the remaining pause instead of
 losing automatic recovery.
 
+`Retry-After` accepts delay seconds or HTTP dates, including the two legacy
+date formats interpreted in UTC. Numeric compatibility, the five-minute cap and
+the default 30-second pause for an unspecified/invalid 429 delay are preserved.
+Expired dates add no service pause; local backoff/jitter still applies. A header
+never makes a nonretryable error eligible for automatic retry.
+
 Disconnecting clears all cached workspaces and local credentials transactionally.
 You can explicitly keep unsynced drafts as new device-only copies; pending
 deletions are not sent. Existing remote audio is not deleted by disconnect.

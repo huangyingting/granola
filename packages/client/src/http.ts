@@ -106,6 +106,66 @@ export async function responseJson<T>(
     reader.releaseLock();
   }
 }
+function httpDate(value: string, now: number): number {
+  let date = value.replace(
+    /^([A-Z][a-z]{2}) ([A-Z][a-z]{2}) ( \d|\d{2}) (\d{2}:\d{2}:\d{2}) (\d{4})$/,
+    (
+      _match,
+      name: string,
+      month: string,
+      day: string,
+      time: string,
+      year: string,
+    ) => `${name}, ${day.trim().padStart(2, '0')} ${month} ${year} ${time} GMT`,
+  );
+  const leap = date.endsWith(':60 GMT');
+  if (leap) date = date.replace(/:60 GMT$/, ':59 GMT');
+  date = date.replace(
+    /^(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday), (\d{2})-([A-Z][a-z]{2})-(\d{2}) (\d{2}:\d{2}:\d{2}) GMT$/,
+    (
+      _match,
+      name: string,
+      day: string,
+      month: string,
+      year: string,
+      time: string,
+    ) => {
+      // RFC 850 uses a rolling 50-year window, not Date.parse's fixed pivot.
+      const limit = new Date(now);
+      limit.setUTCFullYear(limit.getUTCFullYear() + 50);
+      const fullYear =
+        Math.floor(limit.getUTCFullYear() / 100) * 100 + Number(year);
+      const withYear = (value: number) =>
+        `${name.slice(0, 3)}, ${day} ${month} ${String(value).padStart(4, '0')} ${time} GMT`;
+      const candidate = withYear(fullYear);
+      return Date.parse(candidate) + (leap ? 1000 : 0) > limit.getTime()
+        ? withYear(fullYear - 100)
+        : candidate;
+    },
+  );
+  if (
+    !/^[A-Z][a-z]{2}, \d{2} [A-Z][a-z]{2} \d{4} \d{2}:\d{2}:\d{2} GMT$/.test(
+      date,
+    )
+  )
+    return NaN;
+  const instant = Date.parse(date);
+  return Number.isFinite(instant) && new Date(instant).toUTCString() === date
+    ? instant + (leap ? 1000 : 0)
+    : NaN;
+}
+function retryAfterSeconds(response: Response): number {
+  const value = response.headers.get('retry-after') ?? '';
+  const seconds = Number(value);
+  const fallback = response.status === 429 ? 30 : 0;
+  if (Number.isFinite(seconds))
+    return seconds > 0 ? Math.min(300, seconds) : fallback;
+  const now = Date.now();
+  const until = httpDate(value, now);
+  return Number.isFinite(until)
+    ? Math.min(300, Math.max(0, (until - now) / 1000))
+    : fallback;
+}
 async function checkResponse(response: Response) {
   if (response.status >= 300 && response.status < 400) {
     await response.body?.cancel();
@@ -117,17 +177,12 @@ async function checkResponse(response: Response) {
   }
   if (!response.ok) {
     const body = await responseJson(response, errorSchema, 16_384);
-    const seconds = Number(response.headers.get('retry-after') ?? 0);
     throw new ClientError(
       body.code,
       body.message,
       response.status,
       body.retryable,
-      Number.isFinite(seconds) && seconds > 0
-        ? Math.min(300, seconds)
-        : response.status === 429
-          ? 30
-          : 0,
+      retryAfterSeconds(response),
       body.purge_workspace_id,
     );
   }

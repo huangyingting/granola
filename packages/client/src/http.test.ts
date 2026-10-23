@@ -1,7 +1,7 @@
 import { createServer, type RequestListener } from 'node:http';
 import { once } from 'node:events';
 import { randomUUID } from 'node:crypto';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { ApiClient, responseJson, serverUrl } from './http.js';
 
@@ -17,7 +17,34 @@ describe('bounded service transport', () => {
       throw new Error('The synthetic service did not bind.');
     return `http://127.0.0.1:${address.port}`;
   }
+  async function unavailable(
+    header: string | undefined,
+    status = 429,
+    retryable = true,
+  ) {
+    let requests = 0;
+    const base = await serve((_request, response) => {
+      requests++;
+      response.writeHead(status, {
+        'Content-Type': 'application/json',
+        ...(header === undefined ? {} : { 'Retry-After': header }),
+      });
+      response.end(
+        JSON.stringify({
+          code: 'service_unavailable',
+          message: 'Synthetic service backoff.',
+          retryable,
+          request_id: 'synthetic-date-backoff',
+        }),
+      );
+    });
+    return {
+      client: new ApiClient(base, async () => ({}), { allowLoopback: true }),
+      requests: () => requests,
+    };
+  }
   afterEach(async () => {
+    vi.restoreAllMocks();
     await Promise.all(
       servers.map(
         (server) =>
@@ -105,6 +132,152 @@ describe('bounded service transport', () => {
       retryable: true,
       retryAfterSeconds: 300,
     });
+  });
+  it.each([
+    [429, 'json'],
+    [503, 'json'],
+    [429, 'summary'],
+    [503, 'summary'],
+    [429, 'question'],
+    [503, 'question'],
+  ] as const)(
+    'preserves an HTTP-date floor from a real %i %s response without replaying it',
+    async (status, path) => {
+      vi.spyOn(Date, 'now').mockReturnValue(
+        Date.parse('2030-01-01T00:00:00.250Z'),
+      );
+      const service = await unavailable(
+        'Tue, 01 Jan 2030 00:00:10 GMT',
+        status,
+      );
+      let received = 0;
+      const accept = async () => {
+        received++;
+      };
+      const signal = new AbortController().signal;
+      const operation =
+        path === 'json'
+          ? service.client.identity()
+          : path === 'summary'
+            ? service.client.events(randomUUID(), 0, accept, signal)
+            : service.client.chatEvents(randomUUID(), 0, accept, signal);
+      await expect(operation).rejects.toMatchObject({
+        code: 'service_unavailable',
+        status,
+        retryable: true,
+        retryAfterSeconds: 9.75,
+      });
+      expect(service.requests()).toBe(1);
+      expect(received).toBe(0);
+    },
+  );
+  it.each([
+    {
+      header: 'Tuesday, 01-Jan-30 00:00:10 GMT',
+      expected: 9.75,
+    },
+    {
+      header: 'Tue Jan  1 00:00:10 2030',
+      expected: 9.75,
+    },
+    {
+      header: 'Tue Jan 01 00:00:10 2030',
+      expected: 9.75,
+    },
+    {
+      header: 'Tue, 01 Jan 2030 00:20:00 GMT',
+      expected: 300,
+    },
+    {
+      header: 'Tue, 01 Jan 2030 00:00:00 GMT',
+      expected: 0,
+    },
+    {
+      header: 'Wednesday, 01-Jan-70 00:00:10 GMT',
+      expected: 300,
+    },
+    {
+      header: 'Monday, 01-Jan-80 00:00:00 GMT',
+      expected: 300,
+    },
+    {
+      header: 'Tuesday, 01-Jan-80 00:00:01 GMT',
+      expected: 0,
+    },
+  ])(
+    'decodes the UTC HTTP-date $header as a bounded floor',
+    async ({ header, expected }) => {
+      vi.spyOn(Date, 'now').mockReturnValue(
+        Date.parse('2030-01-01T00:00:00.250Z'),
+      );
+      const service = await unavailable(header);
+      await expect(service.client.identity()).rejects.toMatchObject({
+        retryAfterSeconds: expected,
+      });
+    },
+  );
+  it('interprets an obsolete year across the UTC century boundary', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(
+      Date.parse('2099-12-31T23:59:59.250Z'),
+    );
+    const service = await unavailable('Friday, 01-Jan-00 00:00:10 GMT');
+    await expect(service.client.identity()).rejects.toMatchObject({
+      retryAfterSeconds: 10.75,
+    });
+  });
+  it.each([
+    'Sat, 31 Dec 2016 23:59:60 GMT',
+    'Saturday, 31-Dec-16 23:59:60 GMT',
+    'Sat Dec 31 23:59:60 2016',
+  ])('accepts the leap-second HTTP-date %s', async (header) => {
+    vi.spyOn(Date, 'now').mockReturnValue(
+      Date.parse('2016-12-31T23:59:50.250Z'),
+    );
+    const service = await unavailable(header);
+    await expect(service.client.identity()).rejects.toMatchObject({
+      retryAfterSeconds: 9.75,
+    });
+  });
+  it.each([
+    { header: undefined, expected: 30 },
+    { header: '', expected: 30 },
+    { header: '0', expected: 30 },
+    { header: '-1', expected: 30 },
+    { header: 'Infinity', expected: 30 },
+    { header: 'not-a-date', expected: 30 },
+    { header: '2030-01-01T00:00:10Z', expected: 30 },
+    { header: 'Wed, 01 Jan 2030 00:00:10 GMT', expected: 30 },
+    { header: 'Thu, 31 Feb 2030 00:00:10 GMT', expected: 30 },
+    { header: 'Tue, 01 Jan 2030 00:00:10 PST', expected: 30 },
+    { header: '1.25', expected: 1.25 },
+    { header: '1e2', expected: 100 },
+  ])(
+    'preserves numeric and invalid-header compatibility for $header',
+    async ({ header, expected }) => {
+      vi.spyOn(Date, 'now').mockReturnValue(
+        Date.parse('2030-01-01T00:00:00.250Z'),
+      );
+      const service = await unavailable(header);
+      await expect(service.client.identity()).rejects.toMatchObject({
+        retryAfterSeconds: expected,
+      });
+    },
+  );
+  it('does not make a permanent error retryable because it carries a future date', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(
+      Date.parse('2030-01-01T00:00:00.250Z'),
+    );
+    const service = await unavailable(
+      'Tue, 01 Jan 2030 00:00:10 GMT',
+      403,
+      false,
+    );
+    await expect(service.client.identity()).rejects.toMatchObject({
+      status: 403,
+      retryable: false,
+      retryAfterSeconds: 9.75,
+    });
+    expect(service.requests()).toBe(1);
   });
   it('does not mask a credential-provider error as a network failure', async () => {
     const failure = new Error('Synthetic locked credential vault.');
