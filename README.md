@@ -1105,6 +1105,22 @@ Use `--workspace-id UUID` to add an explicitly provisioned identity to an existi
 workspace. Membership alone never grants access to another member's private
 documents. Team sharing remains outside the first release.
 
+When the API is behind an HTTPS reverse proxy, set API-only
+`TRUSTED_PROXY_CIDRS` to a comma-separated list of the **actual proxy peer
+addresses or CIDRs seen by the API socket**, not client networks. Without it,
+forwarded addresses are ignored and clients behind the proxy share one IP
+admission budget. The list accepts at most sixteen literal IPv4/IPv6 addresses
+or nonzero-prefix CIDRs; DNS names, named trust aliases, hop counts, booleans,
+empty lists and `/0` ranges fail startup. Trust is checked right-to-left through
+`X-Forwarded-For`, stopping at the nearest untrusted peer; attacker-supplied
+entries to its left do not create additional budgets. The edge proxy must
+overwrite incoming forwarding headers or append its actual socket peer, and
+network controls must prevent clients from bypassing the intended ingress.
+For container deployments, use the observed proxy/container-network peer, not
+`127.0.0.1` merely because the published port is loopback. This setting changes
+IP admission, not OIDC permissions, and does not enable HTTPS or prove a deployed
+proxy is configured correctly.
+
 To enable native-client configuration discovery, set `OIDC_DESKTOP_CLIENT_ID`,
 `OIDC_DESKTOP_SCOPES` (including `openid`, `offline_access` and the API scope) and,
 if needed, `OIDC_DESKTOP_LOOPBACK_HOST=localhost`. Register the corresponding

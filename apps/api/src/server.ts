@@ -33,7 +33,12 @@ import {
   type Database,
 } from '@windows-ai-notes/db';
 import { validateWav } from '@windows-ai-notes/ai/wav';
-import { createAuthenticator, principal, type AuthConfig } from './auth.js';
+import {
+  createAuthenticator,
+  principal,
+  trustedProxyCidrs,
+  type AuthConfig,
+} from './auth.js';
 import type { RecordingBlobs } from '@windows-ai-notes/storage';
 import { registerRecordingRoutes } from './recordings.js';
 import { parse } from './parse.js';
@@ -65,6 +70,7 @@ export async function createServer(
     genReqId: () => randomUUID(),
     requestIdHeader: false,
     requestTimeout: 30_000,
+    trustProxy: trustedProxyCidrs(config.trustedProxies),
   });
   registerRequestObservability(app);
   const authenticate = createAuthenticator(config, db);

@@ -527,6 +527,8 @@ RBAC 负责工作区能力，文档 ACL 决定具体内容可见性。PostgreSQL
 
 ### 11.2 监控和容量
 
+API 另支持默认关闭的 `TRUSTED_PROXY_CIDRS`：仅从部署环境接收最多十六个 literal IPv4/IPv6 或非零 prefix CIDR，拒绝 DNS/alias、布尔值、hop count、空列表及 `/0`，程序化 server 配置亦重新校验。明确受信 proxy 的 `X-Forwarded-For` 从右到左截断于首个非受信 peer，使 HTTPS 入口后的不同客户端不再共享同一 IP 准入预算；未受信来源及伪造的左侧 hop 不能借此换预算。保留鉴权前拒绝、JWKS/身份查询抑制及独立探针预算，不把转发地址当成身份。部署方须只信任真实 socket proxy peer，控制绕过路径并让边缘 proxy 覆盖转发头或追加实际 peer；此功能不启动 TLS、不替代真实入口配置或生产容量验收。
+
 核心指标包括活跃录音连接、音频帧积压/缺口、上传校验失败、队列等待、租约失效、转写延迟、首 token 延迟、任务成功率、对象清理积压、ASR 分钟数、模型 tokens 和预算超支。
 
 request ID 串联 API、job、worker 和 provider request，生产 trace 默认不采集正文。告警需要区分“录音未保存”“已保存但未识别”“总结失败”，避免所有故障只显示一个红点。

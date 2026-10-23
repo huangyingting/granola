@@ -1,3 +1,4 @@
+import { isIP } from 'node:net';
 import {
   createRemoteJWKSet,
   errors,
@@ -16,6 +17,7 @@ import {
 export interface AuthConfig {
   mode: 'development' | 'oidc';
   host: string;
+  trustedProxies?: string[];
   issuer?: string;
   audience?: string;
   jwksUrl?: string;
@@ -32,10 +34,42 @@ declare module 'fastify' {
   }
 }
 
+export function trustedProxyCidrs(
+  values: string[] | undefined,
+): string[] | false {
+  if (values === undefined) return false;
+  if (
+    values.length < 1 ||
+    values.length > 16 ||
+    values.some((value) => {
+      if (value.length > 64 || value !== value.trim()) return true;
+      const [address = '', prefix, ...extra] = value.split('/');
+      const family = isIP(address);
+      return (
+        !family ||
+        address.includes('%') ||
+        extra.length !== 0 ||
+        (prefix !== undefined &&
+          (!/^[1-9][0-9]{0,2}$/u.test(prefix) ||
+            Number(prefix) > (family === 4 ? 32 : 128)))
+      );
+    })
+  )
+    throw new Error(
+      'TRUSTED_PROXY_CIDRS must contain 1 to 16 literal IP addresses or nonzero-prefix CIDRs, separated by commas.',
+    );
+  return values;
+}
+
 export function loadAuthConfig(
   env: NodeJS.ProcessEnv = process.env,
 ): AuthConfig {
   const host = env.HOST ?? '127.0.0.1';
+  const trustedProxies = env.TRUSTED_PROXY_CIDRS?.split(',').map((value) =>
+    value.trim(),
+  );
+  trustedProxyCidrs(trustedProxies);
+  const proxy = trustedProxies ? { trustedProxies } : {};
   if (env.AUTH_MODE === 'development') {
     if (
       env.NODE_ENV === 'production' ||
@@ -45,7 +79,7 @@ export function loadAuthConfig(
         'Development authentication requires non-production mode and a loopback bind address.',
       );
     }
-    return { mode: 'development', host };
+    return { mode: 'development', host, ...proxy };
   }
   if (env.AUTH_MODE && env.AUTH_MODE !== 'oidc')
     throw new Error('AUTH_MODE must be development or oidc.');
@@ -101,6 +135,7 @@ export function loadAuthConfig(
   return {
     mode: 'oidc',
     host,
+    ...proxy,
     issuer,
     audience,
     jwksUrl,
