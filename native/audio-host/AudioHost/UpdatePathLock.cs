@@ -83,7 +83,9 @@ internal static class UpdatePathLock
     private static SafeFileHandle Open(string path, bool directory, bool remove = false)
     {
         // Do not follow reparse points or share DELETE access.
-        var handle = CreateFile(path, (directory ? 0x80u : 0x80000000u) | (remove ? 0x10000u : 0u), directory ? 1u | 2u : 1u,
+        var access = directory ? 0x80u : 0x80000000u;
+        if (remove) access |= 0x10000u | (directory ? 0x20000u : 0u);
+        var handle = CreateFile(path, access, directory ? 1u | 2u : 1u,
             IntPtr.Zero, 3, (directory ? 0x02000000u : 0u) | 0x00200000u, IntPtr.Zero);
         try
         {

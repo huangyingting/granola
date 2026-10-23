@@ -282,6 +282,25 @@ public sealed class UpdateSessionRetentionTests : IDisposable
     }
 
     [Fact]
+    public void DeletionLeasesKeepTheOriginalPrivateRuntimeSecurityReadableWithoutReopeningTheDirectories()
+    {
+        var runtime = Stage();
+        using var directory = UpdatePathLock.OpenForRemoval(runtime.Directory, directory: true);
+        UpdatePrivateDirectory.Require(directory);
+        foreach (var child in Directory.EnumerateDirectories(runtime.Directory, "*", SearchOption.AllDirectories))
+        {
+            using var held = UpdatePathLock.OpenForRemoval(child, directory: true);
+            UpdatePrivateDirectory.Require(held, requireProtected: false);
+        }
+        foreach (var path in Directory.EnumerateFiles(runtime.Directory, "*", SearchOption.AllDirectories))
+        {
+            using var handle = UpdatePathLock.OpenForRemoval(path, directory: false);
+            using var stream = new FileStream(handle, FileAccess.Read);
+            UpdatePrivateDirectory.RequireFile(stream);
+        }
+    }
+
+    [Fact]
     public void RenameAndDeleteUseTheOriginalKernelHandleAndNeverReplaceAnExistingDestination()
     {
         var source = Path.Combine(Workers, $"worker-{Guid.NewGuid():D}");

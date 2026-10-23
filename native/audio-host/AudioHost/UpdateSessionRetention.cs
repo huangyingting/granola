@@ -262,7 +262,7 @@ internal static class UpdateSessionRetention
             if (depth > 8 || Directories.Count >= UpdateRuntimeStager.MaximumFiles)
                 throw new UpdateHandoffException("update_cleanup_invalid");
             Directories.Add(UpdatePathLock.OpenForRemoval(directory, directory: true));
-            UpdatePrivateDirectory.Require(directory, requireProtected: depth == 0);
+            UpdatePrivateDirectory.Require(Directories[^1], requireProtected: depth == 0);
             if (depth > 0) RelativeDirectories.Add(Relative(directory));
             foreach (var path in Directory.EnumerateFileSystemEntries(directory))
             {
