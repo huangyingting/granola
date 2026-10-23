@@ -27,10 +27,13 @@ jobs:
     env:
       TEST_DATABASE_URL: postgresql://notes:ci-test-only@127.0.0.1:5432/notes
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '24'
+          package-manager-cache: false
       - name: Install checksum-verified upstream native pnpm
         run: node tools/setup-pnpm.mjs
       - run: pnpm install --frozen-lockfile
@@ -57,8 +60,9 @@ jobs:
           pnpm test packages/client/src/load-acceptance.test.ts
           test -s artifacts/server-acceptance.json
       - name: Upload body-free controlled server acceptance
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
+          archive: true
           name: controlled-server-acceptance
           if-no-files-found: error
           path: artifacts/server-acceptance.json
@@ -88,11 +92,14 @@ jobs:
       DOTNET_CLI_TELEMETRY_OPTOUT: '1'
       DOTNET_NOLOGO: '1'
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '24'
-      - uses: actions/setup-dotnet@v4
+          package-manager-cache: false
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           global-json-file: global.json
       - name: Install checksum-verified upstream native pnpm
@@ -146,21 +153,24 @@ jobs:
         env:
           DESKTOP_INSTALLATION_PROBE: '1'
         run: pnpm --filter @windows-ai-notes/desktop test:ui tests/installation.spec.ts
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: failure() && runner.os == 'Windows'
         with:
+          archive: true
           name: desktop-test-diagnostics
           path: apps/desktop/test-results/
           retention-days: 3
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: runner.os == 'Windows'
         with:
+          archive: true
           name: windows-ai-notes-desktop-unsigned
           path: artifacts/desktop/*-unsigned.exe
           retention-days: 7
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: runner.os == 'Windows'
         with:
+          archive: true
           name: audio-host-win-x64-unsigned
           path: artifacts/audio-host/win-x64/
           retention-days: 7

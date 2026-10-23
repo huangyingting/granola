@@ -106,6 +106,8 @@ flowchart TB
 
 实现时锁定具体版本、依赖许可和供应链清单。若 P0 证明某个库不满足音频或打包要求，先记录替代决策，再进入依赖该方案的阶段。
 
+CI 与受保护签名候选中的外部 Actions 已固定到核对过的 upstream release 完整 commit，并改用原生 Node 24 runtime，不再依赖 Node 20 强制兼容。Checkout 不保留 Git 凭据，Node setup 不启用隐式包管理缓存，上传显式保留已有命名 ZIP 格式。Dependabot 每周仅汇总一组 Actions 更新供审查，不自动合并或绕过精确源码 Checks；签名环境、main 限制、手动触发和默认关闭的 activation 验收不变，此配置不代替真实签名/部署/物理设备门禁。
+
 ## 4. Windows 客户端设计
 
 ### 4.1 进程职责与安全边界

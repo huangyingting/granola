@@ -100,6 +100,12 @@ Real Windows audio behavior still requires the hardware checks below.
   Server Markdown/plain-text exports stream the entire pinned transcript instead
   of truncating it. Legacy short-transcript and summary context limits remain unchanged.
 
+Hosted Checks and the protected signed-candidate workflow pin external actions
+to verified upstream release commits running on Node.js 24. Checkout credentials
+are not persisted, implicit package-manager caching is disabled, and named ZIP
+artifacts retain their existing format. Dependabot groups action updates into one
+weekly reviewable PR; updates do not bypass Checks or enable signing/installation.
+
 ## Desktop preview
 
 On Windows 11 x64, with Node.js 24 and Corepack/pnpm:

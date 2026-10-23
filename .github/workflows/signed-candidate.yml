@@ -26,7 +26,9 @@ jobs:
       DOTNET_CLI_TELEMETRY_OPTOUT: '1'
       DOTNET_NOLOGO: '1'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Require successful Checks for this exact main commit
         shell: pwsh
         env:
@@ -39,10 +41,11 @@ jobs:
           $runs = $json | ConvertFrom-Json
           $verified = @($runs | Where-Object { $_.headSha -eq $env:GITHUB_SHA -and $_.status -eq 'completed' -and $_.conclusion -eq 'success' })
           if ($verified.Count -eq 0) { throw 'This exact main commit needs successful Checks before signing.' }
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '24'
-      - uses: actions/setup-dotnet@v4
+          package-manager-cache: false
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           global-json-file: global.json
       - name: Install checksum-verified upstream native pnpm
@@ -96,8 +99,9 @@ jobs:
           $receipt = Join-Path $env:GITHUB_WORKSPACE 'artifacts/desktop-signed/activation-acceptance.json'
           if (-not [IO.File]::Exists($receipt)) { throw 'Signed activation acceptance did not produce its required success receipt; skipped tests are not acceptance.' }
       - name: Upload only the verified installer and public receipt
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
+          archive: true
           name: windows-ai-notes-signed-candidate
           if-no-files-found: error
           path: |
