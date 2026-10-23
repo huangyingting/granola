@@ -50,6 +50,19 @@ jobs:
           TEST_S3_ENDPOINT: http://127.0.0.1:59000
           TEST_POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
         run: pnpm test
+      - name: Controlled concurrent sync, response loss, restart and overload
+        env:
+          SERVER_LOAD_ACCEPTANCE: '1'
+        run: |
+          pnpm test packages/client/src/load-acceptance.test.ts
+          test -s artifacts/server-acceptance.json
+      - name: Upload body-free controlled server acceptance
+        uses: actions/upload-artifact@v4
+        with:
+          name: controlled-server-acceptance
+          if-no-files-found: error
+          path: artifacts/server-acceptance.json
+          retention-days: 7
       - run: pnpm format:check
       - name: Build the unprivileged server image without credentials
         run: |

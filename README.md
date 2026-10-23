@@ -1490,6 +1490,53 @@ Measured desktop delivery and independent deletion recovery are described in
 their dedicated sections. Production alert routing, capacity/load evidence and
 release acceptance remain deployment-specific gates.
 
+### Controlled sync and overload acceptance
+
+The server CI job separately runs an opt-in real-HTTP/PostgreSQL/encrypted-SQLite
+workload with two synthetic accounts and four devices. Its private loopback proxy
+physically drops one successful create response **after** the upstream response
+finishes. The client must retain the frozen request, survive API/database-pool and
+encrypted-store reopening, and replay it without a duplicate document. Concurrent
+edits must preserve the losing version as an explicit conflict copy; another
+account cannot read it. Remote deletion followed by an offline edit and restart
+must not resurrect the deleted document.
+
+A separate 128-request, eight-lane read burst uses the **unchanged default API
+limiter**. It requires both accepted reads and explicit `429` responses with
+usable retry delays, not hidden retries or invented success. Correctness phases
+start fresh API instances; a post-burst restart proves application recovery, not
+rate-window expiry or sustained-load capacity. These are synthetic loopback
+development-authentication checks, not OIDC, TLS, AI-provider or production
+capacity acceptance.
+
+For an isolated disposable PostgreSQL on a literal loopback address:
+
+```sh
+pnpm build
+SERVER_LOAD_ACCEPTANCE=1 TEST_DATABASE_URL=YOUR_LOOPBACK_TEST_DATABASE_URL \
+  pnpm test packages/client/src/load-acceptance.test.ts
+```
+
+The opt-in suite rejects remote/hostname database addresses, creates only a fresh
+random test schema and temporary encrypted stores, and removes those owned
+resources afterward. Never point it at a production database, even via a tunnel.
+Success writes `artifacts/server-acceptance.json` only after assertions and cleanup;
+an existing report is not overwritten. Remove that named report before a local
+rerun. CI requires the report, so a skipped suite is not acceptance.
+
+The bounded body-free artifact contains the tested Actions commit (or null for a
+local unattested run), fixed scenario counts, restart/loss counts, and measured
+nearest-rank p50/p95/min/max. Sync samples cover entire attempts, including local
+SQLite, HTTP, and the injected failure; burst samples separately cover complete
+accepted and rate-limited document requests. The client, proxy and API share one
+process/event loop. Small samples on CI hardware are **not** independent server
+throughput, a production latency SLO or calibrated capacity. API instances,
+database pools and client stores are reopened; PostgreSQL/Node process crashes
+and physical power loss are not simulated. No titles, notes,
+resource IDs, database credentials, tokens or raw URLs enter the report;
+`production_accepted` stays false. Production load/restore drills, approved SLOs
+and real alert routing/delivery remain release gates.
+
 ### Durable task-outcome observations
 
 ```sh
