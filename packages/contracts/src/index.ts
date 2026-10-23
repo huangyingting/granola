@@ -139,6 +139,7 @@ export const audioRequestSchema = z.discriminatedUnion('command', [
       recording_id: uuid,
       tracks: z.array(trackSchema).min(1).max(2),
       storage_quota_bytes: storageQuotaBytesSchema.optional(),
+      capture_clock: z.literal('wasapi_qpc_v1').optional(),
     })
     .strict()
     .refine(

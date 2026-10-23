@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Threading.Channels;
 using NAudio.CoreAudioApi;
@@ -10,8 +9,8 @@ namespace WindowsAiNotes.AudioHost;
 internal sealed class CaptureTrack : IDisposable
 {
     internal sealed record Packet(byte[] Bytes, double StartMs, double EndMs);
-    private readonly MMDevice endpoint;
-    private readonly WasapiCapture capture;
+    private readonly IDisposable endpoint;
+    private readonly IWaveIn capture;
     private readonly Channel<Packet> packets = Channel.CreateBounded<Packet>(new BoundedChannelOptions(64)
     {
         SingleReader = true,
@@ -20,7 +19,7 @@ internal sealed class CaptureTrack : IDisposable
     });
     private readonly TaskCompletionSource stopped = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly TaskCompletionSource<AudioException> failure;
-    private readonly Stopwatch clock;
+    private readonly CaptureClock clock;
     private readonly Task consumer;
     private readonly int maxQueuedBytes;
     private long queuedBytes;
@@ -29,18 +28,22 @@ internal sealed class CaptureTrack : IDisposable
     private readonly PcmLevelMeter levels = new();
     public Guid TrackId { get; }
 
-    public CaptureTrack(MMDevice endpoint, Guid trackId, string kind, PcmChunkWriter writer, Stopwatch clock,
+    public CaptureTrack(MMDevice endpoint, Guid trackId, string kind, PcmChunkWriter writer, CaptureClock clock,
+        TaskCompletionSource<AudioException> failure, LivePcmConsumer live, string? captureClock = null)
+        : this(endpoint, CreateSource(endpoint, kind, clock, captureClock), trackId, writer, clock, failure, live) { }
+
+    internal CaptureTrack(IDisposable endpoint, IWaveIn capture, Guid trackId, PcmChunkWriter writer, CaptureClock clock,
         TaskCompletionSource<AudioException> failure, LivePcmConsumer live)
     {
         this.endpoint = endpoint;
+        this.capture = capture;
         TrackId = trackId;
         this.clock = clock;
         this.failure = failure;
-        capture = kind == "microphone" ? new WasapiCapture(endpoint) : new WasapiLoopbackCapture(endpoint);
-        maxQueuedBytes = checked(capture.WaveFormat.AverageBytesPerSecond * 5);
         CapturePcmProcessor processor;
         try
         {
+            maxQueuedBytes = checked(capture.WaveFormat.AverageBytesPerSecond * 5);
             processor = new CapturePcmProcessor(capture.WaveFormat);
         }
         catch
@@ -52,7 +55,8 @@ internal sealed class CaptureTrack : IDisposable
         capture.RecordingStopped += (_, args) =>
         {
             if (args.Exception is not null || Volatile.Read(ref stopping) == 0)
-                failure.TrySetResult(new AudioException("device_lost", "Capture stopped unexpectedly; saved chunks are preserved.", true));
+                failure.TrySetResult(args.Exception as AudioException ??
+                    new AudioException("device_lost", "Capture stopped unexpectedly; saved chunks are preserved.", true, args.Exception));
             packets.Writer.TryComplete();
             stopped.TrySetResult();
         };
@@ -97,6 +101,13 @@ internal sealed class CaptureTrack : IDisposable
     public delegate void LivePcmConsumer(long sampleStart, ReadOnlySpan<byte> bytes, double startMs, double endMs);
     public TrackLevel ReadLevel() => new(TrackId, levels.Read());
 
+    internal static IWaveIn CreateSource(MMDevice endpoint, string kind, CaptureClock clock, string? profile) => profile switch
+    {
+        null => kind == "microphone" ? new WasapiCapture(endpoint) : new WasapiLoopbackCapture(endpoint),
+        "wasapi_qpc_v1" => new DeviceClockCapture(endpoint, kind, clock),
+        _ => throw new AudioException("invalid_request", "The capture clock profile is unsupported.")
+    };
+
     internal static long CompleteAndClear(Channel<Packet> packets)
     {
         packets.Writer.TryComplete();
@@ -125,14 +136,26 @@ internal sealed class CaptureTrack : IDisposable
             failure.TrySetResult(new AudioException("capture_overrun", "The bounded capture queue overflowed or received invalid audio. Recording must stop."));
             return;
         }
-        var bytes = args.Buffer.AsSpan(0, args.BytesRecorded).ToArray();
-        var endMs = clock.Elapsed.TotalMilliseconds;
-        var startMs = Math.Max(0, endMs - 1000.0 * bytes.Length / capture.WaveFormat.AverageBytesPerSecond);
-        if (!packets.Writer.TryWrite(new Packet(bytes, startMs, endMs)))
+        byte[]? bytes = null;
+        var admitted = true;
+        try
         {
-            CryptographicOperations.ZeroMemory(bytes);
-            Interlocked.Add(ref queuedBytes, -bytes.Length);
-            failure.TrySetResult(new AudioException("capture_overrun", "The bounded capture queue is full. Recording must stop."));
+            bytes = args is DeviceClockPacketArgs owned ? owned.TakeBytes() : args.Buffer.AsSpan(0, args.BytesRecorded).ToArray();
+            var endMs = args is DeviceClockPacketArgs packet ? packet.Clock.EndMs : clock.Elapsed.TotalMilliseconds;
+            var startMs = args is DeviceClockPacketArgs timed ? timed.Clock.StartMs
+                : Math.Max(0, endMs - 1000.0 * bytes.Length / capture.WaveFormat.AverageBytesPerSecond);
+            if (packets.Writer.TryWrite(new Packet(bytes, startMs, endMs)))
+            {
+                bytes = null;
+                admitted = false;
+            }
+            else
+                failure.TrySetResult(new AudioException("capture_overrun", "The bounded capture queue is full. Recording must stop."));
+        }
+        finally
+        {
+            if (bytes is not null) CryptographicOperations.ZeroMemory(bytes);
+            if (admitted) Interlocked.Add(ref queuedBytes, -args.BytesRecorded);
         }
     }
 
@@ -171,7 +194,7 @@ internal sealed class CaptureTrack : IDisposable
     public void Dispose()
     {
         capture.DataAvailable -= OnData;
-        capture.Dispose();
-        endpoint.Dispose();
+        try { capture.Dispose(); }
+        finally { endpoint.Dispose(); }
     }
 }

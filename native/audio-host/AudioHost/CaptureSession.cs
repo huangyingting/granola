@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using WindowsAiNotes.Audio;
 
 namespace WindowsAiNotes.AudioHost;
@@ -9,7 +8,8 @@ internal sealed class CaptureSession
     private readonly Dictionary<Guid, string> endpoints = [];
     private readonly Dictionary<Guid, PcmChunkWriter> writers = [];
     private readonly List<CaptureTrack> captures = [];
-    private readonly Stopwatch clock = Stopwatch.StartNew();
+    private readonly CaptureClock clock = new();
+    private readonly string? captureClock;
     private readonly TaskCompletionSource<AudioException> failure = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly StorageBudget storage;
     private Guid captureEpoch;
@@ -18,10 +18,12 @@ internal sealed class CaptureSession
     public Task<AudioException> Failure => failure.Task;
     public double ElapsedSeconds => clock.Elapsed.TotalSeconds;
 
-    public CaptureSession(string root, Guid recordingId, TrackSpec[] specs, IKeyProtector protector, StorageBudget storage)
+    public CaptureSession(string root, Guid recordingId, TrackSpec[] specs, IKeyProtector protector, StorageBudget storage,
+        string? captureClock = null)
     {
         this.specs = specs;
         this.storage = storage;
+        this.captureClock = captureClock;
         storage.EnsureCaptureCapacity();
         foreach (var spec in specs)
         {
@@ -38,7 +40,7 @@ internal sealed class CaptureSession
         storage.EnsureCaptureCapacity();
         var epoch = Guid.NewGuid();
         captureEpoch = epoch;
-        Store.Transition("recording", "capture.started", clock.Elapsed.TotalMilliseconds, epoch);
+        Store.Transition("recording", "capture.started", clock.Elapsed.TotalMilliseconds, epoch, captureClock);
         foreach (var spec in specs)
         {
             writers[spec.TrackId].BeginEpoch(epoch);
@@ -47,7 +49,7 @@ internal sealed class CaptureSession
             {
                 captures.Add(new CaptureTrack(endpoint, spec.TrackId, spec.Kind, writers[spec.TrackId], clock, failure,
                     (sampleStart, bytes, startMs, endMs) =>
-                        Volatile.Read(ref live)?.Append(spec.TrackId, epoch, sampleStart, bytes, startMs, endMs)));
+                        Volatile.Read(ref live)?.Append(spec.TrackId, epoch, sampleStart, bytes, startMs, endMs), captureClock));
             }
             catch
             {
@@ -123,14 +125,32 @@ internal sealed class CaptureSession
     private async Task StopEpochAsync(string liveReason = "capture_stopped")
     {
         Volatile.Read(ref live)?.Stop(liveReason);
+        try { await StopCapturesAsync(captures); }
+        finally { captures.Clear(); }
+    }
+
+    internal static async Task StopCapturesAsync(IReadOnlyList<CaptureTrack> captures)
+    {
+        var errors = new List<Exception>();
+        var stopping = Task.WhenAll(captures.Select(capture => capture.StopAsync()));
         try
         {
-            await Task.WhenAll(captures.Select(capture => capture.StopAsync()));
+            await stopping;
         }
-        finally
+        catch (Exception error)
         {
-            foreach (var capture in captures) capture.Dispose();
-            captures.Clear();
+            if (stopping.Exception is { } aggregate) errors.AddRange(aggregate.InnerExceptions);
+            else errors.Add(error);
         }
+        foreach (var capture in captures)
+        {
+            try { capture.Dispose(); }
+            catch (Exception error) { errors.Add(error); }
+        }
+        if (errors.Count == 1)
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(errors[0]).Throw();
+        if (errors.Count > 1)
+            throw new AudioException("stop_failed", "Multiple endpoint shutdown operations failed; inspect the preserved recording.",
+                inner: new AggregateException(errors));
     }
 }

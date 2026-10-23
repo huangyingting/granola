@@ -16,6 +16,7 @@ export function parseOptions(args: string[]) {
       'pause-at': { type: 'string' },
       'pause-for': { type: 'string', default: '2' },
       'accept-incomplete': { type: 'boolean', default: false },
+      'capture-clock': { type: 'string' },
       help: { type: 'boolean', default: false },
     },
   });
@@ -27,6 +28,14 @@ export function parseOptions(args: string[]) {
     );
   }
   const archive = command === 'inspect' || command === 'recover';
+  const captureClock = values['capture-clock'];
+  if (
+    captureClock !== undefined &&
+    (command !== 'record' || captureClock !== 'wasapi_qpc_v1')
+  )
+    throw new Error(
+      'Only record accepts --capture-clock wasapi_qpc_v1 (experimental; physical acceptance required).',
+    );
   if (positionals.length !== (archive ? 2 : 1)) {
     throw new Error('Unexpected or missing positional arguments.');
   }
@@ -73,6 +82,7 @@ export function parseOptions(args: string[]) {
     seconds,
     pauseAt,
     pauseFor,
+    captureClock,
     microphone: values.microphone,
     loopback: values.loopback,
     dataDir: resolve(values['data-dir']),

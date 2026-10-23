@@ -11,12 +11,14 @@ const help = `Windows AI Notes - P0 audio probe
 pnpm audio:probe devices
 pnpm audio:probe record --seconds 60 [--microphone default|off|DEVICE_ID] [--loopback default|off|DEVICE_ID]
 pnpm audio:probe record --seconds 60 --pause-at 20 --pause-for 5
+pnpm audio:probe record --seconds 60 --capture-clock wasapi_qpc_v1
 pnpm audio:probe inspect RECORDING_ID [--data-dir PATH]
 pnpm audio:probe recover RECORDING_ID --accept-incomplete [--data-dir PATH]
 
 Capture is endpoint-wide, NOT application-isolated. Only record with consent.
 Both tracks default to the Windows multimedia endpoints. Ctrl+C requests a clean stop.
 Encrypted files default to .probe-data; keep them on the same Windows account.
+Device-clock capture is experimental, opt-in and not physical drift acceptance.
 The probe makes no network or AI calls.`;
 
 async function main(): Promise<void> {
@@ -127,6 +129,9 @@ async function main(): Promise<void> {
       command: 'start_recording',
       recording_id: options.recordingId,
       tracks,
+      ...(options.captureClock === 'wasapi_qpc_v1'
+        ? { capture_clock: options.captureClock }
+        : {}),
     });
     if (options.pauseAt !== undefined) {
       await wait(options.pauseAt);

@@ -4,6 +4,72 @@
     "request": {
       "protocol_version": 1,
       "request_id": "9c73575e-426d-4f72-98ed-7b4479f890ab",
+      "command": "start_recording",
+      "recording_id": "75048e79-2b45-440f-8609-b80a37635b4a",
+      "capture_clock": "wasapi_qpc_v1",
+      "tracks": [
+        {
+          "track_id": "e9393508-f494-417d-b968-9ebc3a5fd4c1",
+          "kind": "microphone",
+          "capture_scope": "endpoint",
+          "device_selection_policy": "default",
+          "device_id": "default"
+        }
+      ]
+    }
+  },
+  {
+    "valid": false,
+    "request": {
+      "protocol_version": 1,
+      "request_id": "9c73575e-426d-4f72-98ed-7b4479f890ab",
+      "command": "list_devices",
+      "capture_clock": "wasapi_qpc_v1"
+    }
+  },
+  {
+    "valid": false,
+    "request": {
+      "protocol_version": 1,
+      "request_id": "9c73575e-426d-4f72-98ed-7b4479f890ab",
+      "command": "start_recording",
+      "recording_id": "75048e79-2b45-440f-8609-b80a37635b4a",
+      "capture_clock": null,
+      "tracks": [
+        {
+          "track_id": "e9393508-f494-417d-b968-9ebc3a5fd4c1",
+          "kind": "microphone",
+          "capture_scope": "endpoint",
+          "device_selection_policy": "default",
+          "device_id": "default"
+        }
+      ]
+    }
+  },
+  {
+    "valid": false,
+    "request": {
+      "protocol_version": 1,
+      "request_id": "9c73575e-426d-4f72-98ed-7b4479f890ab",
+      "command": "start_recording",
+      "recording_id": "75048e79-2b45-440f-8609-b80a37635b4a",
+      "capture_clock": "callback_v1",
+      "tracks": [
+        {
+          "track_id": "e9393508-f494-417d-b968-9ebc3a5fd4c1",
+          "kind": "microphone",
+          "capture_scope": "endpoint",
+          "device_selection_policy": "default",
+          "device_id": "default"
+        }
+      ]
+    }
+  },
+  {
+    "valid": true,
+    "request": {
+      "protocol_version": 1,
+      "request_id": "9c73575e-426d-4f72-98ed-7b4479f890ab",
       "command": "read_live_audio_timed",
       "recording_id": "75048e79-2b45-440f-8609-b80a37635b4a",
       "preview_id": "e9393508-f494-417d-b968-9ebc3a5fd4c1"

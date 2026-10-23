@@ -277,7 +277,7 @@ try
                     if (session is not null)
                         throw new AudioException("invalid_state", "Use a new AudioHost process for each recording.");
                     await Emit("storage.status", storage.Read(request.StorageQuotaBytes ?? StorageBudget.DefaultQuotaBytes));
-                    session = new CaptureSession(root, request.RecordingId!.Value, request.Tracks!, protector, storage);
+                    session = new CaptureSession(root, request.RecordingId!.Value, request.Tracks!, protector, storage, request.CaptureClock);
                     try
                     {
                         session.StartEpoch();

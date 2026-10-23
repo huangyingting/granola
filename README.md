@@ -2754,6 +2754,30 @@ pnpm audio:probe record --seconds 60 --microphone off --loopback "ENDPOINT_ID"
 pnpm audio:probe record --seconds 60 --pause-at 20 --pause-for 5
 ```
 
+An experimental native packet-clock path is available only through explicit probe
+opt-in (or `capture_clock: "wasapi_qpc_v1"` on `start_recording`):
+
+```sh
+pnpm audio:probe record --seconds 60 --capture-clock wasapi_qpc_v1
+```
+
+The desktop and omitted-profile probe keep the existing callback-clock backend.
+The opt-in path uses NAudio's public WASAPI packet API, maps the first-frame QPC
+timestamp's **100 ns units** into one shared monotonic recording origin, and
+checks source-frame positions. Each capture epoch starts a fresh position chain;
+an initial discontinuity flag is an epoch boundary, not proof that earlier audio
+was captured. Later discontinuities, missing/duplicated positions, invalid or
+regressing clocks and timestamp-error flags fail explicitly without reset,
+reconnect, fallback or invented samples. Only actual `SILENT` packet frames become
+silence. Native buffers are copied and released on the same dedicated thread
+before queue/storage callbacks; owned arrays transfer into the existing bounded
+normalization/cleanup path. Stop requests drain a bounded endpoint tail and wait
+for thread exit, reporting failure rather than assuming a hung endpoint stopped.
+The encrypted `capture.started` timeline code records the selected profile,
+including after pause/resume. Deterministic packet, queue, encrypted-writer and
+live-buffer cases are not real microphone/loopback, sleep/Bluetooth or one-hour
+drift acceptance; the path is not enabled by default.
+
 The CLI prints the recording UUID and typed JSON events. Status reports
 `saved_samples`, not merely received audio: short tails are not committed until a
 pause or clean stop. Ctrl+C asks the host to stop and seal. EOF also stops capture.
@@ -2855,8 +2879,9 @@ authentication tag. The PCM checksum is not an upload/WAV checksum or an ETag.
 
 `sealed` establishes file integrity and agreement with the committed manifest,
 **not** acoustic quality, complete device coverage, or clock-drift compliance.
-Timestamps currently approximate capture using a shared monotonic callback
-clock, not native WASAPI device/QPC positions. Loopback silence/callback gaps,
+Default timestamps approximate capture using a shared monotonic callback
+clock; the experimental profile above uses native WASAPI device/QPC positions.
+Loopback silence/callback gaps,
 sleep, and delayed callbacks need hardware investigation before continuous
 timeline fidelity can be claimed.
 

@@ -7,10 +7,25 @@ public sealed record AudioRequest(int ProtocolVersion, Guid RequestId, string Co
     Guid? TrackId = null, Guid? ChunkId = null, int? SequenceStart = null, int? Offset = null, int? Length = null,
     bool? AcceptIncomplete = null, Guid? PreviewId = null, int? MaxBufferedMs = null, long? StorageQuotaBytes = null)
 {
+    private string? captureClock;
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? CaptureClock
+    {
+        get => captureClock;
+        init
+        {
+            if (value != "wasapi_qpc_v1")
+                throw new JsonException("The capture clock profile is unsupported.");
+            captureClock = value;
+        }
+    }
+
     public void Validate()
     {
         if (ProtocolVersion != 1 || RequestId == Guid.Empty)
             throw new AudioException("invalid_request", "Unsupported protocol version or invalid request ID.");
+        if (CaptureClock is not null && Command != "start_recording")
+            throw new AudioException("invalid_request", "Only capture start accepts a device-clock profile.");
         if (StorageQuotaBytes is not null)
         {
             if (Command is not ("check_storage" or "start_recording"))
