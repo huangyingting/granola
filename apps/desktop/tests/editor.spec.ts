@@ -43,6 +43,45 @@ async function close(application: ElectronApplication) {
   });
   await closed;
 }
+async function draftCiphertext(
+  application: ElectronApplication,
+  directory: string,
+  id: string,
+  replacement?: string,
+) {
+  return application.evaluate(
+    (_, { directory, id, replacement }) => {
+      const { join } = process.getBuiltinModule('node:path');
+      const { DatabaseSync } = process.getBuiltinModule('node:sqlite');
+      const sql = new DatabaseSync(join(directory, 'notes.sqlite'));
+      try {
+        const row = sql
+          .prepare('SELECT profile,payload FROM drafts WHERE id=?')
+          .get(id);
+        if (
+          typeof row?.profile !== 'string' ||
+          !(row.payload instanceof Uint8Array)
+        )
+          throw new Error('The synthetic encrypted draft is unavailable.');
+        const original = Buffer.from(row.payload);
+        const next =
+          replacement === undefined
+            ? Buffer.from(original)
+            : Buffer.from(replacement, 'base64');
+        if (next.length < 30)
+          throw new Error('The synthetic encrypted envelope is incomplete.');
+        if (replacement === undefined) next[13] = next[13]! ^ 0x80;
+        sql
+          .prepare('UPDATE drafts SET payload=? WHERE profile=? AND id=?')
+          .run(next, row.profile, id);
+        return original.toString('base64');
+      } finally {
+        sql.close();
+      }
+    },
+    { directory, id, replacement },
+  );
+}
 
 test('flushes before the updates page, disables unconfigured updates and rejects other windows', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'windows-notes-updates-'));
@@ -419,6 +458,31 @@ test('pages meeting summaries and saves the selected editor even when a search e
     await expect(
       page.getByRole('navigation', { name: 'Meetings' }).getByRole('button'),
     ).toHaveCount(50);
+    const warmed = await page.evaluate(() =>
+      window.notes.invoke({ operation: 'bootstrap' }),
+    );
+    if (!warmed.ok || !('state' in warmed))
+      throw new Error('The warmed synthetic library is unavailable.');
+    const target = warmed.state.documents.find(
+      (document) => document.id !== warmed.state.selected_id,
+    );
+    if (!target) throw new Error('No nonselected synthetic meeting.');
+    const original = await draftCiphertext(application, directory, target.id);
+    try {
+      expect(
+        await page.evaluate(() =>
+          window.notes.invoke({ operation: 'bootstrap' }),
+        ),
+      ).toMatchObject({ ok: false, error: { code: 'local_data_corrupt' } });
+    } finally {
+      await draftCiphertext(application, directory, target.id, original);
+    }
+    expect(
+      await page.evaluate(() =>
+        window.notes.invoke({ operation: 'bootstrap' }),
+      ),
+    ).toMatchObject({ ok: true });
+    await expect(editor).toHaveText('Synthetic paged body 54.');
     await page
       .getByRole('button', { name: 'More meetings', exact: true })
       .click();
@@ -515,15 +579,28 @@ test('persists rich text across restart, isolates the renderer and keeps local f
       ],
     });
     expect(
-      await application.evaluate(({ BrowserWindow, safeStorage }) => ({
-        sandbox:
-          BrowserWindow.getAllWindows()[0]?.webContents.getLastWebPreferences()
-            .sandbox,
-        isolation:
-          BrowserWindow.getAllWindows()[0]?.webContents.getLastWebPreferences()
-            .contextIsolation,
-        encrypted: safeStorage.isEncryptionAvailable(),
-      })),
+      await application.evaluate(({ BrowserWindow, safeStorage }) => {
+        const contents = BrowserWindow.getAllWindows()[0]?.webContents;
+        if (
+          !contents ||
+          !('getLastWebPreferences' in contents) ||
+          typeof contents.getLastWebPreferences !== 'function'
+        )
+          throw new Error('The window preferences getter is unavailable.');
+        const preferences: unknown = contents.getLastWebPreferences();
+        if (
+          !preferences ||
+          typeof preferences !== 'object' ||
+          !('sandbox' in preferences) ||
+          !('contextIsolation' in preferences)
+        )
+          throw new Error('The window preferences are incomplete.');
+        return {
+          sandbox: preferences.sandbox,
+          isolation: preferences.contextIsolation,
+          encrypted: safeStorage.isEncryptionAvailable(),
+        };
+      }),
     ).toEqual({ sandbox: true, isolation: true, encrypted: true });
     expect(
       await page.evaluate(async () => {

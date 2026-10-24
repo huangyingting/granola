@@ -108,7 +108,9 @@ const rowSchema = z.strictObject({
   payload: z.instanceof(Uint8Array),
 });
 type Row = z.infer<typeof rowSchema>;
-const headerSchema = rowSchema.omit({ payload: true });
+const headerSchema = rowSchema.omit({ payload: true }).extend({
+  data_version: z.number().int().positive(),
+});
 const bootstrapSchema = z.strictObject({
   cursor: syncSnapshotSchema.shape.cursor.nullable(),
   after: resourceId.nullable(),
@@ -1382,7 +1384,7 @@ export class LocalStore {
     )
       this.search = { profile, query: normalized, matches: new Map() };
     const sql =
-      'SELECT profile,id,revision,remote_revision,dirty,conflict,deleted,updated_at FROM drafts WHERE profile=? AND deleted=0 ORDER BY updated_at DESC,id';
+      'SELECT profile,id,revision,remote_revision,dirty,conflict,deleted,updated_at,(SELECT data_version FROM pragma_data_version) AS data_version FROM drafts WHERE profile=? AND deleted=0 ORDER BY updated_at DESC,id';
     const statement = this.database.prepare(
       normalized ? sql : `${sql} LIMIT 51 OFFSET ?`,
     );
@@ -1436,7 +1438,7 @@ export class LocalStore {
         const first = this.summaries.keys().next();
         if (!first.done) this.summaries.delete(first.value);
       }
-      documents.push(summary);
+      documents.push(structuredClone(summary));
     }
     return { documents, has_more: false };
   }

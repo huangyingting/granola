@@ -168,6 +168,50 @@ describe('Windows desktop synthetic service contract', () => {
     ).toEqual({ jobs });
     expect(desktopStateSchema.parse(state)).toEqual(state);
   });
+  it('library cache detaches summary objects and tags across warm desktop snapshots', async () => {
+    fixture.seed('A synthetic library note.');
+    await connect();
+    const first = controller.snapshot();
+    const expected = structuredClone(first.documents);
+    first.documents[0]!.title = 'Caller-modified title.';
+    first.documents[0]!.preview = 'Caller-modified preview.';
+    first.documents[0]!.tags.push('Caller-modified tag.');
+    expect(controller.snapshot().documents).toEqual(expected);
+  });
+  it('library cache surfaces ciphertext corruption in a warmed nonselected meeting', async () => {
+    fixture.seed('First synthetic library note.');
+    fixture.seed('Second synthetic library note.');
+    await connect();
+    const first = controller.snapshot();
+    const target = first.documents.find(
+      (document) => document.id !== first.selected_id,
+    );
+    if (!target) throw new Error('No nonselected synthetic meeting.');
+    const sql = new DatabaseSync(join(directory, 'notes.sqlite'));
+    const original = Buffer.from(
+      z
+        .instanceof(Uint8Array)
+        .parse(
+          sql
+            .prepare('SELECT payload FROM drafts WHERE profile=? AND id=?')
+            .get(controller.profile, target.id)?.payload,
+        ),
+    );
+    try {
+      const damaged = Buffer.from(original);
+      damaged[13] = damaged[13]! ^ 0x80;
+      sql
+        .prepare('UPDATE drafts SET payload=? WHERE profile=? AND id=?')
+        .run(damaged, controller.profile, target.id);
+      expect(() => controller.snapshot()).toThrow('could not be unlocked');
+    } finally {
+      sql
+        .prepare('UPDATE drafts SET payload=? WHERE profile=? AND id=?')
+        .run(original, controller.profile, target.id);
+      sql.close();
+    }
+    expect(controller.snapshot().documents).toEqual(first.documents);
+  });
   it('summary history IPC rejects a full summary body in routine desktop state', async () => {
     const { jobs } = await savedSummaries(1);
     expect(

@@ -1,4 +1,9 @@
-import { createCipheriv, randomBytes, randomUUID } from 'node:crypto';
+import {
+  createCipheriv,
+  createDecipheriv,
+  randomBytes,
+  randomUUID,
+} from 'node:crypto';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -7,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { documentSchema } from '@windows-ai-notes/contracts/server';
 import {
+  canonicalJson,
   richTextFromPlainText,
   richTextToPlainText,
 } from '@windows-ai-notes/contracts/content';
@@ -1314,6 +1320,206 @@ describe('encrypted local drafts and durable outbox', () => {
     expect(hidden.documents.map((draft) => draft.id)).toEqual([drafts[56]!.id]);
     expect(hidden.documents[0]?.preview).toBe('a'.repeat(160));
     expect(() => store.page(profile, '', -1)).toThrow('supported search');
+  });
+  function rewriteDraftBody(id: string, value: ReturnType<typeof fields>) {
+    const sql = new DatabaseSync(path);
+    try {
+      const row = sql
+        .prepare('SELECT * FROM drafts WHERE profile=? AND id=?')
+        .get(profile, id);
+      if (!row) throw new Error('The synthetic encrypted draft is missing.');
+      const encrypted = Buffer.from(
+        z.instanceof(Uint8Array).parse(row.payload),
+      );
+      const context = Buffer.from(
+        canonicalJson([
+          'windows-ai-notes-local',
+          1,
+          'draft',
+          profile,
+          id,
+          row.revision,
+          row.remote_revision,
+          row.dirty,
+          row.conflict,
+          row.deleted,
+          row.updated_at,
+        ]),
+      );
+      const decipher = createDecipheriv(
+        'aes-256-gcm',
+        key,
+        encrypted.subarray(1, 13),
+      );
+      decipher.setAAD(context);
+      decipher.setAuthTag(encrypted.subarray(-16));
+      const clear = Buffer.concat([
+        decipher.update(encrypted.subarray(13, -16)),
+        decipher.final(),
+      ]);
+      try {
+        const previous = z
+          .record(z.string(), z.unknown())
+          .parse(JSON.parse(clear.toString('utf8')));
+        const nonce = randomBytes(12);
+        const cipher = createCipheriv('aes-256-gcm', key, nonce);
+        cipher.setAAD(context);
+        sql
+          .prepare('UPDATE drafts SET payload=? WHERE profile=? AND id=?')
+          .run(
+            Buffer.concat([
+              Buffer.from([1]),
+              nonce,
+              cipher.update(JSON.stringify({ ...previous, ...value })),
+              cipher.final(),
+              cipher.getAuthTag(),
+            ]),
+            profile,
+            id,
+          );
+      } finally {
+        clear.fill(0);
+      }
+    } finally {
+      sql.close();
+    }
+  }
+  it('library cache observes authenticated ciphertext-only foreign commits without changed headers', () => {
+    const store = open();
+    const draft = store.create(profile, fields('Original private body.'));
+    expect(store.page(profile).documents[0]?.preview).toBe(
+      'Original private body.',
+    );
+    const replacement = {
+      ...fields('New private body.', 'New private title'),
+      tags: ['Changed tag'],
+    };
+    rewriteDraftBody(draft.id, replacement);
+    expect(store.get(profile, draft.id)).toMatchObject({
+      ...replacement,
+      local_revision: draft.local_revision,
+      updated_at: draft.updated_at,
+    });
+    expect(store.page(profile).documents[0]).toMatchObject({
+      title: replacement.title,
+      preview: 'New private body.',
+      tags: replacement.tags,
+    });
+  });
+  it.each([true, false])(
+    'library cache rechecks full-body search after a ciphertext-only commit from initial match=%s',
+    (matched) => {
+      const store = open();
+      const original = matched ? 'a'.repeat(300) + ' hidden-needle' : 'Absent.';
+      const replacement = matched
+        ? 'No longer matches.'
+        : 'b'.repeat(300) + ' hidden-needle';
+      const draft = store.create(profile, fields(original));
+      expect(store.page(profile, 'hidden-needle').documents).toHaveLength(
+        matched ? 1 : 0,
+      );
+      rewriteDraftBody(draft.id, fields(replacement));
+      expect(richTextToPlainText(store.get(profile, draft.id).content)).toBe(
+        replacement,
+      );
+      expect(store.page(profile, 'hidden-needle').documents).toHaveLength(
+        matched ? 0 : 1,
+      );
+    },
+  );
+  it.each(['', 'private'])(
+    'library cache returns detached metadata for query=%j',
+    (query) => {
+      const store = open();
+      store.create(profile, fields('Private matching body.'));
+      const first = store.page(profile, query);
+      const expected = structuredClone(first);
+      first.documents[0]!.title = 'Caller mutation.';
+      first.documents[0]!.preview = 'Caller preview.';
+      first.documents[0]!.tags.push('Caller tag.');
+      first.documents.length = 0;
+      const get = vi.spyOn(store, 'get');
+      expect(store.page(profile, query)).toEqual(expected);
+      expect(get).not.toHaveBeenCalled();
+    },
+  );
+  it.each(['', 'private', 'absent'])(
+    'library cache reports foreign ciphertext corruption instead of reusing query=%j',
+    (query) => {
+      const store = open();
+      const draft = store.create(profile, fields('Private matching body.'));
+      store.page(profile, query);
+      const writer = new DatabaseSync(path);
+      try {
+        const encrypted = Buffer.from(
+          z
+            .instanceof(Uint8Array)
+            .parse(
+              writer
+                .prepare('SELECT payload FROM drafts WHERE profile=? AND id=?')
+                .get(profile, draft.id)?.payload,
+            ),
+        );
+        encrypted[13] = encrypted[13]! ^ 0x80;
+        writer
+          .prepare('UPDATE drafts SET payload=? WHERE profile=? AND id=?')
+          .run(encrypted, profile, draft.id);
+        for (let index = 0; index < 2; index++)
+          expect(() => store.page(profile, query)).toThrow(
+            'could not be unlocked',
+          );
+      } finally {
+        writer.close();
+      }
+    },
+  );
+  it('library cache reuses a verified search after another connection rolls back', () => {
+    const store = open();
+    const draft = store.create(profile, fields('Private matching body.'));
+    const expected = store.page(profile, 'private');
+    const writer = new DatabaseSync(path);
+    try {
+      writer.exec('BEGIN');
+      writer
+        .prepare('UPDATE drafts SET payload=? WHERE profile=? AND id=?')
+        .run(Buffer.from([1]), profile, draft.id);
+      writer.exec('ROLLBACK');
+      const get = vi.spyOn(store, 'get');
+      expect(store.page(profile, 'private')).toEqual(expected);
+      expect(get).not.toHaveBeenCalled();
+    } finally {
+      writer.close();
+    }
+  });
+  it('library cache keeps an active scan coherent and observes a commit on the next query', () => {
+    const store = open();
+    const first = store.create(profile, fields('Shared search phrase.'));
+    const second = store.create(profile, fields('Shared search phrase.'));
+    expect(store.page(profile, 'shared search phrase').documents).toHaveLength(
+      2,
+    );
+    store.save(
+      profile,
+      first.id,
+      1,
+      fields('Shared search phrase.', 'Edited synthetic meeting'),
+    );
+    const get = store.get.bind(store);
+    let changed = false;
+    const reads = vi.spyOn(store, 'get').mockImplementation((scope, id) => {
+      if (!changed) {
+        changed = true;
+        rewriteDraftBody(second.id, fields('No longer included.'));
+      }
+      return get(scope, id);
+    });
+    expect(store.page(profile, 'shared search phrase').documents).toHaveLength(
+      2,
+    );
+    expect(reads).toHaveBeenCalledTimes(1);
+    const next = store.page(profile, 'shared search phrase');
+    expect(next.documents).toHaveLength(1);
+    expect(next.documents[0]?.id).toBe(first.id);
   });
   it('invalidates summary/search caches on rollback, deletion and profile purge without crossing account scopes', () => {
     const store = open();
