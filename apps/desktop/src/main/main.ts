@@ -682,6 +682,18 @@ async function start() {
               ok: true,
               state: await workspace().applyTranscript(command),
             });
+          if (command.operation === 'getSummaryResult') {
+            const result = await workspace().summaries.readResult(command);
+            return desktopResponseSchema.parse({
+              ok: true,
+              summary_result: {
+                scope: command.scope,
+                document_id: command.id,
+                job_id: command.job_id,
+                result,
+              },
+            });
+          }
           if (command.operation === 'getSummaryTemplates') {
             const catalog = await workspace().summaries.templates(
               command.scope,

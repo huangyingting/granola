@@ -277,12 +277,20 @@ editor receives a full draft. Search covers titles, tags and the complete note
 body, including text beyond its preview, without writing a plaintext search
 index. Paging and filtering preserve the current editor. Cold full-body search
 still scans and decrypts candidates in the main process; large-library latency
-and full job payloads remain performance release gates. Bootstrap and state
+and full job API/cache payloads remain performance release gates. Bootstrap and state
 responses expose only the bounded first transcript page, including when reading
 legacy full-transcript caches. The encrypted legacy revision is not rewritten;
 later pages remain available offline. Main still decrypts the complete legacy
 value before projecting that first page, so this is not a cold-cache latency or
 Main-memory acceptance claim.
+
+Routine desktop job history includes summary status, model/prompt metadata and
+usage, but not completed summary bodies. The selected saved result is loaded
+through scoped read-only IPC, with inline loading/retry and stale-view checks;
+ordinary state refreshes do not reload an unchanged result. Full encrypted job
+artifacts and history remain intact for offline reads and compatible rollback.
+This does not shrink server job responses or avoid decrypting the complete
+cached history in Main, and it does not authorize a new AI request.
 
 ```sh
 pnpm audio:publish

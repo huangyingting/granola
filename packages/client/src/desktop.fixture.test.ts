@@ -3,17 +3,20 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
 import { LocalStore } from '@windows-ai-notes/local';
 import { richTextFromPlainText } from '@windows-ai-notes/contracts/content';
 import { desktopStateSchema } from '@windows-ai-notes/contracts/desktop';
 import {
   cachedTranscriptSchema,
+  jobSchema,
   transcriptPageSchema,
   TRANSCRIPT_PAGE_TEXT_BYTES,
   type TranscriptPage,
 } from '@windows-ai-notes/contracts/server';
 import { desktopFixture } from './desktop.fixture.js';
 import { WorkspaceController } from './workspace.js';
+import { ApiClient } from './http.js';
 
 describe('Windows desktop synthetic service contract', () => {
   let fixture: Awaited<ReturnType<typeof desktopFixture>>;
@@ -39,6 +42,7 @@ describe('Windows desktop synthetic service contract', () => {
     );
   });
   afterEach(async () => {
+    vi.restoreAllMocks();
     controller.dispose();
     await fixture.close();
     local.close();
@@ -85,6 +89,175 @@ describe('Windows desktop synthetic service contract', () => {
       end_ms: index * 1000 + 999,
       text,
     }));
+  async function savedSummaries(count = 20) {
+    const document = fixture.seed('Synthetic saved summary evidence.');
+    const jobs = Array.from({ length: count }, (_, index) =>
+      jobSchema.parse({
+        id: randomUUID(),
+        document_id: document.id,
+        kind: 'summary',
+        state: 'succeeded',
+        attempt: 1,
+        input_stale: false,
+        error: null,
+        created_at: new Date(Date.now() - index * 1000).toISOString(),
+        result: {
+          kind: 'summary',
+          provider: 'fixture',
+          configuration_version: 'saved-summary-fixture-v1',
+          prompt_version: 'summary-v1',
+          usage: { input_tokens: 20, output_tokens: 30, audio_ms: 0 },
+          summary: {
+            overview: {
+              text: `Completed summary body ${index}. ${'Evidence '.repeat(200)}`,
+              citations: [{ source: 'note', id: document.id, revision: 1 }],
+            },
+            topics: [],
+            decisions: [],
+            action_items: [],
+            open_questions: [],
+          },
+        },
+      }),
+    );
+    for (const job of [...jobs].reverse()) fixture.state.jobs.set(job.id, job);
+    await connect();
+    return { document, jobs };
+  }
+  it('summary history IPC omits completed bodies without modifying encrypted job history', async () => {
+    const { document, jobs } = await savedSummaries();
+    const state = controller.snapshot();
+    expect(state.jobs).toHaveLength(20);
+    expect(JSON.stringify(state).includes('Completed summary body')).toBe(
+      false,
+    );
+    expect(Buffer.byteLength(JSON.stringify(state))).toBeLessThan(20_000);
+    expect(state.jobs[0]?.result).toMatchObject({
+      kind: 'summary',
+      prompt_version: 'summary-v1',
+      usage: { input_tokens: 20, output_tokens: 30, audio_ms: 0 },
+    });
+    expect(
+      local.getArtifact(
+        controller.profile,
+        document.id,
+        'job-history',
+        z.strictObject({ jobs: z.array(jobSchema).max(20) }),
+      ),
+    ).toEqual({ jobs });
+    expect(desktopStateSchema.parse(state)).toEqual(state);
+  });
+  it('summary history IPC rejects a full summary body in routine desktop state', async () => {
+    const { jobs } = await savedSummaries(1);
+    expect(
+      desktopStateSchema.safeParse({ ...controller.snapshot(), jobs }).success,
+    ).toBe(false);
+  });
+  it('summary history IPC loads selected full results offline after encrypted restart without network work', async () => {
+    const { document, jobs } = await savedSummaries(2);
+    controller.dispose();
+    local.close();
+    local = new LocalStore(join(directory, 'notes.sqlite'), key);
+    controller = new WorkspaceController(
+      local,
+      fixture.issuer.browser,
+      () => {},
+      {
+        allowLoopback: true,
+      },
+    );
+    fixture.state.jobs.clear();
+    const request = vi
+      .spyOn(ApiClient.prototype, 'request')
+      .mockRejectedValue(
+        new Error('Unexpected network request for saved output.'),
+      );
+    for (const job of jobs)
+      await expect(
+        controller.summaries.readResult({
+          operation: 'getSummaryResult',
+          scope: controller.scope,
+          id: document.id,
+          job_id: job.id,
+        }),
+      ).resolves.toEqual(job.result);
+    expect(request).not.toHaveBeenCalled();
+    expect(controller.snapshot().jobs).toHaveLength(2);
+  });
+  it('summary history IPC rejects stale scopes, foreign cached jobs and unfinished results', async () => {
+    const { document, jobs } = await savedSummaries(1);
+    const job = jobs[0]!;
+    const command = {
+      operation: 'getSummaryResult' as const,
+      scope: controller.scope,
+      id: document.id,
+      job_id: job.id,
+    };
+    await expect(
+      controller.summaries.readResult({
+        ...command,
+        scope: controller.scope + 1,
+      }),
+    ).rejects.toMatchObject({ code: 'workspace_changed' });
+    local.putArtifact(controller.profile, document.id, `job:${job.id}`, {
+      ...job,
+      document_id: randomUUID(),
+    });
+    await expect(
+      controller.summaries.readResult(command),
+    ).rejects.toMatchObject({
+      code: 'invalid_server_response',
+    });
+    local.putArtifact(controller.profile, document.id, `job:${job.id}`, {
+      ...job,
+      state: 'running',
+      result: null,
+    });
+    await expect(
+      controller.summaries.readResult(command),
+    ).rejects.toMatchObject({
+      code: 'summary_unavailable',
+    });
+    local.putArtifact(controller.profile, document.id, `job:${job.id}`, job);
+    const retired = controller.summaries.readResult(command);
+    controller.dispose();
+    await expect(retired).rejects.toMatchObject({ code: 'workspace_closed' });
+  });
+  it('summary history IPC preserves recording results and progress without dropping control metadata', async () => {
+    const { document, jobs } = await savedSummaries(1);
+    const recording_id = randomUUID();
+    const recording = jobSchema.parse({
+      ...jobs[0],
+      kind: 'recording_transcription',
+      recording_id,
+      progress: {
+        completed_chunks: 2,
+        total_chunks: 3,
+        audio_ms: 4000,
+        uncertain_requests: 1,
+      },
+      result: {
+        kind: 'recording_transcription',
+        recording_id,
+        transcript_revision: 1,
+        segment_count: 3,
+        processed_chunks: 2,
+        uncertain_requests: 1,
+        applied: false,
+        partial: true,
+        provider: 'fixture',
+        configuration_version: 'recording-fixture-v1',
+        usage: { input_tokens: 0, output_tokens: 0, audio_ms: 4000 },
+      },
+    });
+    local.putArtifact(controller.profile, document.id, 'job-history', {
+      jobs: [recording],
+    });
+    expect(controller.snapshot().jobs).toEqual([recording]);
+    expect(desktopStateSchema.parse(controller.snapshot()).jobs).toEqual([
+      recording,
+    ]);
+  });
   it('cached transcript IPC projects a full legacy cache to fifty segments without rewriting it', async () => {
     const transcript = await cacheLegacy(legacySegments(1000));
     const state = controller.snapshot();

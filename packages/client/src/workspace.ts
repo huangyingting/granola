@@ -392,12 +392,18 @@ export class WorkspaceController {
       transcript_revision: details?.transcript_revision ?? 0,
       transcript,
       jobs: selected
-        ? (this.local.getArtifact(
-            profile,
-            selected.id,
-            'job-history',
-            z.strictObject({ jobs: z.array(jobSchema).max(20) }),
-          )?.jobs ?? [])
+        ? (
+            this.local.getArtifact(
+              profile,
+              selected.id,
+              'job-history',
+              z.strictObject({ jobs: z.array(jobSchema).max(20) }),
+            )?.jobs ?? []
+          ).map((job) => {
+            if (job.result?.kind !== 'summary') return job;
+            const { summary: _summary, ...result } = job.result;
+            return { ...job, result };
+          })
         : [],
     };
   }

@@ -470,29 +470,31 @@ export const summaryResultSchema = z.strictObject({
   prompt_version: z.string(),
   usage: usageSchema,
 });
+export const transcriptionResultSchema = z.strictObject({
+  kind: z.literal('transcription'),
+  transcript_revision: revision.min(1),
+  segment_count: z.number().int().nonnegative(),
+  provider: z.enum(['azure', 'fixture']),
+  configuration_version: z.string(),
+  usage: usageSchema,
+});
+export const recordingTranscriptionResultSchema = z.strictObject({
+  kind: z.literal('recording_transcription'),
+  recording_id: resourceId,
+  transcript_revision: revision.min(1),
+  segment_count: z.number().int().min(0).max(MAX_TRANSCRIPT_SEGMENTS),
+  processed_chunks: z.number().int().min(1).max(10_000),
+  uncertain_requests: z.number().int().nonnegative(),
+  applied: z.boolean(),
+  partial: z.boolean(),
+  provider: z.enum(['azure', 'fixture']),
+  configuration_version: z.string(),
+  usage: usageSchema,
+});
 export const resultSchema = z.discriminatedUnion('kind', [
   summaryResultSchema,
-  z.strictObject({
-    kind: z.literal('transcription'),
-    transcript_revision: revision.min(1),
-    segment_count: z.number().int().nonnegative(),
-    provider: z.enum(['azure', 'fixture']),
-    configuration_version: z.string(),
-    usage: usageSchema,
-  }),
-  z.strictObject({
-    kind: z.literal('recording_transcription'),
-    recording_id: resourceId,
-    transcript_revision: revision.min(1),
-    segment_count: z.number().int().min(0).max(MAX_TRANSCRIPT_SEGMENTS),
-    processed_chunks: z.number().int().min(1).max(10_000),
-    uncertain_requests: z.number().int().nonnegative(),
-    applied: z.boolean(),
-    partial: z.boolean(),
-    provider: z.enum(['azure', 'fixture']),
-    configuration_version: z.string(),
-    usage: usageSchema,
-  }),
+  transcriptionResultSchema,
+  recordingTranscriptionResultSchema,
 ]);
 export const jobSchema = z.strictObject({
   id: resourceId,
@@ -575,6 +577,7 @@ export const syncChangesSchema = z.strictObject({
 export type Segment = z.infer<typeof segmentSchema>;
 export type Citation = z.infer<typeof citationSchema>;
 export type Summary = z.infer<typeof summarySchema>;
+export type SummaryResult = z.infer<typeof summaryResultSchema>;
 export type SummarySnapshot = z.infer<typeof summarySnapshotSchema>;
 export type JobInput = z.infer<typeof jobInputSchema>;
 export type JobResult = z.infer<typeof resultSchema>;

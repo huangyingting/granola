@@ -9,6 +9,9 @@ import { richTextSchema, tagsSchema } from './content.js';
 import {
   resourceId,
   jobSchema,
+  summaryResultSchema,
+  transcriptionResultSchema,
+  recordingTranscriptionResultSchema,
   transcriptPageSchema,
   transcriptTimelinePageSchema,
   MAX_TRANSCRIPT_SEGMENTS,
@@ -62,6 +65,15 @@ export const draftSummarySchema = draftSchema.omit({ content: true }).extend({
 export type DraftSummary = z.infer<typeof draftSummarySchema>;
 const scoped = { scope: z.number().int().positive() };
 const summaryScoped = { ...scoped, id: resourceId, job_id: resourceId };
+export const desktopJobSchema = jobSchema.extend({
+  result: z
+    .discriminatedUnion('kind', [
+      summaryResultSchema.omit({ summary: true }),
+      transcriptionResultSchema,
+      recordingTranscriptionResultSchema,
+    ])
+    .nullable(),
+});
 export const desktopCommandSchema = z.discriminatedUnion('operation', [
   z.strictObject({ operation: z.literal('bootstrap') }),
   z.strictObject({
@@ -132,6 +144,10 @@ export const desktopCommandSchema = z.discriminatedUnion('operation', [
     operation: z.literal('watchSummary'),
     ...summaryScoped,
     action: z.enum(['start', 'stop']),
+  }),
+  z.strictObject({
+    operation: z.literal('getSummaryResult'),
+    ...summaryScoped,
   }),
   z.strictObject({
     operation: z.literal('getSummaryTemplates'),
@@ -426,7 +442,7 @@ export const desktopStateSchema = z.strictObject({
   conflict: desktopConflictSchema.nullable(),
   transcript_revision: z.number().int().nonnegative(),
   transcript: transcriptPageSchema.nullable(),
-  jobs: z.array(jobSchema).max(20),
+  jobs: z.array(desktopJobSchema).max(20),
   summary_submission: summarySubmissionSchema.nullable().default(null),
   summary_generation: summaryWatchSchema.nullable().default(null),
   chat_generation: chatWatchSchema.nullable().default(null),
@@ -452,6 +468,15 @@ export const desktopResponseSchema = z.union([
     summary_progress: z.strictObject({
       ...scoped,
       progress: summaryProgressSchema,
+    }),
+  }),
+  z.strictObject({
+    ok: z.literal(true),
+    summary_result: z.strictObject({
+      ...scoped,
+      document_id: resourceId,
+      job_id: resourceId,
+      result: summaryResultSchema,
     }),
   }),
   z.strictObject({

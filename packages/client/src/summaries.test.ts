@@ -342,11 +342,20 @@ describe.skipIf(!databaseUrl)(
               state: 'succeeded',
               result: {
                 kind: 'summary',
-                summary: { overview: { text: 'Validated final summary.' } },
               },
             }),
           { timeout: 10_000 },
         );
+        await expect(
+          controller.summaries.readResult({
+            operation: 'getSummaryResult',
+            scope: controller.scope,
+            id: document.id,
+            job_id: job.id,
+          }),
+        ).resolves.toMatchObject({
+          summary: { overview: { text: 'Validated final summary.' } },
+        });
         expect(controller.snapshot().summary_generation).toBeNull();
         expect(
           local.getArtifact(

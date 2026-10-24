@@ -487,7 +487,16 @@ export class DesktopSummaries {
         'summary_unavailable',
         'This job has no completed summary to review.',
       );
-    return { owner, summary: job.result.summary };
+    return { owner, summary: job.result.summary, result: job.result };
+  }
+  async readResult(command: Command<'getSummaryResult'>) {
+    const { owner, result } = await this.result(
+      command.scope,
+      command.id,
+      command.job_id,
+    );
+    owner.authorize();
+    return result;
   }
   private review(scope: number, id: string, job: string, revision?: number) {
     const owner = this.hooks.owner(scope);

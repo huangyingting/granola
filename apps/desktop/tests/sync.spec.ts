@@ -526,6 +526,30 @@ test('recovers one summary and resume receipt, inspects frozen evidence, persist
         exact: true,
       }),
     ).toBeVisible();
+    const delivered = await page.evaluate(async (job_id) => {
+      const bootstrap = await window.notes.invoke({ operation: 'bootstrap' });
+      if (
+        !bootstrap.ok ||
+        !('state' in bootstrap) ||
+        !bootstrap.state.selected_id
+      )
+        throw new Error('The summary workspace is not available.');
+      const result = await window.notes.invoke({
+        operation: 'getSummaryResult',
+        scope: bootstrap.state.scope,
+        id: bootstrap.state.selected_id,
+        job_id,
+      });
+      if (!result.ok || !('summary_result' in result))
+        throw new Error('The selected summary did not cross preload.');
+      return { jobs: bootstrap.state.jobs, result: result.summary_result };
+    }, job.id);
+    expect(delivered.jobs[0]?.result).not.toHaveProperty('summary');
+    expect(delivered.result).toMatchObject({
+      document_id: remote.id,
+      job_id: job.id,
+      result: fixture.state.jobs.get(job.id)!.result,
+    });
     await page
       .getByRole('button', { name: 'Inspect source 1', exact: true })
       .first()
@@ -569,6 +593,21 @@ test('recovers one summary and resume receipt, inspects frozen evidence, persist
       editor.getByRole('textbox', { name: 'Summary review text' }),
     ).toBeEnabled();
     await editor.getByRole('textbox', { name: 'Summary review text' }).fill('');
+    await expect(editor.getByRole('alert')).toContainText(
+      'have not been saved',
+    );
+    const refresh = page.getByRole('button', {
+      name: 'Refresh summary',
+      exact: true,
+    });
+    await refresh.click();
+    await expect(refresh).toBeEnabled();
+    await expect(
+      page.getByText('Loading saved summary...', { exact: true }),
+    ).toHaveCount(0);
+    await expect(
+      editor.getByRole('textbox', { name: 'Summary review text' }),
+    ).toHaveValue('');
     await expect(editor.getByRole('alert')).toContainText(
       'have not been saved',
     );
@@ -678,6 +717,27 @@ test('recovers one summary and resume receipt, inspects frozen evidence, persist
     )!;
     fixture.publishSummary(next.id);
     await synchronize(application);
+    const history = page.getByRole('combobox', { name: 'Summary history' });
+    await expect(history).toHaveValue(next.id);
+    fixture.state.summary_online = false;
+    await history.selectOption(job.id);
+    await page
+      .getByRole('button', { name: 'Inspect source 1', exact: true })
+      .first()
+      .click();
+    await expect(
+      page.getByRole('complementary', { name: 'Frozen summary source' }),
+    ).toContainText(remote.notes);
+    await page
+      .getByRole('button', { name: 'Close source', exact: true })
+      .click();
+    await history.selectOption(next.id);
+    await expect(
+      page.getByText('Synthetic generated summary for review.', {
+        exact: true,
+      }),
+    ).toBeVisible();
+    fixture.state.summary_online = true;
     await page
       .getByRole('button', { name: 'Inspect source 1', exact: true })
       .first()

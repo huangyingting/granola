@@ -5,7 +5,10 @@ import type {
   DesktopState,
   Draft,
 } from '@windows-ai-notes/contracts/desktop';
-import type { Summary } from '@windows-ai-notes/contracts/server';
+import type {
+  Summary,
+  SummaryResult,
+} from '@windows-ai-notes/contracts/server';
 import {
   SUMMARY_FACTS_PROMPT,
   summaryNeedsNewRequest,
@@ -70,6 +73,13 @@ export function SummaryPanel(props: Props) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [source, setSource] = useState<SummarySource | null>(null);
+  const [savedResult, setSavedResult] = useState<{
+    key: string;
+    result: SummaryResult;
+  } | null>(null);
+  const [resultLoading, setResultLoading] = useState(false);
+  const [resultError, setResultError] = useState('');
+  const [resultRetry, setResultRetry] = useState(0);
   const [editing, setEditing] = useState(false);
   const [unavailable, setUnavailable] = useState(false);
   const view = useRef(0);
@@ -88,6 +98,8 @@ export function SummaryPanel(props: Props) {
       viewedJob.current = undefined;
       reviewFlush.current = async () => true;
       setSource(null);
+      setSavedResult(null);
+      setResultError('');
       setEditing(false);
       setConfirmation(null);
       setResume(null);
@@ -177,7 +189,56 @@ export function SummaryPanel(props: Props) {
     !submission.rejected &&
     (!submission.job_id || !jobs.some((item) => item.id === submission.job_id));
   const running = jobs.some((item) => pending(item.state));
-  const summary = job?.result?.kind === 'summary' ? job.result.summary : null;
+  const resultKey =
+    job?.state === 'succeeded' && job.result?.kind === 'summary'
+      ? JSON.stringify([state.scope, draft.id, job.id, job.attempt, job.result])
+      : null;
+  useEffect(() => {
+    if (!job || !resultKey || unavailable) {
+      setSavedResult(null);
+      setResultLoading(false);
+      setResultError('');
+      return;
+    }
+    const jobId = job.id;
+    const version = view.current;
+    let alive = true;
+    setResultLoading(true);
+    setResultError('');
+    void window.notes
+      .invoke({
+        operation: 'getSummaryResult',
+        scope: state.scope,
+        id: draft.id,
+        job_id: jobId,
+      })
+      .then((response) => {
+        if (!alive || version !== view.current) return;
+        if (!response.ok) throw new Error(response.error.message);
+        if (
+          !('summary_result' in response) ||
+          response.summary_result.scope !== state.scope ||
+          response.summary_result.document_id !== draft.id ||
+          response.summary_result.job_id !== jobId
+        )
+          throw new Error('The saved summary belongs to another meeting view.');
+        setSavedResult({
+          key: resultKey,
+          result: response.summary_result.result,
+        });
+      })
+      .catch((error) => {
+        if (alive && version === view.current) setResultError(message(error));
+      })
+      .finally(() => {
+        if (alive && version === view.current) setResultLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [state.scope, draft.id, resultKey, resultRetry, unavailable]);
+  const summary =
+    savedResult?.key === resultKey ? savedResult.result.summary : null;
   const templateVersion =
     job?.result?.kind === 'summary' ? job.result.prompt_version : null;
   const citations = summary ? summaryCitations(summary) : [];
@@ -643,6 +704,7 @@ export function SummaryPanel(props: Props) {
                       throw new Error(
                         'The latest summary status could not be confirmed.',
                       );
+                    setResultRetry((value) => value + 1);
                   })
                 }
               >
@@ -759,6 +821,18 @@ export function SummaryPanel(props: Props) {
                   Keep paused
                 </button>
               </div>
+            </div>
+          )}
+          {resultLoading && <p role="status">Loading saved summary...</p>}
+          {resultError && (
+            <div className="account-alert" role="alert">
+              <p>{resultError}</p>
+              <button
+                disabled={resultLoading}
+                onClick={() => setResultRetry((value) => value + 1)}
+              >
+                Retry saved summary
+              </button>
             </div>
           )}
           {summary && (
