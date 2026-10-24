@@ -161,6 +161,15 @@ jobs:
       - name: Real Electron renderer, DPAPI, restart and fail-closed checks
         if: runner.os == 'Windows'
         run: pnpm desktop:test
+      - name: Upload body-free Windows library observations
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          archive: true
+          name: controlled-windows-library-observations
+          if-no-files-found: error
+          path: artifacts/windows-library-observations.json
+          retention-days: 7
       - name: Package unsigned developer-preview installer
         if: runner.os == 'Windows'
         run: pnpm desktop:package:unsigned

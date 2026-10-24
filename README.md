@@ -309,6 +309,17 @@ later pages remain available offline. Main still decrypts the complete legacy
 value before projecting that first page, so this is not a cold-cache latency or
 Main-memory acceptance claim.
 
+Controlled Windows UI checks also seed 1,100 encrypted synthetic notes (550 plain,
+550 structured), using the existing LocalStore and the real DPAPI key only inside
+development Main. Three fresh-process full scans, fifteen distinct warm scans and
+three selected-save responses with an active no-match query produce the body-free
+`controlled-windows-library-observations` CI artifact. Durations cover validated
+sandboxed Renderer/Main IPC round trips, not rendering or setup throughput.
+Separate checks preserve paging and real editor flushes across natural process
+exits and encrypted restarts. Small CI samples do not establish representative
+hardware performance, full job-history cost or an approved SLO; both SLO and
+production acceptance stay false.
+
 Routine desktop job history includes summary status, model/prompt metadata and
 usage, but not completed summary bodies. The selected saved result is loaded
 through scoped read-only IPC, with inline loading/retry and stale-view checks;
