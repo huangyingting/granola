@@ -22,6 +22,7 @@ import {
 import { desktopFixture } from './desktop.fixture.js';
 import { WorkspaceController } from './workspace.js';
 import { ApiClient } from './http.js';
+import { windowsHistoryJobs } from './history.fixture.js';
 
 describe('Windows desktop synthetic service contract', () => {
   let fixture: Awaited<ReturnType<typeof desktopFixture>>;
@@ -29,6 +30,7 @@ describe('Windows desktop synthetic service contract', () => {
   let key: Buffer;
   let local: LocalStore;
   let controller: WorkspaceController;
+  let fixtureClosed: boolean;
   const fields = (text: string) => ({
     title: 'Synthetic desktop meeting',
     content: richTextFromPlainText(text),
@@ -56,6 +58,7 @@ describe('Windows desktop synthetic service contract', () => {
   }
   beforeEach(async () => {
     fixture = await desktopFixture();
+    fixtureClosed = false;
     directory = mkdtempSync(join(tmpdir(), 'windows-notes-desktop-fixture-'));
     key = randomBytes(32);
     local = new LocalStore(join(directory, 'notes.sqlite'), key);
@@ -69,7 +72,7 @@ describe('Windows desktop synthetic service contract', () => {
   afterEach(async () => {
     vi.restoreAllMocks();
     controller.dispose();
-    await fixture.close();
+    if (!fixtureClosed) await fixture.close();
     local.close();
     key.fill(0);
     rmSync(directory, { recursive: true, force: true });
@@ -149,6 +152,38 @@ describe('Windows desktop synthetic service contract', () => {
     await connect();
     return { document, jobs };
   }
+  it('reads every substantial saved summary after encrypted restart with the service and issuer stopped', async () => {
+    const document = fixture.seed('Synthetic offline saved-history meeting.');
+    const jobs = windowsHistoryJobs(document.id);
+    for (const job of jobs) fixture.state.jobs.set(job.id, job);
+    await connect();
+    const encrypted = encryptedJobs(document.id);
+    expect(encrypted).toHaveLength(22);
+    controller.dispose();
+    await fixture.close();
+    fixtureClosed = true;
+    local.close();
+    local = new LocalStore(join(directory, 'notes.sqlite'), key);
+    controller = new WorkspaceController(
+      local,
+      fixture.issuer.browser,
+      () => {},
+      { allowLoopback: true },
+    );
+    expect(controller.snapshot().jobs).toHaveLength(20);
+    const request = vi.spyOn(ApiClient.prototype, 'request');
+    for (const job of jobs) {
+      const result = await controller.summaries.readResult({
+        operation: 'getSummaryResult',
+        scope: controller.scope,
+        id: document.id,
+        job_id: job.id,
+      });
+      expect(result).toEqual(job.result);
+    }
+    expect(request).not.toHaveBeenCalled();
+    expect(encryptedJobs(document.id)).toEqual(encrypted);
+  });
   it('summary history IPC omits completed bodies without modifying encrypted job history', async () => {
     const { document, jobs } = await savedSummaries();
     const state = controller.snapshot();

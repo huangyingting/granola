@@ -4,12 +4,28 @@ import {
   test,
   type ElectronApplication,
 } from '@playwright/test';
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import {
+  mkdtemp,
+  mkdir,
+  readFile,
+  readdir,
+  rm,
+  writeFile,
+} from 'node:fs/promises';
 import { existsSync } from 'node:fs';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { once } from 'node:events';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { richTextFromPlainText } from '@windows-ai-notes/contracts/content';
 import { desktopFixture } from '../../../packages/client/src/desktop.fixture.js';
+import {
+  WINDOWS_HISTORY_MARKER,
+  windowsHistoryJobs,
+  windowsHistoryObservationSchema,
+} from '../../../packages/client/src/history.fixture.js';
+import { latencySummary } from '../../../packages/client/src/load.fixture.js';
 
 test.skip(
   process.platform !== 'win32',
@@ -440,6 +456,366 @@ test('recovers consented chat and recovery receipts across Windows restarts, ins
     await fixture.close();
     await rm(directory, { recursive: true, force: true });
   }
+});
+test('observes twenty substantial saved summaries across cold selection, note saves and offline Windows restarts', async () => {
+  test.skip(process.arch !== 'x64', 'Actual x64 Windows is required.');
+  test.setTimeout(120_000);
+  const output = fileURLToPath(
+    new URL(
+      '../../../artifacts/windows-saved-history-observations.json',
+      import.meta.url,
+    ),
+  );
+  await rm(output, { force: true });
+  const directory = await mkdtemp(
+    join(tmpdir(), 'windows-notes-saved-history-'),
+  );
+  const fixture = await desktopFixture();
+  const history = fixture.seed(
+    'Synthetic saved-history notes remain editable.',
+  );
+  const control = fixture.seed(
+    'Synthetic control meeting without saved history.',
+  );
+  const jobs = windowsHistoryJobs(history.id);
+  for (const job of jobs) fixture.state.jobs.set(job.id, job);
+  let application: ElectronApplication | null = null;
+  let fixtureClosed = false;
+  const cold: number[] = [],
+    warm: number[] = [],
+    saved: number[] = [],
+    results: number[] = [];
+  let maximumStatusBytes = 0,
+    maximumResultBytes = 0;
+  let expectedText = history.notes;
+
+  async function end() {
+    if (!application)
+      throw new Error('The history application is not running.');
+    const exited = once(application.process(), 'exit');
+    await close(application);
+    const [code, signal] = await exited;
+    expect(code).toBe(0);
+    expect(signal).toBeNull();
+    application = null;
+  }
+  async function settleControl() {
+    if (!application)
+      throw new Error('The history application is not running.');
+    const page = await application.firstWindow();
+    await expect(
+      page.getByRole('textbox', { name: 'Meeting notes', exact: true }),
+    ).toBeVisible();
+    const response = await page.evaluate(async (id) => {
+      const current = await window.notes.invoke({ operation: 'bootstrap' });
+      if (!current.ok || !('state' in current))
+        throw new Error('No control state.');
+      return window.notes.invoke({
+        operation: 'select',
+        scope: current.state.scope,
+        id,
+      });
+    }, control.id);
+    if (!response.ok || !('state' in response))
+      throw new Error('Control selection failed.');
+    expect(response.state.selected_id).toBe(control.id);
+    expect(response.state.jobs).toEqual([]);
+    await page.reload();
+    await expect(
+      page.getByRole('textbox', { name: 'Meeting notes', exact: true }),
+    ).toHaveText(control.notes);
+  }
+  async function readResults(indices: number[]) {
+    if (!application)
+      throw new Error('The history application is not running.');
+    const page = await application.firstWindow();
+    const expected = indices.map((index) => ({
+      id: jobs[index]!.id,
+      digest: createHash('sha256')
+        .update(JSON.stringify(jobs[index]!.result))
+        .digest('hex'),
+    }));
+    return page.evaluate(
+      async ({ id, expected }) => {
+        const initial = await window.notes.invoke({ operation: 'bootstrap' });
+        if (
+          !initial.ok ||
+          !('state' in initial) ||
+          initial.state.selected_id !== id
+        )
+          throw new Error('The saved-result selection is unavailable.');
+        const measured = [];
+        for (const job of expected) {
+          const started = performance.now();
+          const response = await window.notes.invoke({
+            operation: 'getSummaryResult',
+            scope: initial.state.scope,
+            id,
+            job_id: job.id,
+          });
+          const elapsed = performance.now() - started;
+          if (
+            !response.ok ||
+            !('summary_result' in response) ||
+            response.summary_result.document_id !== id ||
+            response.summary_result.job_id !== job.id
+          )
+            throw new Error('The complete saved result was not delivered.');
+          const encoded = new TextEncoder().encode(
+            JSON.stringify(response.summary_result.result),
+          );
+          const digest = Array.from(
+            new Uint8Array(await crypto.subtle.digest('SHA-256', encoded)),
+            (value) => value.toString(16).padStart(2, '0'),
+          ).join('');
+          if (digest !== job.digest)
+            throw new Error('The complete saved result changed.');
+          measured.push({
+            elapsed,
+            bytes: new TextEncoder().encode(JSON.stringify(response)).length,
+          });
+        }
+        return measured;
+      },
+      { id: history.id, expected },
+    );
+  }
+  try {
+    application = await launch(directory);
+    let page = await application.firstWindow();
+    await page.getByRole('button', { name: /Account & sync/ }).click();
+    await page.getByRole('textbox', { name: 'Service URL' }).fill(fixture.url);
+    await page
+      .getByRole('button', { name: 'Sign in with browser', exact: true })
+      .click();
+    await page
+      .getByRole('button', {
+        name: /^Synthetic cloud workspace (Open workspace|Current workspace)$/,
+      })
+      .click();
+    await expect(
+      page.getByRole('textbox', { name: 'Meeting notes', exact: true }),
+    ).toBeVisible();
+    await settleControl();
+    const encrypted = await encryptedCache(application, directory, history.id);
+    expect(encrypted).toHaveLength(22);
+    expect(encrypted.map((row) => row.id)).toContain(
+      `artifact:${history.id}:job-history-metadata:v1`,
+    );
+    await end();
+    await fixture.close();
+    fixtureClosed = true;
+    expect(fixture.state.failures).toEqual([]);
+    expect(fixture.issuer.state.failures).toEqual([]);
+
+    for (let sample = 0; sample < 3; sample++) {
+      application = await launch(directory);
+      page = await application.firstWindow();
+      await expect(
+        page.getByRole('textbox', { name: 'Meeting notes', exact: true }),
+      ).toHaveText(control.notes);
+      const observed = await page.evaluate(
+        async ({ id, control, marker }) => {
+          const initial = await window.notes.invoke({ operation: 'bootstrap' });
+          if (
+            !initial.ok ||
+            !('state' in initial) ||
+            initial.state.selected_id !== control ||
+            initial.state.jobs.length
+          )
+            throw new Error(
+              'The fresh process did not start on the history-free control.',
+            );
+          const observe = (
+            response: Awaited<ReturnType<typeof window.notes.invoke>>,
+          ) => {
+            if (
+              !response.ok ||
+              !('state' in response) ||
+              response.state.selected_id !== id ||
+              response.state.jobs.length !== 20 ||
+              response.state.jobs.some(
+                (job) =>
+                  job.result?.kind !== 'summary' || 'summary' in job.result,
+              ) ||
+              JSON.stringify(response).includes(marker)
+            )
+              throw new Error(
+                'The saved-history status was incomplete or contained summary bodies.',
+              );
+            return new TextEncoder().encode(JSON.stringify(response)).length;
+          };
+          const started = performance.now();
+          const selected = await window.notes.invoke({
+            operation: 'select',
+            scope: initial.state.scope,
+            id,
+          });
+          const first = {
+            elapsed: performance.now() - started,
+            bytes: observe(selected),
+          };
+          const warm = [];
+          for (let index = 0; index < 5; index++) {
+            const started = performance.now();
+            const response = await window.notes.invoke({
+              operation: 'bootstrap',
+            });
+            warm.push({
+              elapsed: performance.now() - started,
+              bytes: observe(response),
+            });
+          }
+          return { first, warm };
+        },
+        { id: history.id, control: control.id, marker: WINDOWS_HISTORY_MARKER },
+      );
+      cold.push(observed.first.elapsed);
+      warm.push(...observed.warm.map((value) => value.elapsed));
+      maximumStatusBytes = Math.max(
+        maximumStatusBytes,
+        observed.first.bytes,
+        ...observed.warm.map((value) => value.bytes),
+      );
+      await page.reload();
+      await expect(
+        page.getByRole('textbox', { name: 'Meeting notes', exact: true }),
+      ).toHaveText(expectedText);
+      expectedText = `Synthetic saved-history note edit ${sample} survives restart.`;
+      const saving = await page.evaluate(
+        async ({ content, marker }) => {
+          const initial = await window.notes.invoke({ operation: 'bootstrap' });
+          if (!initial.ok || !('state' in initial) || !initial.state.selected)
+            throw new Error('The saved-history editor is unavailable.');
+          const selected = initial.state.selected;
+          const started = performance.now();
+          const response = await window.notes.invoke({
+            operation: 'save',
+            scope: initial.state.scope,
+            id: selected.id,
+            local_revision: selected.local_revision,
+            value: { title: selected.title, tags: selected.tags, content },
+          });
+          const elapsed = performance.now() - started;
+          if (
+            !response.ok ||
+            !('state' in response) ||
+            response.state.selected_id !== selected.id ||
+            response.state.jobs.length !== 20 ||
+            !response.state.selected ||
+            response.state.selected.local_revision <= selected.local_revision ||
+            JSON.stringify(response.state.selected.content) !==
+              JSON.stringify(content) ||
+            JSON.stringify(response).includes(marker)
+          )
+            throw new Error(
+              'The measured note save lost its edit or included a summary body.',
+            );
+          return {
+            elapsed,
+            bytes: new TextEncoder().encode(JSON.stringify(response)).length,
+          };
+        },
+        {
+          content: richTextFromPlainText(expectedText),
+          marker: WINDOWS_HISTORY_MARKER,
+        },
+      );
+      saved.push(saving.elapsed);
+      maximumStatusBytes = Math.max(maximumStatusBytes, saving.bytes);
+      await page.reload();
+      await expect(
+        page.getByRole('textbox', { name: 'Meeting notes', exact: true }),
+      ).toHaveText(expectedText);
+      for (const result of await readResults([[0, 9, 19][sample]!])) {
+        results.push(result.elapsed);
+        maximumResultBytes = Math.max(maximumResultBytes, result.bytes);
+      }
+      expect(await encryptedCache(application, directory, history.id)).toEqual(
+        encrypted,
+      );
+      await settleControl();
+      await end();
+    }
+    application = await launch(directory);
+    await settleControl();
+    page = await application.firstWindow();
+    const selected = await page.evaluate(async (id) => {
+      const current = await window.notes.invoke({ operation: 'bootstrap' });
+      if (!current.ok || !('state' in current))
+        throw new Error('The final state is unavailable.');
+      return window.notes.invoke({
+        operation: 'select',
+        scope: current.state.scope,
+        id,
+      });
+    }, history.id);
+    if (!selected.ok || !('state' in selected))
+      throw new Error('Final history selection failed.');
+    await page.reload();
+    await expect(
+      page.getByRole('textbox', { name: 'Meeting notes', exact: true }),
+    ).toHaveText(expectedText);
+    expect(await readResults(jobs.map((_, index) => index))).toHaveLength(20);
+    expect(await encryptedCache(application, directory, history.id)).toEqual(
+      encrypted,
+    );
+    await end();
+    for (const name of await readdir(directory))
+      if (name.startsWith('notes.sqlite'))
+        expect(
+          (await readFile(join(directory, name))).includes(
+            Buffer.from(WINDOWS_HISTORY_MARKER),
+          ),
+        ).toBe(false);
+  } finally {
+    if (application) await application.close();
+    if (!fixtureClosed) await fixture.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+  const report = windowsHistoryObservationSchema.parse({
+    version: 1,
+    kind: 'controlled_windows_saved_history',
+    scope: 'synthetic_unpacked_windows_dpapi',
+    execution:
+      process.env.GITHUB_ACTIONS === 'true' ? 'github_actions' : 'local',
+    source_commit:
+      process.env.GITHUB_ACTIONS === 'true' ? process.env.GITHUB_SHA : null,
+    observed_at: new Date().toISOString(),
+    platform: process.platform,
+    architecture: process.arch,
+    production_accepted: false,
+    slo_accepted: false,
+    setup: 'synthetic_service_then_service_and_issuer_shutdown',
+    latency_scope: 'sandboxed_renderer_validated_ipc_round_trip',
+    cohort: {
+      documents: 2,
+      saved_jobs: 20,
+      full_history_utf8_bytes: Buffer.byteLength(JSON.stringify({ jobs })),
+      encrypted_job_records: 22,
+    },
+    process_restarts: 4,
+    latency: {
+      first_history_selection_after_startup: latencySummary(cold),
+      warm_status: latencySummary(warm),
+      selected_note_save: latencySummary(saved),
+      explicit_saved_result: latencySummary(results),
+    },
+    maximum_measured_status_response_utf8_bytes: maximumStatusBytes,
+    maximum_measured_result_response_utf8_bytes: maximumResultBytes,
+    all_full_results_verified: 20,
+    metadata_body_free: true,
+    encrypted_artifacts_unchanged: true,
+    selected_saves_survived_restarts: true,
+    plaintext_marker_absent: true,
+    natural_exit_verified: true,
+    resources_cleaned: true,
+  });
+  await mkdir(dirname(output), { recursive: true });
+  await writeFile(output, `${JSON.stringify(report, null, 2)}\n`, {
+    flag: 'wx',
+    mode: 0o600,
+  });
 });
 test('recovers one summary and resume receipt, inspects frozen evidence, persists review edits and explicitly appends and exports without replacing notes', async () => {
   test.setTimeout(120_000);

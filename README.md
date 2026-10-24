@@ -320,6 +320,16 @@ exits and encrypted restarts. Small CI samples do not establish representative
 hardware performance, full job-history cost or an approved SLO; both SLO and
 production acceptance stay false.
 
+Separate Windows checks use twenty substantial completed summaries on one meeting
+and a control meeting without history. After synthetic sign-in and synchronization,
+both the service and issuer are stopped. Three fresh processes measure their first
+history selection, fifteen warm status responses, three note saves and three
+explicit full-result reads through validated IPC. A final restart verifies all
+twenty full results; ciphertext preservation, natural exits and plaintext-marker
+absence are checked before a body-free saved-history report is written.
+These are unpackaged CI observations, not rendering time, cold OS-cache measurements,
+representative-hardware acceptance or an approved SLO.
+
 Routine desktop job history includes summary status, model/prompt metadata and
 usage, but not completed summary bodies. The selected saved result is loaded
 through scoped read-only IPC, with inline loading/retry and stale-view checks;
