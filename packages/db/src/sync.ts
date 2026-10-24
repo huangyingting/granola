@@ -215,17 +215,25 @@ export class SyncStore {
     ).rows[0];
     if (!checkpoint)
       throw new Error('The synchronization cleanup cursor is missing.');
-    const select = (after: string | null) =>
+    const select = (
+      after: string | null,
+      before: string | null,
+      limit: number,
+    ) =>
       tx.query<Pick<Access, 'sync_seq' | 'sync_floor'> & { id: string }>(
         `SELECT id,sync_seq,sync_floor FROM workspaces
-         WHERE ($1::uuid IS NULL OR id>$1) ORDER BY id
-         LIMIT 100 FOR NO KEY UPDATE SKIP LOCKED`,
-        [after],
+         WHERE ($1::uuid IS NULL OR id>$1) AND ($2::uuid IS NULL OR id<=$2) ORDER BY id
+         LIMIT $3 FOR NO KEY UPDATE SKIP LOCKED`,
+        [after, before, limit],
       );
-    let workspaces = await select(checkpoint.workspace_id);
-    if (!workspaces.rows.length && checkpoint.workspace_id !== null)
-      workspaces = await select(null);
-    for (const workspace of workspaces.rows) {
+    const workspaces = (await select(checkpoint.workspace_id, null, 100)).rows;
+    if (workspaces.length < 100 && checkpoint.workspace_id !== null)
+      workspaces.push(
+        ...(
+          await select(null, checkpoint.workspace_id, 100 - workspaces.length)
+        ).rows,
+      );
+    for (const workspace of workspaces) {
       const head = (
         await tx.query<{ seq: string; retained: boolean }>(
           `SELECT seq,created_at>=now()-interval '7 days' retained FROM sync_changes
@@ -261,7 +269,7 @@ export class SyncStore {
     }
     await tx.query(
       'UPDATE sync_cleanup_cursor SET workspace_id=$1 WHERE singleton',
-      [workspaces.rows.at(-1)?.id ?? null],
+      [workspaces.at(-1)?.id ?? null],
     );
   }
 }

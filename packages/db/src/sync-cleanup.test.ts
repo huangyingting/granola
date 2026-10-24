@@ -128,13 +128,11 @@ describe.skipIf(!databaseUrl)(
       } finally {
         await restarted.close();
       }
-      expect(await checkpoint()).toBe(workspaceId(101));
+      expect(await checkpoint()).toBe(workspaceId(98));
       expect(await state(workspaceId(101))).toEqual({
         sync_floor: '1',
         remaining: 0,
       });
-      expect(await state(lower)).toEqual({ sync_floor: '0', remaining: 1 });
-      await prune();
       expect(await state(lower)).toEqual({ sync_floor: '1', remaining: 0 });
     });
     it('skips an actually locked workspace without blocking unrelated retention and revisits it later', async () => {
