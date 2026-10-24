@@ -928,6 +928,17 @@ and before exposing signing secrets, removes the temporary certificate
 in `finally`, and uploads only a successfully verified installer and public receipt.
 It does not publish a GitHub release or run on pull requests.
 
+Before the signing job can enter the environment, a separate job checks the
+exact-source Checks result and reads GitHub's environment metadata without signing
+secrets. It requires configured User/Team reviewers and either a selected-branches/
+tags policy or protected-branches-only with `main` actually protected. GitHub
+enforces the owner's selected branch/tag patterns; the preflight does not
+approximate its pattern matcher or grant deployment approval. Missing,
+inaccessible, malformed or unprotected metadata fails explicitly. The signing job
+freshly rechecks these controls before installing dependencies. These read-only,
+bounded checks neither create/configure an environment nor establish signing or
+production acceptance.
+
 The workflow's **activation_acceptance** input is opt-in and defaults to false.
 When authorized, it runs `pnpm desktop:package:signed --acceptance-pair` to build
 the manifest version and its next stable patch from the **same exact source**,
