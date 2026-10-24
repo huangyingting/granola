@@ -27,68 +27,103 @@ export async function streamEvents<
       'Invalid event sequence.',
       400,
     );
-  await read(cursor);
-  if ((streams.get(identity.userId) ?? 0) >= 2)
-    throw new ServiceError(
-      'quota_exceeded',
-      'At most two event subscriptions are allowed per user.',
-      429,
-      true,
-    );
-  streams.set(identity.userId, (streams.get(identity.userId) ?? 0) + 1);
   const closed = new AbortController();
-  const signal = AbortSignal.any([
-    closed.signal,
-    shutdown,
-    AbortSignal.timeout(
-      Math.max(1, Math.min(60_000, identity.expiresAt - Date.now())),
-    ),
-  ]);
-  reply.raw.once('close', () => closed.abort());
-  reply.hijack();
-  reply.raw.writeHead(200, {
-    'content-type': 'text/event-stream',
-    'cache-control': 'no-store',
-    'x-content-type-options': 'nosniff',
-    'x-accel-buffering': 'no',
-  });
-  try {
-    let heartbeat = Date.now();
-    while (!signal.aborted && Date.now() < identity.expiresAt) {
-      const batch = await read(cursor);
-      for (const event of batch.events) {
-        if (signal.aborted || Date.now() >= identity.expiresAt) break;
-        if (
-          !reply.raw.write(
-            `id: ${event.seq}\nevent: ${event.event_type}\ndata: ${JSON.stringify(event)}\n\n`,
-          )
-        )
-          await once(reply.raw, 'drain', { signal });
-        cursor = event.seq;
-      }
-      if (batch.terminal && batch.events.length < 50) break;
-      if (Date.now() - heartbeat >= 5000) {
-        if (!reply.raw.write(': heartbeat\n\n'))
-          await once(reply.raw, 'drain', { signal });
-        heartbeat = Date.now();
-      }
-      if (batch.events.length === 50) continue;
-      await delay(500, undefined, { signal });
-    }
-  } catch (error) {
-    if (
-      !(
-        error instanceof ServiceError && [401, 403, 404].includes(error.status)
-      ) &&
-      !(error instanceof Error && error.name === 'AbortError')
-    )
-      console.error(
-        JSON.stringify({ code: 'event_stream_failed', request_id: request.id }),
+  const onClose = () => closed.abort();
+  const assertAdmission = () => {
+    if (shutdown.aborted)
+      throw new ServiceError(
+        'service_unavailable',
+        'The API is shutting down.',
+        503,
+        true,
       );
+    if (Date.now() >= identity.expiresAt)
+      throw new ServiceError(
+        'unauthorized',
+        'The access token expired before event streaming could start.',
+        401,
+      );
+  };
+  reply.raw.once('close', onClose);
+  try {
+    if (reply.raw.destroyed) {
+      reply.hijack();
+      return;
+    }
+    assertAdmission();
+    await read(cursor);
+    if (closed.signal.aborted || reply.raw.destroyed) {
+      reply.hijack();
+      return;
+    }
+    assertAdmission();
+    if ((streams.get(identity.userId) ?? 0) >= 2)
+      throw new ServiceError(
+        'quota_exceeded',
+        'At most two event subscriptions are allowed per user.',
+        429,
+        true,
+      );
+    streams.set(identity.userId, (streams.get(identity.userId) ?? 0) + 1);
+    try {
+      const signal = AbortSignal.any([
+        closed.signal,
+        shutdown,
+        AbortSignal.timeout(
+          Math.max(1, Math.min(60_000, identity.expiresAt - Date.now())),
+        ),
+      ]);
+      reply.hijack();
+      reply.raw.writeHead(200, {
+        'content-type': 'text/event-stream',
+        'cache-control': 'no-store',
+        'x-content-type-options': 'nosniff',
+        'x-accel-buffering': 'no',
+      });
+      let heartbeat = Date.now();
+      while (!signal.aborted && Date.now() < identity.expiresAt) {
+        const batch = await read(cursor);
+        for (const event of batch.events) {
+          if (signal.aborted || Date.now() >= identity.expiresAt) break;
+          if (
+            !reply.raw.write(
+              `id: ${event.seq}\nevent: ${event.event_type}\ndata: ${JSON.stringify(event)}\n\n`,
+            )
+          )
+            await once(reply.raw, 'drain', { signal });
+          cursor = event.seq;
+        }
+        if (batch.terminal && batch.events.length < 50) break;
+        if (Date.now() - heartbeat >= 5000) {
+          if (!reply.raw.write(': heartbeat\n\n'))
+            await once(reply.raw, 'drain', { signal });
+          heartbeat = Date.now();
+        }
+        if (batch.events.length === 50) continue;
+        await delay(500, undefined, { signal });
+      }
+    } catch (error) {
+      if (
+        !(
+          error instanceof ServiceError &&
+          [401, 403, 404].includes(error.status)
+        ) &&
+        !(error instanceof Error && error.name === 'AbortError')
+      )
+        console.error(
+          JSON.stringify({
+            code: 'event_stream_failed',
+            request_id: request.id,
+          }),
+        );
+    } finally {
+      const remaining = (streams.get(identity.userId) ?? 1) - 1;
+      if (remaining > 0) streams.set(identity.userId, remaining);
+      else streams.delete(identity.userId);
+      reply.raw.end();
+    }
   } finally {
-    const remaining = (streams.get(identity.userId) ?? 1) - 1;
-    if (remaining > 0) streams.set(identity.userId, remaining);
-    else streams.delete(identity.userId);
-    reply.raw.end();
+    reply.raw.off('close', onClose);
+    closed.abort();
   }
 }

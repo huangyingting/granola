@@ -1040,6 +1040,14 @@ the whole remaining sequence range, so a known gap beyond the first batch is
 rejected before SSE response headers are sent. None of these read recoveries
 authorizes another provider request.
 
+Stream admission observes client disconnects before awaiting initial replay
+validation. Requests abandoned during authentication or that read do not occupy
+the shared two-stream user quota or start a polling loop. Shutdown and the
+authenticated identity's deadline are checked before and after validation;
+shutdown returns retryable `503`, and expiry returns `401`, before successful SSE
+headers. Preflight replay errors remain normal HTTP errors, and only admitted
+streams release subscription slots.
+
 The configured Azure deployment streams structured final generation for both
 short and long summaries. Extraction and merge remain bounded structured requests.
 Only the leading overview string becomes a plain-text **Unverified draft**; raw
