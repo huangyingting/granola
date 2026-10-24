@@ -269,6 +269,7 @@ export class AudioHostClient {
     recording: string,
     descriptor: UploadChunk,
     signal?: AbortSignal,
+    check?: () => void,
   ): AsyncGenerator<Buffer> {
     const upload = uploadChunkSchema.parse(descriptor);
     if (upload.chunk.recording_id !== recording)
@@ -279,6 +280,7 @@ export class AudioHostClient {
     while (offset < upload.size_bytes) {
       if (signal?.aborted)
         throw new Error('Audio chunk streaming was cancelled.');
+      check?.();
       const length = Math.min(
         MAX_AUDIO_RANGE_BYTES,
         upload.size_bytes - offset,
@@ -292,6 +294,7 @@ export class AudioHostClient {
       });
       if (signal?.aborted)
         throw new Error('Audio chunk streaming was cancelled.');
+      check?.();
       if (event.event_type !== 'recording.chunk_range')
         throw new Error('AudioHost did not return a chunk range.');
       const range = event.payload;

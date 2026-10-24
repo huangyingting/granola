@@ -628,6 +628,23 @@ export class LocalStore {
     this.recordingDocument(profile, document);
     return this.recordingValue(profile, document, id);
   }
+  getRecordingForAudio(
+    profile: string,
+    document: string,
+    id: string,
+  ): LocalRecording {
+    const recording = this.getRecording(profile, document, id);
+    const proof = this.retentionProof(profile, document, id);
+    if (
+      recording.audio_retired_at ||
+      (proof && proof.delete_after <= Date.now())
+    )
+      throw new LocalError(
+        'local_audio_retired',
+        'Local audio has reached its retention deadline. Use the remaining cloud recording controls.',
+      );
+    return recording;
+  }
   recordings(
     profile: string,
     document: string,

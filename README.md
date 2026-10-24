@@ -1290,6 +1290,12 @@ published text. It also preserves the encrypted immutable cloud receipt, so
 cloud transcription, recovery of paid requests and explicit remote-audio deletion
 remain available after local files expire. Native inspection/recovery and
 reupload of the retired local source are denied rather than recreating it.
+Authenticated cached deadlines also gate native access before the bounded
+50-item expiry sweep reaches a recording. Late native acknowledgements and
+upload range reads recheck availability; maintenance closes an expired review
+even beyond its current sweep batch. The UI projects logical expiry without
+mutating the durable cleanup state, and metadata-only cloud receipt
+reconciliation remains available. Unconfirmed unique audio is not expired.
 New confirmation reads require the original authorized scope,
 share Main's bounded read budget and cannot recache after deletion or scope
 changes. Unavailable or older services leave unconfirmed audio intact and

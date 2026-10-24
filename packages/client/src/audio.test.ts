@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { MAX_AUDIO_RANGE_BYTES } from '@windows-ai-notes/contracts';
 import { AudioHostClient, audioHostEnvironment } from './audio.js';
 
@@ -230,6 +230,50 @@ describe('bounded main-process native audio transport', () => {
       await client.close();
     }
   });
+  it.each(['before-first', 'between-ranges', 'after-response'] as const)(
+    'checks source availability %s without requesting or yielding a disallowed range',
+    async (point) => {
+      const client = open('range');
+      let stream: ReturnType<AudioHostClient['readChunk']> | undefined;
+      const failure = new Error('Synthetic local audio access expired.');
+      let denied = point === 'before-first';
+      const check = vi.fn(() => {
+        if (denied) throw failure;
+      });
+      try {
+        const upload = await descriptor(client);
+        const original = client.request.bind(client);
+        const request = vi
+          .spyOn(client, 'request')
+          .mockImplementation(async (fields) => {
+            const event = await original(fields);
+            if (point === 'after-response') denied = true;
+            return event;
+          });
+        stream = client.readChunk(recording, upload, undefined, check);
+        if (point === 'between-ranges') {
+          const first = await stream.next();
+          expect(first.done).toBe(false);
+          expect(first.value.length).toBe(MAX_AUDIO_RANGE_BYTES);
+          denied = true;
+        }
+        const next = stream.next().then((part) => ({
+          done: part.done,
+          bytes: part.value?.length,
+        }));
+        await expect(next).rejects.toBe(failure);
+        expect(request).toHaveBeenCalledTimes(point === 'before-first' ? 0 : 1);
+        expect(await client.request({ command: 'list_devices' })).toMatchObject(
+          {
+            event_type: 'devices',
+          },
+        );
+      } finally {
+        await stream?.return(undefined);
+        await client.close();
+      }
+    },
+  );
   it.each(['changed', 'wrong-offset', 'bad-hash'])(
     'rejects %s media and closes the untrusted protocol session',
     async (mode) => {

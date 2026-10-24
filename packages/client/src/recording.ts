@@ -749,12 +749,7 @@ export class RecordingController {
         'Select a signed-in cloud workspace before uploading audio.',
       );
     context.authorize();
-    const recording = this.local.getRecording(profile, document, id);
-    if (recording.audio_retired_at)
-      throw new LocalError(
-        'local_audio_retired',
-        'Local audio has reached its retention deadline. Use the remaining cloud recording controls.',
-      );
+    const recording = this.local.getRecordingForAudio(profile, document, id);
     if (
       this.client ||
       this.busy ||
@@ -1222,11 +1217,7 @@ export class RecordingController {
           'recording_in_progress',
           'Stop capture before inspecting or recovering saved recordings.',
         );
-      if (this.local.getRecording(profile, document, id).audio_retired_at)
-        throw new LocalError(
-          'local_audio_retired',
-          'Local audio has reached its retention deadline and cannot be inspected or recovered.',
-        );
+      this.local.getRecordingForAudio(profile, document, id);
       if (recover && this.local.recordingUpload(profile, document, id)?.plan)
         throw new LocalError(
           'upload_plan_frozen',
@@ -1242,7 +1233,7 @@ export class RecordingController {
             'recording_review_cancelled',
             'Audio inspection or recovery was cancelled. Inspect preserved files before retrying.',
           );
-        return this.local.getRecording(profile, document, id);
+        return this.local.getRecordingForAudio(profile, document, id);
       };
       try {
         const event = await client.request(
@@ -1350,6 +1341,18 @@ export class RecordingController {
     const page = document
       ? this.local.recordings(profile, document, offset)
       : { recordings: [], has_more: false };
+    const retention = page.recordings.flatMap((recording) => {
+      const status = this.local.recordingRetention(
+        profile,
+        recording.document_id,
+        recording.id,
+      );
+      return status ? [status] : [];
+    });
+    const deadlines = new Map(
+      retention.map((status) => [status.recording_id, status.delete_after]),
+    );
+    const now = Date.now();
     let active: LocalRecording | null = null;
     let activeUpload = null;
     if (this.uploading?.profile === profile) {
@@ -1385,6 +1388,19 @@ export class RecordingController {
           ? this.live.preview.snapshot()
           : null,
       ...page,
+      // Logical expiry does not mutate the bounded, durable cleanup state.
+      recordings: page.recordings.map((recording) => {
+        const deadline = deadlines.get(recording.id);
+        return !recording.audio_retired_at &&
+          deadline !== undefined &&
+          deadline <= now
+          ? {
+              ...recording,
+              audio_retired_at: new Date(deadline).toISOString(),
+              inspection: null,
+            }
+          : recording;
+      }),
       offset,
       busy: this.busy,
       pending_deletions: this.local.pendingRecordingDeletions().length,
@@ -1394,14 +1410,7 @@ export class RecordingController {
       storage: this.storage,
       storage_error: this.storageError,
       retention_days: this.local.recordingRetentionDays(profile),
-      retention: page.recordings.flatMap((recording) => {
-        const status = this.local.recordingRetention(
-          profile,
-          recording.document_id,
-          recording.id,
-        );
-        return status ? [status] : [];
-      }),
+      retention,
       retention_error:
         this.uploadContext?.profile === profile ? this.retentionError : null,
       upload_available: this.uploadContext?.profile === profile,
@@ -1428,9 +1437,19 @@ export class RecordingController {
       let forbidden = review.profile !== profile;
       if (!forbidden) {
         try {
-          this.local.getRecording(review.profile, review.document, review.id);
+          this.local.getRecordingForAudio(
+            review.profile,
+            review.document,
+            review.id,
+          );
         } catch (error) {
-          if (!missing(error)) {
+          if (
+            !missing(error) &&
+            !(
+              error instanceof LocalError &&
+              error.code === 'local_audio_retired'
+            )
+          ) {
             await this.closeReview();
             this.report(error);
             throw error;

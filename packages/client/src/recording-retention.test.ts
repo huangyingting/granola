@@ -1,15 +1,17 @@
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LocalStore } from '@windows-ai-notes/local';
+import { canonicalJson } from '@windows-ai-notes/contracts/content';
 import { recordingUploadIntentSchema } from '@windows-ai-notes/contracts/recording';
 import { recordingRetentionSchema } from '@windows-ai-notes/contracts/uploads';
 import { ApiClient, ClientError } from './http.js';
 import { RecordingController } from './recording.js';
 import { AudioHostClient } from './audio.js';
+import { uploadSavedRecording } from './recording-upload.js';
 
 describe('Main-owned local audio retention', () => {
   let directory: string;
@@ -140,6 +142,348 @@ describe('Main-owned local audio retention', () => {
   async function idle(reads: Set<AbortController>) {
     await vi.waitFor(() => expect(reads.size).toBe(0));
   }
+  it.each(['inspect', 'recover'] as const)(
+    'rejects %s at the authenticated local deadline before the expiry sweep runs',
+    async (operation) => {
+      const c = saved();
+      local.rememberRecordingRetention(profile, c.api.base, {
+        ...c.status,
+        retention_days: 0,
+      });
+      expect(
+        local.getRecording(profile, c.document.id, c.recording.id)
+          .audio_retired_at,
+      ).toBeUndefined();
+      await expect(
+        c.controller[operation](
+          profile,
+          c.document.id,
+          c.recording.id,
+          () => {},
+        ),
+      ).rejects.toMatchObject({ code: 'local_audio_retired' });
+      expect(create).not.toHaveBeenCalled();
+      expect(c.request).not.toHaveBeenCalled();
+      expect(remove).not.toHaveBeenCalled();
+      expect(local.pendingRecordingDeletions()).toEqual([]);
+      expect(
+        local.recordingUpload(profile, c.document.id, c.recording.id),
+      ).toEqual(c.intent);
+    },
+  );
+  it('refuses explicit reupload at the local deadline without starting native work or changing its cloud receipt', () => {
+    const c = saved();
+    local.rememberRecordingRetention(profile, c.api.base, {
+      ...c.status,
+      retention_days: 0,
+    });
+    for (let i = 0; i < 4; i++) c.reads.add(new AbortController());
+    c.controller.resumeUploads(c.context);
+    expect(() =>
+      c.controller.requestUpload(profile, c.document.id, c.recording.id, false),
+    ).toThrow('retention deadline');
+    expect(create).not.toHaveBeenCalled();
+    expect(c.request).not.toHaveBeenCalled();
+    expect(remove).not.toHaveBeenCalled();
+    expect(
+      local.recordingUpload(profile, c.document.id, c.recording.id),
+    ).toEqual(c.intent);
+  });
+  it('projects logical expiry beyond the fifty-item sweep without mutating cleanup state or hiding cloud metadata', () => {
+    const cases: ReturnType<typeof saved>[] = [];
+    local.atomic(() => {
+      for (let i = 0; i < 51; i++) {
+        const c = saved();
+        local.rememberRecordingRetention(profile, c.api.base, {
+          ...c.status,
+          retention_days: 0,
+        });
+        cases.push(c);
+      }
+    });
+    expect(local.expireRecordingRetention()).toBe(50);
+    const remaining = cases.find((c) =>
+      local.recordingRetention(profile, c.document.id, c.recording.id),
+    );
+    if (!remaining) throw new Error('The bounded sweep left no pending proof.');
+    const proof = local.recordingRetention(
+      profile,
+      remaining.document.id,
+      remaining.recording.id,
+    )!;
+    const sweep = vi.spyOn(local, 'expireRecordingRetention');
+    const snapshot = remaining.controller.snapshot(
+      profile,
+      remaining.document.id,
+    );
+    expect(snapshot.recordings[0]?.audio_retired_at).toBe(
+      new Date(proof.delete_after).toISOString(),
+    );
+    expect(snapshot.uploads[0]?.state).toBe('complete');
+    expect(
+      local.getRecording(profile, remaining.document.id, remaining.recording.id)
+        .audio_retired_at,
+    ).toBeUndefined();
+    expect(
+      local.recordingUpload(
+        profile,
+        remaining.document.id,
+        remaining.recording.id,
+      ),
+    ).toEqual(remaining.intent);
+    expect(local.pendingRecordingDeletions()).toHaveLength(50);
+    expect(sweep).not.toHaveBeenCalled();
+    expect(create).not.toHaveBeenCalled();
+    expect(remove).not.toHaveBeenCalled();
+  });
+  it('fences a real native inspection acknowledgement when its deadline passes before completion', async () => {
+    const c = saved();
+    const proof = local.rememberRecordingRetention(
+      profile,
+      c.api.base,
+      c.status,
+    )!;
+    const before = local.getRecording(profile, c.document.id, c.recording.id);
+    const client = new AudioHostClient(
+      process.execPath,
+      [
+        fileURLToPath(new URL('../fixtures/audio-host.mjs', import.meta.url)),
+        'inspection-slow',
+        JSON.stringify(c.recording.tracks[0]!.spec),
+      ],
+      () => {},
+    );
+    const controller = new RecordingController(
+      local,
+      () => client,
+      changed,
+      remove,
+    );
+    const inspecting = controller.inspect(
+      profile,
+      c.document.id,
+      c.recording.id,
+      () => {},
+    );
+    const now = vi.spyOn(Date, 'now').mockReturnValue(proof.delete_after);
+    try {
+      await expect(inspecting).rejects.toMatchObject({
+        code: 'local_audio_retired',
+      });
+      expect(
+        local.getRecording(profile, c.document.id, c.recording.id),
+      ).toEqual(before);
+      expect(
+        local.recordingUpload(profile, c.document.id, c.recording.id),
+      ).toEqual(c.intent);
+      expect(local.pendingRecordingDeletions()).toEqual([]);
+      expect(remove).not.toHaveBeenCalled();
+    } finally {
+      now.mockRestore();
+      await client.close();
+      await controller.close(() => {});
+    }
+  });
+  it('closes a real due review beyond the current sweep batch before processing independent cleanup', async () => {
+    const cases: ReturnType<typeof saved>[] = [];
+    local.atomic(() => {
+      for (let i = 0; i < 51; i++) {
+        const c = saved();
+        local.rememberRecordingRetention(profile, c.api.base, c.status);
+        cases.push(c);
+      }
+    });
+    const c = cases
+      .sort(
+        (a, b) =>
+          Date.parse(a.status.canonical_at!) -
+            Date.parse(b.status.canonical_at!) ||
+          a.recording.id.localeCompare(b.recording.id),
+      )
+      .at(-1)!;
+    const proof = local.recordingRetention(
+      profile,
+      c.document.id,
+      c.recording.id,
+    )!;
+    const client = new AudioHostClient(
+      process.execPath,
+      [
+        fileURLToPath(new URL('../fixtures/audio-host.mjs', import.meta.url)),
+        'inspection-slow',
+        JSON.stringify(c.recording.tracks[0]!.spec),
+      ],
+      () => {},
+    );
+    let physicallyStopped = false;
+    void client.stopped.then(() => {
+      physicallyStopped = true;
+    });
+    remove.mockImplementation(async () => {
+      expect(physicallyStopped).toBe(true);
+    });
+    const controller = new RecordingController(
+      local,
+      () => client,
+      changed,
+      remove,
+    );
+    const inspecting = controller
+      .inspect(profile, c.document.id, c.recording.id, () => {})
+      .catch((error: unknown) => error);
+    const now = vi.spyOn(Date, 'now').mockReturnValue(proof.delete_after);
+    const sweep = vi.spyOn(local, 'expireRecordingRetention');
+    try {
+      await controller.reconcile(profile);
+      await expect(inspecting).resolves.toMatchObject({
+        code: 'recording_review_cancelled',
+      });
+      expect(physicallyStopped).toBe(true);
+      expect(sweep).toHaveReturnedWith(50);
+      expect(remove).toHaveBeenCalledTimes(50);
+      expect(remove).not.toHaveBeenCalledWith(c.recording.id);
+      expect(
+        local.getRecording(profile, c.document.id, c.recording.id)
+          .audio_retired_at,
+      ).toBeUndefined();
+      expect(
+        local.recordingRetention(profile, c.document.id, c.recording.id),
+      ).toEqual(proof);
+      expect(local.pendingRecordingDeletions()).toEqual([]);
+      expect(
+        controller.snapshot(profile, c.document.id).recordings[0]
+          ?.audio_retired_at,
+      ).toBe(new Date(proof.delete_after).toISOString());
+    } finally {
+      now.mockRestore();
+      await client.close();
+      await controller.close(() => {});
+    }
+  });
+  it('does not spawn a native uploader for expired audio even with an older queued intent', async () => {
+    const c = saved();
+    local.rememberRecordingRetention(profile, c.api.base, {
+      ...c.status,
+      retention_days: 0,
+    });
+    const queued = recordingUploadIntentSchema.parse({
+      ...c.intent,
+      state: 'queued',
+      plan: null,
+      total_chunks: 0,
+      verified_chunks: 0,
+      verified_bytes: 0,
+    });
+    await expect(
+      uploadSavedRecording({
+        local,
+        profile,
+        intent: queued,
+        native: create,
+        api: c.api,
+        check: () => {},
+        signal: new AbortController().signal,
+        changed,
+      }),
+    ).rejects.toMatchObject({ code: 'local_audio_retired' });
+    expect(create).not.toHaveBeenCalled();
+    expect(c.request).not.toHaveBeenCalled();
+    expect(
+      local.recordingUpload(profile, c.document.id, c.recording.id),
+    ).toEqual(c.intent);
+  });
+  it('checks the deadline after a real native upload inspection before accepting its plan', async () => {
+    const c = saved();
+    const proof = local.rememberRecordingRetention(
+      profile,
+      c.api.base,
+      c.status,
+    )!;
+    const queued = recordingUploadIntentSchema.parse({
+      ...c.intent,
+      state: 'queued',
+      plan: null,
+      total_chunks: 0,
+      verified_chunks: 0,
+      verified_bytes: 0,
+    });
+    const client = new AudioHostClient(
+      process.execPath,
+      [
+        fileURLToPath(new URL('../fixtures/audio-host.mjs', import.meta.url)),
+        'inspection-slow',
+        JSON.stringify(c.recording.tracks[0]!.spec),
+      ],
+      () => {},
+    );
+    const request = vi.spyOn(client, 'request');
+    const uploading = uploadSavedRecording({
+      local,
+      profile,
+      intent: queued,
+      native: () => client,
+      api: c.api,
+      check: () => {},
+      signal: new AbortController().signal,
+      changed,
+    });
+    const now = vi.spyOn(Date, 'now').mockReturnValue(proof.delete_after);
+    try {
+      await expect(uploading).rejects.toMatchObject({
+        code: 'local_audio_retired',
+      });
+      expect(request.mock.calls.map(([value]) => value.command)).toEqual([
+        'inspect_recording',
+      ]);
+      expect(c.request).not.toHaveBeenCalled();
+      expect(
+        local.recordingUpload(profile, c.document.id, c.recording.id),
+      ).toEqual(c.intent);
+    } finally {
+      now.mockRestore();
+      await client.close();
+      await client.stopped;
+    }
+  });
+  it('still reconciles an immutable cloud receipt after local logical expiry without reading native audio', async () => {
+    const c = saved();
+    local.rememberRecordingRetention(profile, c.api.base, {
+      ...c.status,
+      retention_days: 0,
+    });
+    const plan = c.intent.plan!;
+    c.request.mockImplementation(async (_path, schema) =>
+      schema.parse({
+        ...plan.create,
+        document_id: c.document.id,
+        state: 'ready',
+        partial: plan.seal.accept_incomplete,
+        seal_sha256: createHash('sha256')
+          .update(canonicalJson(plan.seal))
+          .digest('hex'),
+        chunk_count: plan.chunks.length,
+        verified_chunks: plan.chunks.length,
+      }),
+    );
+    const readAudio = vi.spyOn(local, 'getRecordingForAudio');
+    await uploadSavedRecording({
+      local,
+      profile,
+      intent: c.intent,
+      native: create,
+      api: c.api,
+      check: () => {},
+      signal: new AbortController().signal,
+      changed,
+    });
+    expect(c.request).toHaveBeenCalledTimes(1);
+    expect(readAudio).not.toHaveBeenCalled();
+    expect(create).not.toHaveBeenCalled();
+    expect(
+      local.recordingUpload(profile, c.document.id, c.recording.id),
+    ).toEqual(c.intent);
+    expect(local.pendingRecordingDeletions()).toEqual([]);
+  });
   it('waits for a cancelled retention read to settle before shutdown returns', async () => {
     const c = saved();
     let finish!: () => void;

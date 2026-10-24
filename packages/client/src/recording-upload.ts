@@ -343,19 +343,23 @@ export async function uploadSavedRecording(options: {
       return;
     }
   }
+  const checkAudio = () => {
+    check();
+    return local.getRecordingForAudio(
+      profile,
+      intent.document_id,
+      intent.recording_id,
+    );
+  };
+  const recording = checkAudio();
   const client = options.native();
-  const recording = local.getRecording(
-    profile,
-    intent.document_id,
-    intent.recording_id,
-  );
   const prepared = await prepareRecordingUpload(
     client,
     recording,
     intent.accept_incomplete,
-    check,
+    checkAudio,
   );
-  check();
+  checkAudio();
   if (
     intent.plan &&
     canonicalJson(intent.plan) !== canonicalJson(prepared.plan)
@@ -389,13 +393,13 @@ export async function uploadSavedRecording(options: {
   });
   let bytes = 0;
   for (const [index, chunk] of plan.chunks.entries()) {
-    check();
+    checkAudio();
     bytes += chunk.size_bytes;
     if (index < intent.verified_chunks) continue;
     await transport.chunk(
       chunk,
-      (s) => client.readChunk(recording.id, chunk, s),
-      { authorize: check, signal },
+      (s) => client.readChunk(recording.id, chunk, s, checkAudio),
+      { authorize: checkAudio, signal },
     );
     save({
       verified_chunks: Math.max(intent.verified_chunks, index + 1),

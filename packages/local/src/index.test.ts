@@ -261,6 +261,63 @@ describe('encrypted local drafts and durable outbox', () => {
       expect(() => reopened.setRecordingRetentionDays(profile, days)).toThrow();
     expect(reopened.recordingRetentionDays(profile)).toBe(7);
   });
+  it('denies local audio exactly at its authenticated deadline across restart without prematurely changing metadata or cloud receipts', () => {
+    const store = open();
+    const c = retainedUpload(store);
+    const recording = store.getRecording(profile, c.draft.id, c.recording.id);
+    const receipt = store.recordingUpload(profile, c.draft.id, c.recording.id);
+    const proof = store.rememberRecordingRetention(
+      profile,
+      c.service,
+      c.status,
+    )!;
+    const now = vi.spyOn(Date, 'now').mockReturnValue(proof.delete_after - 1);
+    expect(
+      store.getRecordingForAudio(profile, c.draft.id, c.recording.id),
+    ).toEqual(recording);
+    now.mockReturnValue(proof.delete_after);
+    expect(() =>
+      store.getRecordingForAudio(profile, c.draft.id, c.recording.id),
+    ).toThrow('retention deadline');
+    close(store);
+    const reopened = open();
+    expect(() =>
+      reopened.getRecordingForAudio(profile, c.draft.id, c.recording.id),
+    ).toThrow('retention deadline');
+    expect(reopened.getRecording(profile, c.draft.id, c.recording.id)).toEqual(
+      recording,
+    );
+    expect(
+      reopened.recordingUpload(profile, c.draft.id, c.recording.id),
+    ).toEqual(receipt);
+    expect(reopened.pendingRecordingDeletions()).toEqual([]);
+    expect(reopened.expireRecordingRetention()).toBe(1);
+    expect(() =>
+      reopened.getRecordingForAudio(profile, c.draft.id, c.recording.id),
+    ).toThrow('retention deadline');
+    expect(
+      reopened.recordingUpload(profile, c.draft.id, c.recording.id),
+    ).toEqual(receipt);
+  });
+  it('keeps unconfirmed unique audio readable despite zero-day policy and enforces its existing ownership', () => {
+    const store = open();
+    store.setRecordingRetentionDays(profile, 0);
+    const c = savedUpload(store);
+    const recording = store.getRecording(profile, c.draft.id, c.recording.id);
+    const other = store.create(profile);
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 40 * 86_400_000);
+    expect(
+      store.getRecordingForAudio(profile, c.draft.id, c.recording.id),
+    ).toEqual(recording);
+    expect(() =>
+      store.getRecordingForAudio('another-account', c.draft.id, c.recording.id),
+    ).toThrow();
+    expect(() =>
+      store.getRecordingForAudio(profile, other.id, c.recording.id),
+    ).toThrow();
+    expect(store.expireRecordingRetention()).toBe(0);
+    expect(store.pendingRecordingDeletions()).toEqual([]);
+  });
   it('never treats unconfirmed, unuploaded or partially verified audio as eligible, including forged completion counters', () => {
     const store = open();
     const c = retainedUpload(store);
@@ -495,6 +552,10 @@ describe('encrypted local drafts and durable outbox', () => {
       expect(() =>
         store.expireRecordingRetention(Date.now() + 40 * 86_400_000),
       ).toThrow();
+      if (field !== 'profile')
+        expect(() =>
+          store.getRecordingForAudio(profile, a.draft.id, a.recording.id),
+        ).toThrow();
       expect(
         store.getRecording(profile, a.draft.id, a.recording.id),
       ).toBeTruthy();
