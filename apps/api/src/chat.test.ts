@@ -552,6 +552,172 @@ describe.skipIf(!databaseUrl)(
         0,
       );
     });
+    describe('seven-day question replay retention', () => {
+      it('expires physical replay before pruning while preserving the authorized answer and rejecting foreign readers', async () => {
+        const turn = await accepted((await source()).id);
+        await runOnce(db, providers);
+        const complete = await db.chat.get(actor.user_id, turn.id);
+        await db.pool.query(
+          "UPDATE chat_events SET created_at=now()-interval '8 days' WHERE turn_id=$1",
+          [turn.id],
+        );
+        const count = Number(
+          (await db.pool.query('SELECT count(*) FROM chat_events')).rows[0]
+            .count,
+        );
+        expect(count).toBeGreaterThan(0);
+        const response = await app.inject({
+          url: `/v1/chat-turns/${turn.id}/events`,
+          headers,
+        });
+        expect(response.statusCode).toBe(410);
+        expect(response.json().code).toBe('event_cursor_expired');
+        const snapshot = await app.inject({
+          url: `/v1/chat-turns/${turn.id}/event-state`,
+          headers,
+        });
+        expect(snapshot.statusCode).toBe(200);
+        expect(chatEventStateSchema.parse(snapshot.json())).toMatchObject({
+          turn: complete,
+          preview: null,
+        });
+        expect(
+          await db.chat.events(actor.user_id, turn.id, complete.last_event_id),
+        ).toEqual({ terminal: true, events: [] });
+        await expect(
+          db.chat.events(actor.user_id, turn.id, complete.last_event_id + 1),
+        ).rejects.toMatchObject({ code: 'invalid_event_cursor', status: 400 });
+        const foreign = await db.provision('urn:chat:foreign', randomUUID());
+        await expect(
+          db.chat.events(foreign.user_id, turn.id, 0),
+        ).rejects.toMatchObject({ code: 'chat_not_found', status: 404 });
+        expect(
+          Number(
+            (await db.pool.query('SELECT count(*) FROM chat_events')).rows[0]
+              .count,
+          ),
+        ).toBe(count);
+        expect(providers.answer).toHaveBeenCalledTimes(1);
+      });
+      it.each(['prefix', 'non-monotonic'] as const)(
+        'retains the logical expiry floor through pruning with %s timestamps',
+        async (kind) => {
+          const turn = await accepted((await source()).id);
+          await runOnce(db, providers);
+          const complete = await db.chat.get(actor.user_id, turn.id);
+          expect(complete.last_event_id).toBeGreaterThan(2);
+          await db.pool.query(
+            `UPDATE chat_events SET created_at=now()-interval '8 days'
+             WHERE turn_id=$1 AND ${kind === 'prefix' ? 'seq<=2' : 'seq=2'}`,
+            [turn.id],
+          );
+          for (let pass = 0; pass < 2; pass++) {
+            for (const cursor of [0, 1])
+              await expect(
+                db.chat.events(actor.user_id, turn.id, cursor),
+              ).rejects.toMatchObject({ code: 'event_cursor_expired' });
+            const replay = await db.chat.events(actor.user_id, turn.id, 2);
+            expect(replay.events.map((event) => event.seq)).toEqual(
+              Array.from(
+                { length: complete.last_event_id - 2 },
+                (_, index) => index + 3,
+              ),
+            );
+            expect(replay.terminal).toBe(true);
+            if (pass === 0) await db.transaction((tx) => db.chat.prune(tx));
+          }
+          expect(
+            (
+              await db.pool.query(
+                'SELECT seq FROM chat_events WHERE turn_id=$1 ORDER BY seq',
+                [turn.id],
+              )
+            ).rows.map((event) => event.seq),
+          ).toEqual(
+            Array.from(
+              {
+                length: complete.last_event_id - (kind === 'prefix' ? 2 : 0),
+              },
+              (_, index) => index + (kind === 'prefix' ? 3 : 1),
+            ),
+          );
+        },
+      );
+      it.each(['expired', 'erased'] as const)(
+        'preserves ordered floors through partial and empty %s replay cleanup',
+        async (kind) => {
+          const turn = await accepted((await source()).id);
+          const count = kind === 'expired' ? 1005 : 1004;
+          await db.pool.query(
+            `INSERT INTO chat_events(turn_id,seq,event_type,payload)
+           SELECT e.turn_id,g.seq,e.event_type,e.payload FROM chat_events e
+           CROSS JOIN generate_series($2::integer,2,-1) g(seq) WHERE e.turn_id=$1 AND e.seq=1`,
+            [turn.id, count],
+          );
+          await db.pool.query(
+            'UPDATE chat_turns SET event_seq=$2 WHERE id=$1',
+            [turn.id, count],
+          );
+          if (kind === 'erased') await db.chat.cancel(actor.user_id, turn.id);
+          else
+            await db.pool.query(
+              "UPDATE chat_events SET created_at=now()-interval '8 days' WHERE turn_id=$1",
+              [turn.id],
+            );
+          await db.transaction((tx) => db.chat.prune(tx));
+          expect(
+            (
+              await db.pool.query(
+                'SELECT seq FROM chat_events WHERE turn_id=$1 ORDER BY seq',
+                [turn.id],
+              )
+            ).rows.map((event) => event.seq),
+          ).toEqual([1001, 1002, 1003, 1004, 1005]);
+          if (kind === 'expired')
+            await expect(
+              db.chat.events(actor.user_id, turn.id, 1000),
+            ).rejects.toMatchObject({ code: 'event_cursor_expired' });
+          else
+            expect(
+              (await db.chat.events(actor.user_id, turn.id, 1000)).events.map(
+                (event) => event.seq,
+              ),
+            ).toEqual([1001, 1002, 1003, 1004, 1005]);
+          expect(await db.chat.events(actor.user_id, turn.id, 1005)).toEqual({
+            terminal: kind === 'erased',
+            events: [],
+          });
+          await db.transaction((tx) => db.chat.prune(tx));
+          await expect(
+            db.chat.events(actor.user_id, turn.id, 1004),
+          ).rejects.toMatchObject({ code: 'event_cursor_expired' });
+          expect(await db.chat.events(actor.user_id, turn.id, 1005)).toEqual({
+            terminal: kind === 'erased',
+            events: [],
+          });
+          if (kind === 'expired') {
+            await db.pool.query(
+              `INSERT INTO chat_events(turn_id,seq,event_type,payload)
+             VALUES($1,1006,'turn.accepted','{"state":"queued"}')`,
+              [turn.id],
+            );
+            await db.pool.query(
+              'UPDATE chat_turns SET event_seq=1006 WHERE id=$1',
+              [turn.id],
+            );
+            expect(
+              (await db.chat.events(actor.user_id, turn.id, 1005)).events.map(
+                (event) => event.seq,
+              ),
+            ).toEqual([1006]);
+            await expect(
+              db.chat.events(actor.user_id, turn.id, 1004),
+            ).rejects.toMatchObject({ code: 'event_cursor_expired' });
+          }
+          expect(providers.answer).not.toHaveBeenCalled();
+        },
+      );
+    });
     it('drains every terminal replay batch and returns a coherent snapshot when history expires', async () => {
       const turn = await accepted((await source()).id),
         claim = (await db.chat.claim())!;

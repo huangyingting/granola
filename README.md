@@ -975,6 +975,12 @@ submission from recreating a deleted thread; document deletion also removes thos
 receipts. Late usage receipts remain accountable without resurrecting content.
 Unfinished source caches expire after 24 hours, replay events after seven days;
 successful answer sources survive cache expiry until conversation/document deletion.
+Question replay enforces its seven-day cutoff on reads even while physical
+cleanup is backlogged. Expired cursors return `410 event_cursor_expired` for
+authorized snapshot recovery, not a new model request. Bounds and retained
+frames share one SQL statement's time and snapshot. Age-based pruning keeps an
+expired event behind a retained event until it can remove a contiguous prefix;
+partial pruning and empty histories cannot silently reset the replay floor.
 
 Apply migration `009_chat.sql` through `pnpm db:migrate` before starting the
 updated API/worker. Existing strict job/result contracts are unchanged.
