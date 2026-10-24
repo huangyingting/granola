@@ -7,7 +7,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { LocalStore } from '@windows-ai-notes/local';
 import { richTextFromPlainText } from '@windows-ai-notes/contracts/content';
-import { desktopStateSchema } from '@windows-ai-notes/contracts/desktop';
+import {
+  desktopStateSchema,
+  draftSchema,
+} from '@windows-ai-notes/contracts/desktop';
 import {
   cachedTranscriptSchema,
   jobSchema,
@@ -259,6 +262,16 @@ describe('Windows desktop synthetic service contract', () => {
     expect(state.selected).toBeNull();
     expect(local.page(profile, 'private').documents).toEqual([]);
     expect(() => local.get(profile, document.id)).toThrow('unavailable');
+  });
+  it('cold draft hydration preserves controller state and IPC validation without revalidating the local draft projection', async () => {
+    fixture.seed('Synthetic cold draft projection.');
+    await connect();
+    const expected = controller.snapshot();
+    const parse = vi.spyOn(draftSchema, 'parse');
+    const actual = controller.snapshot();
+    expect(parse).not.toHaveBeenCalled();
+    expect(actual).toEqual(expected);
+    expect(desktopStateSchema.safeParse(actual).success).toBe(true);
   });
   it('summary history IPC rejects a full summary body in routine desktop state', async () => {
     const { jobs } = await savedSummaries(1);

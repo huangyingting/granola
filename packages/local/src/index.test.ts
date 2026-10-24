@@ -16,7 +16,7 @@ import {
   richTextFromPlainText,
   richTextToPlainText,
 } from '@windows-ai-notes/contracts/content';
-import type { Draft } from '@windows-ai-notes/contracts/desktop';
+import { draftSchema, type Draft } from '@windows-ai-notes/contracts/desktop';
 import type { Track } from '@windows-ai-notes/contracts';
 import {
   recordingUploadIntentSchema,
@@ -1321,7 +1321,7 @@ describe('encrypted local drafts and durable outbox', () => {
     expect(hidden.documents[0]?.preview).toBe('a'.repeat(160));
     expect(() => store.page(profile, '', -1)).toThrow('supported search');
   });
-  function rewriteDraftBody(id: string, value: ReturnType<typeof fields>) {
+  function rewriteDraftBody(id: string, value: Record<string, unknown>) {
     const sql = new DatabaseSync(path);
     try {
       const row = sql
@@ -1726,6 +1726,126 @@ describe('encrypted local drafts and durable outbox', () => {
     expect(store.page(profile, 'removed private').documents[0]?.id).toBe(
       second.id,
     );
+  });
+  it('cold draft hydration prepares one lookup while rebinding IDs and profiles and recovering from missing rows', () => {
+    const seed = open();
+    const first = seed.create(profile, fields('First private body.'));
+    const second = seed.create(profile, fields('Second private body.'));
+    seed.applyRemote(
+      'other-profile',
+      remote(first, 1, {
+        notes: 'Another profile body.',
+        content: richTextFromPlainText('Another profile body.'),
+      }),
+    );
+    close(seed);
+    const reader = open();
+    const prepare = vi.spyOn(DatabaseSync.prototype, 'prepare');
+    for (let index = 0; index < 3; index++) {
+      expect(reader.get(profile, first.id)).toEqual(first);
+      expect(reader.get(profile, second.id)).toEqual(second);
+      expect(
+        richTextToPlainText(reader.get('other-profile', first.id).content),
+      ).toBe('Another profile body.');
+    }
+    expect(() => reader.get(profile, randomUUID())).toThrow('unavailable');
+    expect(reader.get(profile, first.id)).toEqual(first);
+    expect(
+      prepare.mock.calls.filter(
+        ([sql]) => sql === 'SELECT * FROM drafts WHERE profile=? AND id=?',
+      ),
+    ).toHaveLength(1);
+  });
+  it.each(['get', 'list', 'unchanged save'] as const)(
+    'cold draft hydration projects already-validated data without a second full parse for %s',
+    (operation) => {
+      const store = open();
+      const value = fields('Original private body.');
+      const original = store.create(profile, value);
+      const parse = vi.spyOn(draftSchema, 'parse');
+      const actual =
+        operation === 'get'
+          ? store.get(profile, original.id)
+          : operation === 'list'
+            ? store.list(profile)[0]!
+            : store.save(profile, original.id, 1, value);
+      expect(parse).not.toHaveBeenCalled();
+      expect(actual).toEqual(original);
+      expect(draftSchema.safeParse(actual).success).toBe(true);
+    },
+  );
+  const invalidDraftPayloads: [string, Record<string, unknown>][] = [
+    ['null title', { title: null }],
+    ['oversized title', { title: 'x'.repeat(201) }],
+    ['unsupported content', { content: { type: 'image' } }],
+    [
+      'oversized content',
+      { content: richTextFromPlainText('x'.repeat(40_001)) },
+    ],
+    ['duplicate tags', { tags: ['Planning', 'planning'] }],
+    ['invalid creation time', { created_at: 'not-a-timestamp' }],
+    ['invalid update time', { updated_at: 'not-a-timestamp' }],
+    ['invalid recovery state', { recovery: 'unknown' }],
+    ['invalid server version', { server: {} }],
+    ['invalid conflict version', { conflict: {} }],
+  ];
+  it.each(invalidDraftPayloads)(
+    'cold draft hydration rejects an authenticated payload with %s at the storage boundary',
+    (_label, value) => {
+      const store = open();
+      const original = store.create(profile, fields('Original private body.'));
+      store.page(profile, 'original');
+      rewriteDraftBody(original.id, value);
+      for (const read of [
+        () => store.get(profile, original.id),
+        () => store.list(profile),
+        () => store.page(profile, 'zz-absent-query'),
+      ])
+        expect(read).toThrowError(
+          expect.objectContaining({ code: 'local_data_corrupt' }),
+        );
+    },
+  );
+  it('cold draft hydration sees foreign commits and rollback without caching row results', () => {
+    const reader = open();
+    const writer = open();
+    const original = reader.create(profile, fields('Original private body.'));
+    expect(reader.get(profile, original.id)).toEqual(original);
+    writer.save(profile, original.id, 1, fields('Committed replacement.'));
+    const committed = reader.get(profile, original.id);
+    expect(richTextToPlainText(committed.content)).toBe(
+      'Committed replacement.',
+    );
+    expect(committed.local_revision).toBe(2);
+    expect(() =>
+      writer.atomic(() => {
+        writer.save(
+          profile,
+          original.id,
+          2,
+          fields('Uncommitted replacement.'),
+        );
+        expect(reader.get(profile, original.id)).toEqual(committed);
+        throw new Error('Synthetic prepared-lookup rollback.');
+      }),
+    ).toThrow('Synthetic prepared-lookup rollback');
+    expect(reader.get(profile, original.id)).toEqual(committed);
+    writer.remove(profile, original.id);
+    expect(() => reader.get(profile, original.id)).toThrow('unavailable');
+  });
+  it('cold draft hydration does not share mutable returned values with storage or warm summaries', () => {
+    const store = open();
+    const value = fields('Original private body.');
+    const original = store.create(profile, value);
+    const summary = store.page(profile, 'original');
+    const returned = store.save(profile, original.id, 1, value);
+    returned.title = 'Caller mutation.';
+    returned.tags.push('Caller tag.');
+    const text = returned.content.content[0]?.content?.[0];
+    if (!text) throw new Error('The synthetic rich-text node is unavailable.');
+    text.text = 'Caller-mutated body.';
+    expect(store.get(profile, original.id)).toEqual(original);
+    expect(store.page(profile, 'original')).toEqual(summary);
   });
   it('invalidates summary/search caches on rollback, deletion and profile purge without crossing account scopes', () => {
     const store = open();

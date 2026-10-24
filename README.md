@@ -283,8 +283,10 @@ UTF-16 search text (at most 10,000 entries) in Main memory, alongside bounded
 current-query matches; no search text or index is written to disk. Paging and
 filtering preserve the current editor. Cold full-body search still scans and
 decrypts candidates in the main process, as do uncached candidates beyond the
-text budget; large-library latency and full job API/cache payloads remain
-performance release gates. Bootstrap and state
+text budget. Draft reads reuse a parameterized lookup and project validated
+storage rows and authenticated payloads without a second full draft parse;
+storage and IPC schema checks remain. Large-library latency and full job API/cache
+payloads remain performance release gates. Bootstrap and state
 responses expose only the bounded first transcript page, including when reading
 legacy full-transcript caches. The encrypted legacy revision is not rewritten;
 later pages remain available offline. Main still decrypts the complete legacy

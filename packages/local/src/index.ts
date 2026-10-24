@@ -7,7 +7,7 @@ import {
 } from 'node:crypto';
 import { existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
+import { DatabaseSync, type StatementSync } from 'node:sqlite';
 import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
 import {
@@ -25,7 +25,6 @@ import {
 } from '@windows-ai-notes/contracts/content';
 import {
   editableSchema,
-  draftSchema,
   type Draft,
   type EditableDraft,
   type DraftSummary,
@@ -198,6 +197,7 @@ function context(row: Omit<Row, 'payload'>) {
 export class LocalStore {
   private readonly database: DatabaseSync;
   private readonly key: Buffer;
+  private draftLookup: StatementSync | null = null;
   private transactionDepth = 0;
   private readonly summaries = new Map<
     string,
@@ -415,6 +415,7 @@ export class LocalStore {
     try {
       this.database.close();
     } finally {
+      this.draftLookup = null;
       this.key.fill(0);
       this.summaries.clear();
       this.search = null;
@@ -1294,9 +1295,10 @@ export class LocalStore {
       : null;
   }
   private row(profile: string, id: string): Row | null {
-    const value = this.database
-      .prepare('SELECT * FROM drafts WHERE profile=? AND id=?')
-      .get(profile, id);
+    const statement = (this.draftLookup ??= this.database.prepare(
+      'SELECT * FROM drafts WHERE profile=? AND id=?',
+    ));
+    const value = statement.get(profile, id);
     return value ? rowSchema.parse(value) : null;
   }
   private payload(row: Row): Payload {
@@ -1323,7 +1325,8 @@ export class LocalStore {
       );
   }
   private public(row: Row, value = this.payload(row)): Draft {
-    return draftSchema.parse({
+    // The storage row and authenticated payload have already been validated.
+    return {
       ...pickEditable(value),
       id: row.id,
       local_revision: row.revision,
@@ -1339,7 +1342,7 @@ export class LocalStore {
             : 'synced',
       created_at: value.created_at,
       updated_at: value.updated_at,
-    });
+    };
   }
   list(profile: string): Draft[] {
     return this.database
