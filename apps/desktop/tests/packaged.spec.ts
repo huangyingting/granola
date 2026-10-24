@@ -23,6 +23,7 @@ import {
   desktopProbeEnvironment,
 } from './installer-support.js';
 import { assertAppIcon } from './app-icon.js';
+import { iconImages, readIconAssets } from '../icons.mjs';
 
 const executable = process.env.DESKTOP_EXECUTABLE;
 async function rejectedMainActivation(application: ElectronApplication) {
@@ -304,6 +305,40 @@ test('opens the actual packaged sandboxed editor without workspace runtime depen
       page.getByText('Encrypted on this device', { exact: true }),
     ).toBeVisible();
     await assertAppIcon(application, page);
+    await test.step('Read updated native resources despite a stale Electron icon cache', async () => {
+      const root = await mkdtemp(join(tmpdir(), 'notes-icon-cache-'));
+      try {
+        const assets = await readIconAssets();
+        const black = Buffer.from(assets.ico);
+        for (const { size, bitmap } of iconImages(black))
+          for (let offset = 40; offset < 40 + size * size * 4; offset += 4)
+            bitmap.fill(0, offset, offset + 3);
+        const file = join(root, 'cached.ico');
+        await writeFile(file, black, { flag: 'wx' });
+        const cachedPixels = () =>
+          application.evaluate(async ({ app }, file) => {
+            const icon = await app.getFileIcon(file, { size: 'normal' });
+            if (icon.isEmpty())
+              throw new Error(
+                'The cache regression fixture must have an icon.',
+              );
+            return icon.toBitmap({ scaleFactor: 1 }).toString('hex');
+          }, file);
+        const cached = await cachedPixels();
+        expect(Buffer.from(cached, 'hex')).toHaveLength(4096);
+        const offset = (4 * 32 + 16) * 4;
+        expect(
+          Buffer.from(cached, 'hex')
+            .subarray(offset, offset + 4)
+            .toString('hex'),
+        ).toBe('000000ff');
+        await writeFile(file, assets.ico);
+        expect(await cachedPixels()).toBe(cached);
+        await assertAppIcon(application, page, [file]);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
     expect(await application.evaluate(({ app }) => app.isPackaged)).toBe(true);
     expect(await rejectedMainActivation(application)).toBe('update_not_ready');
     await expect(
