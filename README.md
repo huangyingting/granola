@@ -2280,8 +2280,19 @@ database sequences are not used as synchronization watermarks. Changes contain
 IDs/revisions, never meeting bodies. Keep pending local edits on cursor expiry
 (`410 sync_cursor_expired`) while refreshing the snapshot; on
 `403 workspace_access_revoked`, remove that workspace's cached content.
-The worker prunes change metadata after seven days. A revoked then reactivated
-membership requires a fresh snapshot.
+The worker prunes the contiguous prefix of change metadata older than seven days.
+Migration `018_sync_cleanup.sql` adds a shared transactional housekeeping cursor:
+each pass visits at most 100 workspaces in UUID order, skips busy workspace locks,
+and scans/removes at most 1,000 changes per visited workspace using its existing
+sequence index. Later passes resume and wrap around, including after Worker
+restart or removal of the previous workspace. Logical floors advance only over
+that bounded prefix, never past the first retained change; floor updates,
+physical deletion and the shared cursor commit or roll back together. Missing
+housekeeping state fails explicitly, not as an empty successful sweep.
+Expiry is incremental while a backlog remains; validate the revisit rate and
+cleanup capacity against the deployment's retention requirements. This bounds
+the synchronization stage, not every other housekeeping stage or production
+capacity. A revoked then reactivated membership requires a fresh snapshot.
 
 **Current server limits:** canonical PCM16 mono 16 kHz WAV, at most 60 seconds
 per imported clip; English (`en-US`) and Chinese (`zh-CN`); 48,000 bytes of summary

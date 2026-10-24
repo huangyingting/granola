@@ -84,6 +84,7 @@ const migrationFiles = [
   '015_deletion_recovery.sql',
   '016_task_outcomes.sql',
   '017_task_outcome_kinds.sql',
+  '018_sync_cleanup.sql',
 ];
 
 export type Transaction = pg.PoolClient;

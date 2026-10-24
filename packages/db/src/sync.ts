@@ -208,20 +208,61 @@ export class SyncStore {
     });
   }
   async prune(tx: Transaction): Promise<void> {
-    const workspaces = await tx.query<{ id: string }>(
-      'SELECT id FROM workspaces ORDER BY id FOR NO KEY UPDATE',
-    );
-    for (const { id } of workspaces.rows) {
-      const result = await tx.query<{ sync_floor: string }>(
-        `UPDATE workspaces SET sync_floor=GREATEST(sync_floor,COALESCE(
-          (SELECT min(seq)-1 FROM sync_changes WHERE workspace_id=$1 AND created_at>=now()-interval '7 days'),
-          sync_seq)) WHERE id=$1 RETURNING sync_floor`,
-        [id],
+    const checkpoint = (
+      await tx.query<{ workspace_id: string | null }>(
+        'SELECT workspace_id FROM sync_cleanup_cursor WHERE singleton FOR UPDATE',
+      )
+    ).rows[0];
+    if (!checkpoint)
+      throw new Error('The synchronization cleanup cursor is missing.');
+    const select = (after: string | null) =>
+      tx.query<Pick<Access, 'sync_seq' | 'sync_floor'> & { id: string }>(
+        `SELECT id,sync_seq,sync_floor FROM workspaces
+         WHERE ($1::uuid IS NULL OR id>$1) ORDER BY id
+         LIMIT 100 FOR NO KEY UPDATE SKIP LOCKED`,
+        [after],
       );
-      await tx.query(
-        'DELETE FROM sync_changes WHERE workspace_id=$1 AND seq<=$2',
-        [id, result.rows[0]!.sync_floor],
+    let workspaces = await select(checkpoint.workspace_id);
+    if (!workspaces.rows.length && checkpoint.workspace_id !== null)
+      workspaces = await select(null);
+    for (const workspace of workspaces.rows) {
+      const head = (
+        await tx.query<{ seq: string; retained: boolean }>(
+          `SELECT seq,created_at>=now()-interval '7 days' retained FROM sync_changes
+           WHERE workspace_id=$1 ORDER BY seq LIMIT 1000`,
+          [workspace.id],
+        )
+      ).rows;
+      const previous = BigInt(workspace.sync_floor);
+      const retained = head.find(
+        (row) => BigInt(row.seq) > previous && row.retained,
       );
+      const last = head.at(-1);
+      let floor = retained
+        ? BigInt(retained.seq) - 1n
+        : head.length < 1000
+          ? BigInt(workspace.sync_seq)
+          : BigInt(last!.seq);
+      if (floor < previous) floor = previous;
+      if (floor !== previous)
+        await tx.query('UPDATE workspaces SET sync_floor=$2 WHERE id=$1', [
+          workspace.id,
+          floor.toString(),
+        ]);
+      if (last) {
+        const lastSequence = BigInt(last.seq);
+        await tx.query(
+          'DELETE FROM sync_changes WHERE workspace_id=$1 AND seq<=$2',
+          [
+            workspace.id,
+            (floor < lastSequence ? floor : lastSequence).toString(),
+          ],
+        );
+      }
     }
+    await tx.query(
+      'UPDATE sync_cleanup_cursor SET workspace_id=$1 WHERE singleton',
+      [workspaces.rows.at(-1)?.id ?? null],
+    );
   }
 }
