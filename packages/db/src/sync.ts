@@ -249,14 +249,13 @@ export class SyncStore {
           workspace.id,
           floor.toString(),
         ]);
-      if (last) {
-        const lastSequence = BigInt(last.seq);
+      const expired = head
+        .filter((row) => BigInt(row.seq) <= floor)
+        .map((row) => row.seq);
+      if (expired.length) {
         await tx.query(
-          'DELETE FROM sync_changes WHERE workspace_id=$1 AND seq<=$2',
-          [
-            workspace.id,
-            (floor < lastSequence ? floor : lastSequence).toString(),
-          ],
+          'DELETE FROM sync_changes WHERE workspace_id=$1 AND seq=ANY($2::bigint[])',
+          [workspace.id, expired],
         );
       }
     }

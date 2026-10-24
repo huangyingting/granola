@@ -218,6 +218,39 @@ describe.skipIf(!databaseUrl)(
       await prune();
       expect(await state(id)).toEqual({ sync_floor: '1005', remaining: 0 });
     });
+    it('deletes only the selected batch when older metadata appears after the head was read', async () => {
+      const id = await workspace(undefined, '2000');
+      await db.pool.query(
+        `INSERT INTO sync_changes(workspace_id,seq,owner_id,document_id,kind,revision,transcript_revision,created_at)
+         SELECT $1,n,$2,$3,'document',1,0,now()-interval '8 days'
+         FROM generate_series(2,2000,2) n`,
+        [id, owner, randomUUID()],
+      );
+      await db.pool
+        .query(`CREATE FUNCTION insert_during_sync_cleanup() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+          INSERT INTO sync_changes(workspace_id,seq,owner_id,document_id,kind,revision,transcript_revision,created_at)
+          SELECT NEW.id,n,m.user_id,NEW.id,'document',1,0,now()-interval '8 days'
+          FROM generate_series(1,1999,2) n JOIN memberships m ON m.workspace_id=NEW.id;
+          RETURN NEW;
+        END;
+      $$;
+      CREATE TRIGGER insert_during_sync_cleanup AFTER UPDATE OF sync_floor ON workspaces
+      FOR EACH ROW WHEN(OLD.sync_floor=0 AND NEW.sync_floor>0) EXECUTE FUNCTION insert_during_sync_cleanup()`);
+      try {
+        await prune();
+        expect(await state(id)).toEqual({
+          sync_floor: '2000',
+          remaining: 1000,
+        });
+        await prune();
+        expect(await state(id)).toEqual({ sync_floor: '2000', remaining: 0 });
+      } finally {
+        await db.pool
+          .query(`DROP TRIGGER insert_during_sync_cleanup ON workspaces;
+          DROP FUNCTION insert_during_sync_cleanup()`);
+      }
+    });
     it('keeps bigint sequence arithmetic exact beyond the JavaScript safe-integer range', async () => {
       const id = await workspace(undefined, '9007199254740000');
       const before = await db.sync.snapshot(owner, id);
