@@ -660,20 +660,26 @@ describe.skipIf(!databaseUrl)(
         "UPDATE chat_turns SET expires_at=now()-interval '1 second' WHERE id=$1",
         [turn.id],
       );
-      await db.cleanup();
-      expect(await db.chat.get(actor.user_id, turn.id)).toMatchObject({
-        state: 'failed',
-        resume_available: false,
-        error: { code: 'question_progress_expired' },
-        uncertain_requests: 1,
-      });
-      expect(
-        (
-          await db.pool.query('SELECT evidence FROM chat_turns WHERE id=$1', [
-            turn.id,
-          ])
-        ).rows[0]!.evidence,
-      ).toBeNull();
+      await vi.waitFor(
+        async () => {
+          await db.cleanup();
+          expect(await db.chat.get(actor.user_id, turn.id)).toMatchObject({
+            state: 'failed',
+            resume_available: false,
+            error: { code: 'question_progress_expired' },
+            uncertain_requests: 1,
+          });
+          expect(
+            (
+              await db.pool.query(
+                'SELECT evidence FROM chat_turns WHERE id=$1',
+                [turn.id],
+              )
+            ).rows[0]!.evidence,
+          ).toBeNull();
+        },
+        { timeout: 5000, interval: 25 },
+      );
       expect(await runOnce(db, providers)).toBe(false);
       expect((await db.usage.snapshot(actor.user_id)).uncertain_requests).toBe(
         '1',

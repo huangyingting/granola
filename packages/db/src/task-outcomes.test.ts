@@ -118,6 +118,9 @@ describe.skipIf(!databaseUrl)('transactional deployment task outcomes', () => {
       .query(`${previous.replace('CREATE FUNCTION', 'CREATE OR REPLACE FUNCTION')}
       ALTER TABLE audit_events DROP COLUMN job_kind;
       DROP TABLE sync_cleanup_cursor;
+      DROP TABLE job_cleanup_cursor;
+      ALTER TABLE summary_runs DROP COLUMN retired_at;
+      ALTER TABLE recording_transcription_runs DROP COLUMN retired_at;
       DELETE FROM schema_migrations WHERE version>=17;`);
   }
   it('reads a consistent read-only snapshot, with null success share for an empty denominator', async () => {

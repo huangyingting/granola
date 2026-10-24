@@ -2294,6 +2294,23 @@ cleanup capacity against the deployment's retention requirements. This bounds
 the synchronization stage, not every other housekeeping stage or production
 capacity. A revoked then reactivated membership requires a fresh snapshot.
 
+Job housekeeping has a separate shared cursor from migration `019_job_cleanup.sql`.
+Each pass visits at most 100 jobs, skips busy job/run/child locks, and resumes and
+wraps across Worker restarts. Across that entire pass it deletes at most 1,000
+replay rows, 1,000 saved recording chunks, 1,000 summary stages and 1,000 resume
+receipts, not those limits per job. Replay deletion advances only a contiguous
+expired prefix; reads independently reject expired cursors and withhold event
+payloads older than seven days, even before physical deletion. Obsolete processing
+runs are first marked retired in the same transaction: their remaining children
+cannot authorize a resume or appear as available summary stages. Strong parent
+locks prevent new FK children, and only empty parents are removed, so cascades
+cannot bypass the child budgets. Retirement, deletion and cursor movement roll
+back together; provider usage receipts and uncertain-dispatch holds are untouched.
+Existing cancellation/document/audio erasure paths keep their immediate deletion
+semantics. This bounds ordinary job housekeeping, not every deletion path,
+cleanup latency, physical purge deadlines or production capacity; operators must
+measure backlog and revisit rates against retention requirements.
+
 **Current server limits:** canonical PCM16 mono 16 kHz WAV, at most 60 seconds
 per imported clip; English (`en-US`) and Chinese (`zh-CN`); 48,000 bytes of summary
 context; eight pending jobs and two SSE subscriptions per user. Clips stage

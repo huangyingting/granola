@@ -611,10 +611,16 @@ describe.skipIf(!databaseUrl)(
       const before = await db.audit.page();
       expect(before.events).toEqual([]);
       expect(before.expired_rows_pending_cleanup).toBe('1005');
-      await db.cleanup();
-      expect((await db.audit.page()).expired_rows_pending_cleanup).toBe('5');
-      await db.cleanup();
-      expect((await db.audit.page()).expired_rows_pending_cleanup).toBe('0');
+      for (const remaining of ['5', '0'])
+        await vi.waitFor(
+          async () => {
+            await db.cleanup();
+            expect((await db.audit.page()).expired_rows_pending_cleanup).toBe(
+              remaining,
+            );
+          },
+          { timeout: 5000, interval: 25 },
+        );
       expect(
         (await db.pool.query('SELECT count(*)::int count FROM audit_events'))
           .rows[0].count,

@@ -226,7 +226,7 @@ export class SummaryStages {
     const row = (
       await tx.query<Run>(
         `SELECT p.*,j.updated_at>now()-interval '24 hours' fresh FROM summary_runs p
-         JOIN jobs j ON j.id=p.job_id WHERE p.job_id=$1 FOR UPDATE OF p`,
+         JOIN jobs j ON j.id=p.job_id WHERE p.job_id=$1 AND p.retired_at IS NULL FOR UPDATE OF p`,
         [id],
       )
     ).rows[0];
@@ -529,6 +529,7 @@ export class SummaryStages {
   async totalUsage(job: ClaimedJob) {
     return this.database.transaction(async (tx) => {
       await this.guard(tx, job);
+      await this.run(tx, job.id);
       const row = (
         await tx.query<{
           input_tokens: string;
@@ -565,10 +566,10 @@ export class SummaryStages {
       await this.database.pool.query<Progress>(
         `SELECT j.state,p.resume_token,j.updated_at>now()-interval '24 hours' fresh,j.error->>'code' failure_code,
          s.total_stages,s.completed_stages,c.provider_requests,c.uncertain_requests
-         FROM jobs j LEFT JOIN summary_runs p ON p.job_id=j.id
+         FROM jobs j LEFT JOIN summary_runs p ON p.job_id=j.id AND p.retired_at IS NULL
          CROSS JOIN LATERAL (
            SELECT count(*)::integer total_stages,count(*) FILTER (WHERE state='completed')::integer completed_stages
-           FROM summary_steps WHERE job_id=j.id
+           FROM summary_steps WHERE job_id=j.id AND p.job_id IS NOT NULL
          ) s
          CROSS JOIN LATERAL (
            SELECT count(*)::integer provider_requests,count(*) FILTER (WHERE actual IS NULL)::integer uncertain_requests

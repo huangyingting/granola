@@ -26,7 +26,7 @@ import {
   DeleteBucketPolicyCommand,
   PutBucketVersioningCommand,
 } from '@aws-sdk/client-s3';
-import { Database } from '@windows-ai-notes/db';
+import { Database, pruneJobHistory } from '@windows-ai-notes/db';
 import {
   RecordingBlobs,
   objectKey,
@@ -1711,7 +1711,20 @@ describe.skipIf(!databaseUrl || !endpoint)(
           "UPDATE jobs SET updated_at=now()-interval '25 hours' WHERE id=$1",
           [job.id],
         );
-        await db.cleanup();
+        await vi.waitFor(
+          async () => {
+            await db.cleanup();
+            expect(
+              (
+                await db.pool.query(
+                  'SELECT job_id FROM recording_transcription_runs WHERE job_id=$1',
+                  [job.id],
+                )
+              ).rowCount,
+            ).toBe(0);
+          },
+          { timeout: 5000, interval: 25 },
+        );
         const response = await app.inject({
           method: 'POST',
           url: `/v1/jobs/${job.id}/retry`,
@@ -1723,6 +1736,83 @@ describe.skipIf(!databaseUrl || !endpoint)(
         expect(await db.job(c.user_id, job.id)).toMatchObject({
           state: 'failed',
           error: { code: 'provider_unavailable' },
+        });
+      });
+      it('cannot resume retired transcription while a busy saved chunk awaits physical deletion', async () => {
+        const c = await context();
+        await ready(c, 2);
+        const job = await enqueue(c);
+        const transcribe = vi.fn<AiProviders['transcribe']>(async () => {
+          if (transcribe.mock.calls.length === 2)
+            throw new ServiceError(
+              'provider_unavailable',
+              'Synthetic failure after saving one chunk.',
+              502,
+            );
+          return {
+            segments: [
+              {
+                id: randomUUID(),
+                start_ms: 0,
+                end_ms: 500,
+                text: 'Synthetic saved chunk.',
+              },
+            ],
+            usage: { input_tokens: 0, output_tokens: 0, audio_ms: 1000 },
+          };
+        });
+        await runOnce(db, provider(transcribe), undefined, blobs);
+        expect(await db.job(c.user_id, job.id)).toMatchObject({
+          state: 'failed',
+          progress: { completed_chunks: 1 },
+        });
+        await db.pool.query(
+          "UPDATE jobs SET updated_at=now()-interval '25 hours' WHERE id=$1",
+          [job.id],
+        );
+        const lock = await db.pool.connect();
+        try {
+          await lock.query('BEGIN');
+          await lock.query(
+            'SELECT job_id FROM recording_transcription_chunks WHERE job_id=$1 FOR UPDATE',
+            [job.id],
+          );
+          await db.transaction(pruneJobHistory);
+          expect(
+            (
+              await db.pool.query(
+                'SELECT retired_at IS NOT NULL retired FROM recording_transcription_runs WHERE job_id=$1',
+                [job.id],
+              )
+            ).rows,
+          ).toEqual([{ retired: true }]);
+          const response = await app.inject({
+            method: 'POST',
+            url: `/v1/jobs/${job.id}/retry`,
+            headers: c.headers,
+            payload: { confirmed: true },
+          });
+          expect(response.statusCode).toBe(410);
+          expect(response.json()).toMatchObject({
+            code: 'transcription_progress_expired',
+          });
+          expect(transcribe).toHaveBeenCalledTimes(2);
+        } finally {
+          await lock.query('ROLLBACK');
+          lock.release();
+        }
+        await db.transaction(pruneJobHistory);
+        expect(
+          (
+            await db.pool.query(
+              'SELECT job_id FROM recording_transcription_runs WHERE job_id=$1',
+              [job.id],
+            )
+          ).rowCount,
+        ).toBe(0);
+        expect(await db.job(c.user_id, job.id)).toMatchObject({
+          state: 'failed',
+          progress: { completed_chunks: 1 },
         });
       });
       it('fences an expired worker while its replacement preserves the completed prefix and publishes one revision', async () => {

@@ -66,7 +66,7 @@ export class RecordingTranscriptions {
   private async run(tx: Transaction, id: string): Promise<Run> {
     const row = (
       await tx.query<Run>(
-        'SELECT * FROM recording_transcription_runs WHERE job_id=$1 FOR UPDATE',
+        'SELECT * FROM recording_transcription_runs WHERE job_id=$1 AND retired_at IS NULL FOR UPDATE',
         [id],
       )
     ).rows[0];

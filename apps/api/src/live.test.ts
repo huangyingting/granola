@@ -9,6 +9,7 @@ import {
   describe,
   expect,
   it,
+  vi,
 } from 'vitest';
 import {
   Database,
@@ -604,14 +605,19 @@ describe.skipIf(!url)(
         "UPDATE live_sources SET updated_at=updated_at-interval '8 days' WHERE owner_id=$1",
         [actor.user_id],
       );
-      await db.cleanup();
-      expect(
-        (
-          await db.pool.query('SELECT id FROM live_leases WHERE id=$1', [
-            claim.id,
-          ])
-        ).rowCount,
-      ).toBe(0);
+      await vi.waitFor(
+        async () => {
+          await db.cleanup();
+          expect(
+            (
+              await db.pool.query('SELECT id FROM live_leases WHERE id=$1', [
+                claim.id,
+              ])
+            ).rowCount,
+          ).toBe(0);
+        },
+        { timeout: 5000, interval: 25 },
+      );
       const stored = (
         await db.pool.query(
           'SELECT live_lease_id,actual FROM ai_usage_calls WHERE id=$1',

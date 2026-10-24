@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { resourceId, ServiceError } from '@windows-ai-notes/contracts/server';
 import type { Database, Document, Transaction } from './index.js';
+import { cleanupBatch } from './cleanup.js';
 
 const cursorSchema = z.strictObject({
   version: z.literal(1),
@@ -226,13 +227,7 @@ export class SyncStore {
          LIMIT $3 FOR NO KEY UPDATE SKIP LOCKED`,
         [after, before, limit],
       );
-    const workspaces = (await select(checkpoint.workspace_id, null, 100)).rows;
-    if (workspaces.length < 100 && checkpoint.workspace_id !== null)
-      workspaces.push(
-        ...(
-          await select(null, checkpoint.workspace_id, 100 - workspaces.length)
-        ).rows,
-      );
+    const workspaces = await cleanupBatch(checkpoint.workspace_id, select);
     for (const workspace of workspaces) {
       const head = (
         await tx.query<{ seq: string; retained: boolean }>(

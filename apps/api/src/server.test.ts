@@ -730,9 +730,14 @@ describe.skipIf(!databaseUrl)('PostgreSQL API and durable AI worker', () => {
       "UPDATE jobs SET created_at=now()-interval '25 hours' WHERE id=$1",
       [audio.id],
     );
-    await db.cleanup();
-    expect((await db.job(owner.user_id, audio.id)).error?.code).toBe(
-      'audio_expired',
+    await vi.waitFor(
+      async () => {
+        await db.cleanup();
+        expect((await db.job(owner.user_id, audio.id)).error?.code).toBe(
+          'audio_expired',
+        );
+      },
+      { timeout: 5000, interval: 25 },
     );
     const job = await enqueue(owner, doc.id);
     for (let i = 0; i < 3; i++) {
@@ -1058,10 +1063,15 @@ describe.skipIf(!databaseUrl)('PostgreSQL API and durable AI worker', () => {
       "UPDATE sync_changes SET created_at=now()-interval '8 days' WHERE workspace_id=$1",
       [owner.workspace_id],
     );
-    await db.cleanup();
-    await expect(
-      db.sync.changes(owner.user_id, owner.workspace_id, reset.cursor),
-    ).rejects.toMatchObject({ code: 'sync_cursor_expired' });
+    await vi.waitFor(
+      async () => {
+        await db.cleanup();
+        await expect(
+          db.sync.changes(owner.user_id, owner.workspace_id, reset.cursor),
+        ).rejects.toMatchObject({ code: 'sync_cursor_expired' });
+      },
+      { timeout: 5000, interval: 25 },
+    );
     expect(
       (await db.sync.snapshot(owner.user_id, owner.workspace_id)).documents,
     ).toHaveLength(1);

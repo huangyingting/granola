@@ -44,6 +44,7 @@ import {
 } from './media-verification.js';
 import { auditTransactionContext } from './audit-context.js';
 import { isDatabaseUnavailable } from './connection-errors.js';
+import { pruneJobHistory } from './cleanup.js';
 import {
   DeletionPublications,
   type DeletionArchivePublisher,
@@ -59,6 +60,7 @@ export type { LiveClaim, LiveStart, LiveCursor } from './live.js';
 export { LIVE_MEDIA_MS, LIVE_LEASE_MS } from './live.js';
 export { recordChange } from './sync.js';
 export { isDatabaseUnavailable } from './connection-errors.js';
+export { pruneJobHistory } from './cleanup.js';
 export {
   withAuditContext,
   setAuditActor,
@@ -85,6 +87,7 @@ const migrationFiles = [
   '016_task_outcomes.sql',
   '017_task_outcome_kinds.sql',
   '018_sync_cleanup.sql',
+  '019_job_cleanup.sql',
 ];
 
 export type Transaction = pg.PoolClient;
@@ -896,12 +899,12 @@ export class Database {
         tx,
       );
       const progress = (
-        await tx.query(
-          'SELECT job_id FROM recording_transcription_runs WHERE job_id=$1',
+        await tx.query<{ retired: boolean }>(
+          'SELECT retired_at IS NOT NULL retired FROM recording_transcription_runs WHERE job_id=$1',
           [id],
         )
-      ).rowCount;
-      if (row.progress !== null && !progress)
+      ).rows[0];
+      if (progress?.retired || (row.progress !== null && !progress))
         throw new ServiceError(
           'transcription_progress_expired',
           'Processing progress expired. Explicitly start a new transcription to send audio again.',
@@ -1119,8 +1122,11 @@ export class Database {
     const bounds = await this.pool.query<{
       first: number | null;
       last: number;
+      expired: number | null;
     }>(
-      'SELECT min(e.seq) first,j.event_seq last FROM jobs j LEFT JOIN job_events e ON e.job_id=j.id WHERE j.id=$1 GROUP BY j.event_seq',
+      `SELECT min(e.seq) first,j.event_seq last,
+       max(e.seq) FILTER (WHERE e.created_at<now()-interval '7 days') expired
+       FROM jobs j LEFT JOIN job_events e ON e.job_id=j.id WHERE j.id=$1 GROUP BY j.event_seq`,
       [id],
     );
     const bound = bounds.rows[0]!;
@@ -1130,7 +1136,9 @@ export class Database {
         'The event cursor is ahead of this job.',
         400,
       );
-    if (after < (bound.first ?? bound.last + 1) - 1)
+    if (
+      after < Math.max((bound.first ?? bound.last + 1) - 1, bound.expired ?? 0)
+    )
       throw new ServiceError(
         'event_cursor_expired',
         'Replay events expired; fetch the authorized job snapshot.',
@@ -1146,7 +1154,8 @@ export class Database {
       JOIN documents d ON d.id=j.document_id
       JOIN memberships m ON m.workspace_id=d.workspace_id AND m.user_id=j.owner_id AND m.active
       JOIN users u ON u.id=j.owner_id AND u.active
-      WHERE e.job_id=$1 AND e.seq>$2 AND j.owner_id=$3 AND d.deleted_at IS NULL ORDER BY e.seq LIMIT 50`,
+      WHERE e.job_id=$1 AND e.seq>$2 AND j.owner_id=$3 AND d.deleted_at IS NULL
+      AND e.created_at>=now()-interval '7 days' ORDER BY e.seq LIMIT 50`,
       [id, after, userId],
     );
     return {
@@ -1166,7 +1175,9 @@ export class Database {
   async eventState(userId: string, id: string) {
     const row = (
       await this.pool.query<JobStatusRow & { completed_stages: number }>(
-        `SELECT v.*,(SELECT count(*)::integer FROM summary_steps s WHERE s.job_id=v.id AND s.state='completed') completed_stages
+        `SELECT v.*,(SELECT count(*)::integer FROM summary_steps s
+         JOIN summary_runs p ON p.job_id=s.job_id AND p.retired_at IS NULL
+         WHERE s.job_id=v.id AND s.state='completed') completed_stages
        FROM (${jobStatusQuery} WHERE j.id=$1 AND j.owner_id=$2 AND d.deleted_at IS NULL) v`,
         [id, userId],
       )
@@ -1521,24 +1532,7 @@ export class Database {
         );
         await this.event(tx, id, 'job.failed', failure);
       }
-      await tx.query(
-        "DELETE FROM job_events WHERE created_at<now()-interval '7 days'",
-      );
-      await tx.query(
-        `DELETE FROM recording_transcription_runs p USING jobs j,documents d,memberships m,users u
-         WHERE p.job_id=j.id AND d.id=j.document_id AND m.workspace_id=d.workspace_id
-         AND m.user_id=j.owner_id AND u.id=j.owner_id
-         AND (d.deleted_at IS NOT NULL OR NOT m.active OR NOT u.active OR j.state IN ('cancelled','succeeded')
-           OR (j.state='failed' AND j.updated_at<now()-interval '24 hours'))`,
-      );
-      await tx.query(
-        `DELETE FROM summary_runs p USING jobs j,documents d,memberships m,users u
-         WHERE p.job_id=j.id AND d.id=j.document_id AND m.workspace_id=d.workspace_id
-         AND m.user_id=j.owner_id AND u.id=j.owner_id
-         AND (d.deleted_at IS NOT NULL OR NOT m.active OR NOT u.active OR j.state='cancelled'
-           OR (j.state='failed' AND j.updated_at<now()-interval '24 hours')
-           OR (j.state='succeeded' AND j.updated_at<now()-interval '7 days'))`,
-      );
+      await pruneJobHistory(tx);
       await this.sync.prune(tx);
       await this.live.prune(tx);
       await this.chat.prune(tx);

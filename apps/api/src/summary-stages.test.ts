@@ -10,7 +10,12 @@ import {
   it,
   vi,
 } from 'vitest';
-import { Database, digest, type ClaimedJob } from '@windows-ai-notes/db';
+import {
+  Database,
+  digest,
+  pruneJobHistory,
+  type ClaimedJob,
+} from '@windows-ai-notes/db';
 import {
   summaryPromptVersion,
   summaryEvidence,
@@ -693,6 +698,71 @@ describe.skipIf(!databaseUrl)(
         uncertain: { input_tokens: '10' },
       });
     }, 15_000);
+    it('hides retired output and refuses confirmation while a busy saved stage awaits physical deletion', async () => {
+      const { job, stage } = await ready();
+      const call = await db.summaries.sending(job, stage, budget);
+      await db.usage.settle(call, actual);
+      await db.summaries.save(job, stage, {
+        kind: 'summary',
+        result: output(job),
+      });
+      await db.finish(job, null, {
+        code: 'interrupted',
+        message: 'Synthetic interruption after saving output.',
+        retryable: false,
+      });
+      const confirmation = (await progress(job.id)).resume_token!;
+      await db.pool.query(
+        "UPDATE jobs SET updated_at=now()-interval '25 hours' WHERE id=$1",
+        [job.id],
+      );
+      const lock = await db.pool.connect();
+      try {
+        await lock.query('BEGIN');
+        await lock.query(
+          'SELECT job_id FROM summary_steps WHERE job_id=$1 FOR UPDATE',
+          [job.id],
+        );
+        await db.transaction(pruneJobHistory);
+        expect(
+          (
+            await db.pool.query(
+              'SELECT retired_at IS NOT NULL retired FROM summary_runs WHERE job_id=$1',
+              [job.id],
+            )
+          ).rows,
+        ).toEqual([{ retired: true }]);
+        expect(await progress(job.id)).toMatchObject({
+          total_stages: 0,
+          completed_stages: 0,
+          resume_available: false,
+          resume_token: null,
+        });
+        expect(await db.eventState(actor.user_id, job.id)).toMatchObject({
+          completed_stages: 0,
+        });
+        expect((await retry(job.id, confirmation)).statusCode).toBe(410);
+        expect(await db.usage.snapshot(actor.user_id)).toMatchObject({
+          settled_requests: '1',
+          uncertain_requests: '0',
+          settled: { input_tokens: '3' },
+        });
+      } finally {
+        await lock.query('ROLLBACK');
+        lock.release();
+      }
+      await db.transaction(pruneJobHistory);
+      expect(
+        (await db.pool.query('SELECT job_id FROM summary_runs')).rowCount,
+      ).toBe(0);
+      expect(
+        (
+          await db.pool.query('SELECT id FROM ai_usage_calls WHERE id=$1', [
+            call,
+          ])
+        ).rowCount,
+      ).toBe(1);
+    });
     it('does not replay a pre-upgrade provider dispatch without durable stage records', async () => {
       await queued();
       const legacy = (await db.claim())!;
@@ -781,10 +851,15 @@ describe.skipIf(!databaseUrl)(
         "UPDATE jobs SET updated_at=now()-interval '8 days' WHERE id=$1",
         [job.id],
       );
-      await db.cleanup();
-      expect(
-        (await db.pool.query('SELECT job_id FROM summary_runs')).rowCount,
-      ).toBe(0);
+      await vi.waitFor(
+        async () => {
+          await db.cleanup();
+          expect(
+            (await db.pool.query('SELECT job_id FROM summary_runs')).rowCount,
+          ).toBe(0);
+        },
+        { timeout: 5000, interval: 25 },
+      );
       expect(await db.job(actor.user_id, job.id)).toMatchObject({
         state: 'succeeded',
         result: output(job),
@@ -796,10 +871,15 @@ describe.skipIf(!databaseUrl)(
         'UPDATE memberships SET active=false WHERE user_id=$1',
         [actor.user_id],
       );
-      await db.cleanup();
-      expect(
-        (await db.pool.query('SELECT job_id FROM summary_runs')).rowCount,
-      ).toBe(0);
+      await vi.waitFor(
+        async () => {
+          await db.cleanup();
+          expect(
+            (await db.pool.query('SELECT job_id FROM summary_runs')).rowCount,
+          ).toBe(0);
+        },
+        { timeout: 5000, interval: 25 },
+      );
       await db.pool.query(
         'UPDATE memberships SET active=true WHERE user_id=$1',
         [actor.user_id],
@@ -807,6 +887,9 @@ describe.skipIf(!databaseUrl)(
       await expect(db.summaries.begin(revoked, identity)).rejects.toMatchObject(
         { code: 'summary_progress_expired' },
       );
+      await expect(db.summaries.totalUsage(revoked)).rejects.toMatchObject({
+        code: 'summary_progress_expired',
+      });
     });
   },
 );
