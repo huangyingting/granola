@@ -22,7 +22,7 @@ import {
   closeObservedMain,
   desktopProbeEnvironment,
 } from './installer-support.js';
-import { assertAppIcon } from './app-icon.js';
+import { assertAppIcon, readNativeFileIcons } from './app-icon.js';
 import { iconImages, readIconAssets } from '../icons.mjs';
 
 const executable = process.env.DESKTOP_EXECUTABLE;
@@ -351,6 +351,25 @@ test('opens the actual packaged sandboxed editor without workspace runtime depen
           throw new Error(
             'Native icon fixture compilation emitted diagnostics.',
           );
+        const native = await readNativeFileIcons([file, source]);
+        expect(native.map(({ file }) => file)).toEqual([file, source]);
+        const offset = (4 * 32 + 16) * 4;
+        const blackPixels = native[0]?.pixels;
+        const sourcePixels = native[1]?.pixels;
+        if (!blackPixels || !sourcePixels)
+          throw new Error('Both native icon fixtures are required.');
+        expect(blackPixels.subarray(offset, offset + 4).toString('hex')).toBe(
+          '000000ff',
+        );
+        const frame = iconImages(assets.ico).find(({ size }) => size === 32);
+        if (!frame) throw new Error('The committed 32px icon is required.');
+        const dibOffset = 40 + ((31 - 4) * 32 + 16) * 4;
+        const expectedPixel = frame.bitmap
+          .subarray(dibOffset, dibOffset + 4)
+          .toString('hex');
+        expect(sourcePixels.subarray(offset, offset + 4).toString('hex')).toBe(
+          expectedPixel,
+        );
         const cachedPixels = () =>
           application.evaluate(async ({ app }, file) => {
             const icon = await app.getFileIcon(file, { size: 'normal' });
@@ -362,12 +381,11 @@ test('opens the actual packaged sandboxed editor without workspace runtime depen
           }, file);
         const cached = await cachedPixels();
         expect(Buffer.from(cached, 'hex')).toHaveLength(4096);
-        const offset = (4 * 32 + 16) * 4;
         expect(
           Buffer.from(cached, 'hex')
             .subarray(offset, offset + 4)
             .toString('hex'),
-        ).toBe('000000ff');
+        ).not.toBe(expectedPixel);
         await writeFile(file, readFileSync(source));
         expect(await cachedPixels()).toBe(cached);
         await assertAppIcon(application, page, [file]);

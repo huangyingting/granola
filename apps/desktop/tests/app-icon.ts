@@ -93,6 +93,45 @@ $icons = @(foreach ($file in ($env:NOTES_ICON_FILES | ConvertFrom-Json)) {
 ConvertTo-Json -InputObject $icons -Compress
 `;
 
+export async function readNativeFileIcons(files: readonly string[]) {
+  const programs = process.env.ProgramFiles;
+  if (!programs)
+    throw new Error('The Windows Program Files directory is required.');
+  const { stdout, stderr } = await promisify(execFile)(
+    join(programs, 'PowerShell', '7', 'pwsh.exe'),
+    ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', extractIcons],
+    {
+      env: {
+        ...audioHostEnvironment(process.env),
+        NOTES_ICON_FILES: JSON.stringify(files),
+      },
+      encoding: 'utf8',
+      timeout: 10_000,
+      maxBuffer: 64 * 1024,
+      windowsHide: true,
+    },
+  );
+  if (stderr)
+    throw new Error('Native file icon extraction emitted diagnostics.');
+  return z
+    .array(
+      z.strictObject({
+        file: z.string().min(1),
+        width: z.literal(32),
+        height: z.literal(32),
+        pixels: z.string().length(5464),
+      }),
+    )
+    .length(files.length)
+    .parse(JSON.parse(stdout))
+    .map(({ pixels, ...record }) => {
+      const bytes = Buffer.from(pixels, 'base64');
+      if (bytes.length !== 4096 || bytes.toString('base64') !== pixels)
+        throw new Error('Native file icon pixels are invalid.');
+      return { ...record, pixels: bytes };
+    });
+}
+
 export async function assertAppIcon(
   application: ElectronApplication,
   page: Page,
@@ -157,59 +196,22 @@ export async function assertAppIcon(
     return process.execPath;
   }, assets.png.toString('base64'));
   const iconFiles = [executable, ...files];
-  const programs = process.env.ProgramFiles;
-  if (!programs)
-    throw new Error('The Windows Program Files directory is required.');
-  const icons = async () => {
-    const { stdout, stderr } = await promisify(execFile)(
-      join(programs, 'PowerShell', '7', 'pwsh.exe'),
-      ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', extractIcons],
-      {
-        env: {
-          ...audioHostEnvironment(process.env),
-          NOTES_ICON_FILES: JSON.stringify(iconFiles),
-        },
-        encoding: 'utf8',
-        timeout: 10_000,
-        maxBuffer: 64 * 1024,
-        windowsHide: true,
-      },
+  const icons = async () =>
+    (await readNativeFileIcons(iconFiles)).map(
+      ({ file, width, height, pixels: bytes }) => ({
+        file,
+        empty: bytes.length === 0,
+        size: { width, height },
+        bytes: bytes.length,
+        expectedBytes: bitmap.length,
+        samples: points.map(([x, y]) =>
+          bytes
+            .subarray((y * 32 + x) * 4, (y * 32 + x) * 4 + 4)
+            .toString('hex'),
+        ),
+        expectedSamples,
+      }),
     );
-    if (stderr)
-      throw new Error('Native file icon extraction emitted diagnostics.');
-    return z
-      .array(
-        z.strictObject({
-          file: z.string().min(1),
-          width: z.literal(32),
-          height: z.literal(32),
-          pixels: z.string().length(5464),
-        }),
-      )
-      .length(iconFiles.length)
-      .parse(JSON.parse(stdout))
-      .map(({ file, width, height, pixels }) => {
-        const bytes = Buffer.from(pixels, 'base64');
-        if (
-          bytes.length !== bitmap.length ||
-          bytes.toString('base64') !== pixels
-        )
-          throw new Error('Native file icon pixels are invalid.');
-        return {
-          file,
-          empty: bytes.length === 0,
-          size: { width, height },
-          bytes: bytes.length,
-          expectedBytes: bitmap.length,
-          samples: points.map(([x, y]) =>
-            bytes
-              .subarray((y * 32 + x) * 4, (y * 32 + x) * 4 + 4)
-              .toString('hex'),
-          ),
-          expectedSamples,
-        };
-      });
-  };
   // Electron caches nonempty file icons, so polling it cannot refresh bad pixels.
   await expect
     .poll(icons, {
