@@ -234,6 +234,13 @@ sign-in again rather than replaying a possibly consumed refresh token. Real
 synthetic-issuer tests cover rollover, cancellation and logout races; a production
 identity-provider registration is still required.
 
+JSON requests and summary/question event reads include credential acquisition in
+their existing 20-second and 60-second deadlines. Cancellation stops waiting
+without cancelling a shared account-owned token rotation; late credentials cannot
+dispatch the cancelled request. Credential failures retain their original cause
+instead of becoming network failures. Live preparation reuses the same wait
+mechanism while retaining its consent/scope guards and 20-second preparation bound.
+
 Open **Account & sync**, enter your administrator's HTTPS service origin and
 choose **Sign in with browser**. Select a provisioned workspace after signing in.
 Device-only drafts are **not uploaded automatically**: explicitly check the copy

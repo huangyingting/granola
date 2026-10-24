@@ -19,6 +19,7 @@ import {
 import type { Mutation } from '@windows-ai-notes/local';
 import { ClientError } from './errors.js';
 import { openLiveConnection, type LiveConnectionOptions } from './live.js';
+import { cancellableWait } from './lifecycle.js';
 import { SseDecoder, SseDecodeError } from '@windows-ai-notes/contracts/sse';
 import { chatEventSchema } from '@windows-ai-notes/contracts/questions';
 import {
@@ -230,7 +231,14 @@ export class ApiClient {
       AbortSignal.timeout(20_000),
       ...(options.signal ? [options.signal] : []),
     ]);
-    signal.throwIfAborted();
+    const cancelled = () =>
+      new ClientError(
+        'request_cancelled',
+        'The service request was cancelled or timed out.',
+        0,
+        true,
+      );
+    if (signal.aborted) throw cancelled();
     let cached: { value: T; etag: string } | null = null;
     if (options.cached !== undefined) {
       const parsed = schema.safeParse(options.cached);
@@ -249,8 +257,12 @@ export class ApiClient {
         etag: `"${createHash('sha256').update(canonicalJson(parsed.data)).digest('hex')}"`,
       };
     }
-    const headers = await this.headers();
-    signal.throwIfAborted();
+    const headers = await cancellableWait(
+      () => this.headers(),
+      signal,
+      cancelled,
+    );
+    if (signal.aborted) throw cancelled();
     let response: Response;
     try {
       response = await fetch(`${this.base}${path}`, {
@@ -298,13 +310,7 @@ export class ApiClient {
       return await responseJson(response, schema);
     } catch (error) {
       if (error instanceof ClientError) throw error;
-      if (signal.aborted)
-        throw new ClientError(
-          'request_cancelled',
-          'The service request was cancelled or timed out.',
-          0,
-          true,
-        );
+      if (signal.aborted) throw cancelled();
       throw new ClientError(
         'service_unavailable',
         'The service could not be reached. Local changes were preserved.',
@@ -355,10 +361,26 @@ export class ApiClient {
   ) {
     z.number().int().min(0).max(2_147_483_647).parse(after);
     const bounded = AbortSignal.any([signal, AbortSignal.timeout(60_000)]);
+    const cancelled = () =>
+      signal.aborted
+        ? new ClientError(
+            'request_cancelled',
+            'Generation updates were stopped.',
+          )
+        : new ClientError(
+            'event_connection_expired',
+            'Renewing generation updates.',
+            0,
+            true,
+          );
+    const headers = await cancellableWait(
+      () => this.headers(),
+      bounded,
+      cancelled,
+    );
+    if (bounded.aborted) throw cancelled();
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
     try {
-      const headers = await this.headers();
-      bounded.throwIfAborted();
       const response = await fetch(`${this.base}${path}`, {
         headers: {
           ...headers,
@@ -443,18 +465,7 @@ export class ApiClient {
       }
     } catch (error) {
       if (error instanceof ClientError) throw error;
-      if (signal.aborted)
-        throw new ClientError(
-          'request_cancelled',
-          'Generation updates were stopped.',
-        );
-      if (bounded.aborted)
-        throw new ClientError(
-          'event_connection_expired',
-          'Renewing generation updates.',
-          0,
-          true,
-        );
+      if (bounded.aborted) throw cancelled();
       throw new ClientError(
         'service_unavailable',
         'Generation updates were interrupted. Saved progress was preserved.',

@@ -1,6 +1,7 @@
 import { createServer, type RequestListener } from 'node:http';
 import { once } from 'node:events';
 import { createHash, randomUUID } from 'node:crypto';
+import { setImmediate as tick } from 'node:timers/promises';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { ApiClient, responseJson, serverUrl } from './http.js';
@@ -80,6 +81,38 @@ describe('bounded service transport', () => {
   }
   function historyTag(value: unknown) {
     return `"${createHash('sha256').update(canonicalJson(value)).digest('hex')}"`;
+  }
+  const transports = [
+    { kind: 'JSON', deadline: 20_000 },
+    { kind: 'conditional history', deadline: 20_000 },
+    { kind: 'job events', deadline: 60_000 },
+    { kind: 'question events', deadline: 60_000 },
+  ] as const;
+  function read(
+    kind: (typeof transports)[number]['kind'],
+    client: ApiClient,
+    signal: AbortSignal,
+  ): Promise<unknown> {
+    const id = randomUUID();
+    switch (kind) {
+      case 'JSON':
+        return client.identity(signal);
+      case 'conditional history':
+        return client.jobs(id, signal, history(id));
+      case 'job events':
+        return client.events(id, 0, async () => undefined, signal);
+      case 'question events':
+        return client.chatEvents(id, 0, async () => undefined, signal);
+    }
+  }
+  function pendingCredentials() {
+    let resolve!: (headers: Record<string, string>) => void;
+    let reject!: (error: Error) => void;
+    const promise = new Promise<Record<string, string>>((done, fail) => {
+      resolve = done;
+      reject = fail;
+    });
+    return { promise, resolve, reject };
   }
   afterEach(async () => {
     vi.restoreAllMocks();
@@ -508,13 +541,127 @@ describe('bounded service transport', () => {
     });
     expect(service.requests()).toBe(1);
   });
-  it('does not mask a credential-provider error as a network failure', async () => {
-    const failure = new Error('Synthetic locked credential vault.');
-    const client = new ApiClient('https://notes.example.test', async () => {
-      throw failure;
-    });
-    await expect(client.identity()).rejects.toBe(failure);
-  });
+  it.each(transports)(
+    '$kind skips credential retrieval when already cancelled',
+    async ({ kind }) => {
+      const fetch = vi
+        .spyOn(globalThis, 'fetch')
+        .mockResolvedValue(Response.json({ id: randomUUID() }));
+      const headers = vi.fn(async () => ({}));
+      const client = new ApiClient('https://notes.example.test', headers);
+      const controller = new AbortController();
+      controller.abort();
+      await expect(read(kind, client, controller.signal)).rejects.toMatchObject(
+        {
+          code: 'request_cancelled',
+        },
+      );
+      expect(headers).not.toHaveBeenCalled();
+      expect(fetch).not.toHaveBeenCalled();
+    },
+  );
+  it.each(
+    transports.flatMap((transport) =>
+      (['resolve', 'reject'] as const).map((late) => ({ ...transport, late })),
+    ),
+  )(
+    '$kind cancels a pending credential wait before its late $late',
+    async ({ kind, late }) => {
+      const fetch = vi
+        .spyOn(globalThis, 'fetch')
+        .mockResolvedValue(Response.json({ id: randomUUID() }));
+      const credential = pendingCredentials();
+      const headers = vi.fn(() => credential.promise);
+      const client = new ApiClient('https://notes.example.test', headers);
+      const controller = new AbortController();
+      const fulfilled = vi.fn();
+      const rejected = vi.fn();
+      const observing = read(kind, client, controller.signal).then(
+        fulfilled,
+        rejected,
+      );
+      try {
+        expect(headers).toHaveBeenCalledTimes(1);
+        controller.abort();
+        await tick();
+        expect(rejected).toHaveBeenCalledWith(
+          expect.objectContaining({ code: 'request_cancelled' }),
+        );
+      } finally {
+        if (late === 'resolve')
+          credential.resolve({ Authorization: 'Synthetic late credentials' });
+        else credential.reject(new Error('Synthetic late vault failure.'));
+        await observing;
+      }
+      await tick();
+      expect(fulfilled).not.toHaveBeenCalled();
+      expect(rejected).toHaveBeenCalledTimes(1);
+      expect(fetch).not.toHaveBeenCalled();
+    },
+  );
+  it.each(transports)(
+    '$kind applies its existing $deadline ms deadline to credential retrieval',
+    async ({ kind, deadline }) => {
+      const expiry = new AbortController();
+      const timeout = vi
+        .spyOn(AbortSignal, 'timeout')
+        .mockReturnValue(expiry.signal);
+      const fetch = vi
+        .spyOn(globalThis, 'fetch')
+        .mockResolvedValue(Response.json({ id: randomUUID() }));
+      const credential = pendingCredentials();
+      const client = new ApiClient(
+        'https://notes.example.test',
+        () => credential.promise,
+      );
+      const fulfilled = vi.fn();
+      const rejected = vi.fn();
+      const observing = read(kind, client, new AbortController().signal).then(
+        fulfilled,
+        rejected,
+      );
+      try {
+        expect(timeout).toHaveBeenCalledExactlyOnceWith(deadline);
+        expiry.abort();
+        await tick();
+        expect(rejected).toHaveBeenCalledWith(
+          expect.objectContaining({
+            code:
+              deadline === 20_000
+                ? 'request_cancelled'
+                : 'event_connection_expired',
+            retryable: true,
+          }),
+        );
+      } finally {
+        credential.resolve({ Authorization: 'Synthetic late credentials' });
+        await observing;
+      }
+      expect(fulfilled).not.toHaveBeenCalled();
+      expect(fetch).not.toHaveBeenCalled();
+    },
+  );
+  it.each(
+    transports.flatMap((transport) =>
+      [false, true].map((synchronous) => ({ ...transport, synchronous })),
+    ),
+  )(
+    '$kind preserves a credential failure (synchronous=$synchronous) without dispatch',
+    async ({ kind, synchronous }) => {
+      const failure = new Error('Synthetic locked credential vault.');
+      const fetch = vi
+        .spyOn(globalThis, 'fetch')
+        .mockResolvedValue(Response.json({ id: randomUUID() }));
+      const client = new ApiClient('https://notes.example.test', () => {
+        if (synchronous) throw failure;
+        return Promise.reject(failure);
+      });
+      await expect(
+        read(kind, client, new AbortController().signal),
+      ).rejects.toBe(failure);
+      expect(fetch).not.toHaveBeenCalled();
+    },
+  );
   it('pins transcript pages to the requested document, revision and position', async () => {
     const id = randomUUID();
     let change: Record<string, unknown> = {};

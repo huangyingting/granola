@@ -10,6 +10,7 @@ import {
   type LiveServerMessage,
 } from '@windows-ai-notes/contracts/realtime';
 import { ClientError } from './errors.js';
+import { cancellableWait } from './lifecycle.js';
 
 type Ready = Extract<LiveServerMessage, { event_type: 'live.ready' }>;
 type Accepted = Extract<LiveServerMessage, { event_type: 'live.accepted' }>;
@@ -603,38 +604,31 @@ export async function openLiveConnection(
   const signal = AbortSignal.any([options.signal, AbortSignal.timeout(20_000)]);
   const cancelled = () =>
     failure('live_cancelled', 'Live preview was cancelled or timed out.');
-  let abort!: () => void;
-  try {
-    if (signal.aborted) throw cancelled();
-    checkAuthorization(options);
-    if (signal.aborted) throw cancelled();
-    const aborted = new Promise<never>((_resolve, reject) => {
-      abort = () => reject(cancelled());
-      signal.addEventListener('abort', abort, { once: true });
-      if (signal.aborted) abort();
-    });
-    const credentials = await Promise.race([headers(), aborted]);
-    if (signal.aborted) throw cancelled();
-    checkAuthorization(options);
-    const profile = negotiate
-      ? await Promise.race([negotiate(credentials, signal), aborted])
-      : undefined;
-    if (signal.aborted) throw cancelled();
-    checkAuthorization(options);
-    const start = liveClientMessageSchema.parse({
-      ...parsed.data,
-      ...(profile ? { profile } : {}),
-    });
-    if (start.event_type !== 'live.start') throw invalidResponse();
-    const destination = new URL(`/v1/documents/${document}/live`, base);
-    destination.protocol = destination.protocol === 'https:' ? 'wss:' : 'ws:';
-    return await new SocketLiveConnection(
-      destination,
-      credentials,
-      start,
-      options,
-    ).open();
-  } finally {
-    if (abort) signal.removeEventListener('abort', abort);
-  }
+  if (signal.aborted) throw cancelled();
+  checkAuthorization(options);
+  const credentials = await cancellableWait(headers, signal, cancelled);
+  if (signal.aborted) throw cancelled();
+  checkAuthorization(options);
+  const profile = negotiate
+    ? await cancellableWait(
+        () => negotiate(credentials, signal),
+        signal,
+        cancelled,
+      )
+    : undefined;
+  if (signal.aborted) throw cancelled();
+  checkAuthorization(options);
+  const start = liveClientMessageSchema.parse({
+    ...parsed.data,
+    ...(profile ? { profile } : {}),
+  });
+  if (start.event_type !== 'live.start') throw invalidResponse();
+  const destination = new URL(`/v1/documents/${document}/live`, base);
+  destination.protocol = destination.protocol === 'https:' ? 'wss:' : 'ws:';
+  return await new SocketLiveConnection(
+    destination,
+    credentials,
+    start,
+    options,
+  ).open();
 }

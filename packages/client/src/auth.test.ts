@@ -2,6 +2,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { setImmediate as tick } from 'node:timers/promises';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LocalStore } from '@windows-ai-notes/local';
 import { createServer } from '@windows-ai-notes/api/server';
@@ -182,6 +183,73 @@ describe('native OIDC code/PKCE and encrypted rotating credentials', () => {
     await expect(session.authorization()).rejects.toMatchObject({
       code: 'reauthentication_required',
     });
+  });
+  it('cancels one API credential wait without cancelling a shared provider-committed refresh', async () => {
+    await session.signIn(fixture.browser);
+    let release!: () => void;
+    let reached!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const ready = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    const refresh = oidc.refresh.bind(oidc);
+    let refreshSignal: AbortSignal | undefined;
+    vi.spyOn(oidc, 'refresh').mockImplementation(async (...args) => {
+      refreshSignal = args[1];
+      const tokens = await refresh(...args);
+      reached();
+      await held;
+      return tokens;
+    });
+    const nativeFetch = globalThis.fetch;
+    const dispatched: (string | null)[] = [];
+    const id = randomUUID();
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input, options) => {
+      if (input === 'https://notes.example.test/v1/me') {
+        dispatched.push(new Headers(options?.headers).get('Authorization'));
+        return Promise.resolve(Response.json({ id }));
+      }
+      return nativeFetch(input, options);
+    });
+    const client = new ApiClient('https://notes.example.test', async () => ({
+      Authorization: await session.authorization(),
+    }));
+    const refreshing = session.authorization(true);
+    const observers: Promise<unknown>[] = [refreshing];
+    const cancelled = new AbortController();
+    const firstResolved = vi.fn();
+    const firstRejected = vi.fn();
+    const secondResolved = vi.fn();
+    const secondRejected = vi.fn();
+    try {
+      await Promise.race([ready, refreshing]);
+      observers.push(
+        client.identity(cancelled.signal).then(firstResolved, firstRejected),
+        client.identity().then(secondResolved, secondRejected),
+      );
+      cancelled.abort();
+      await tick();
+      expect(firstRejected).toHaveBeenCalledWith(
+        expect.objectContaining({ code: 'request_cancelled' }),
+      );
+      expect(firstResolved).not.toHaveBeenCalled();
+      expect(secondResolved).not.toHaveBeenCalled();
+      expect(secondRejected).not.toHaveBeenCalled();
+      expect(refreshSignal?.aborted).toBe(false);
+      expect(fixture.state.refreshCalls).toBe(1);
+      expect(dispatched).toEqual([]);
+    } finally {
+      release();
+      await Promise.allSettled(observers);
+    }
+    expect(firstRejected).toHaveBeenCalledTimes(1);
+    expect(secondResolved).toHaveBeenCalledExactlyOnceWith({ id });
+    expect(secondRejected).not.toHaveBeenCalled();
+    expect(dispatched).toEqual([await session.authorization()]);
+    expect(session.summary().status).toBe('active');
+    expect(fixture.state.refreshCalls).toBe(1);
   });
   it('never replays a rotating refresh after an uncertain committed response, including across restart', async () => {
     await session.signIn(fixture.browser);
