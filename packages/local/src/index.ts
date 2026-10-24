@@ -56,6 +56,8 @@ const retentionProofSchema = localAudioRetentionSchema.extend({
 });
 type RetentionProof = z.infer<typeof retentionProofSchema>;
 const DAY = 86_400_000;
+const SEARCH_MAX_ENTRIES = 10_000;
+const SEARCH_TEXT_MAX_BYTES = 16 * 1024 * 1024;
 
 type VerifiedRecording = RecordingUploadIntent & {
   plan: NonNullable<RecordingUploadIntent['plan']>;
@@ -204,6 +206,9 @@ export class LocalStore {
   private search: {
     profile: string;
     query: string;
+    version: number | null;
+    bytes: number;
+    text: Map<string, { fingerprint: string; value: string }>;
     matches: Map<string, { fingerprint: string; value: boolean }>;
   } | null = null;
   constructor(path: string, key: Buffer) {
@@ -1347,7 +1352,14 @@ export class LocalStore {
   private invalidate(profile: string, id?: string) {
     if (id) {
       this.summaries.delete(canonicalJson([profile, id]));
-      if (this.search?.profile === profile) this.search.matches.delete(id);
+      if (this.search?.profile === profile) {
+        this.search.matches.delete(id);
+        const text = this.search.text.get(id);
+        if (text) {
+          this.search.bytes -= text.value.length * 2;
+          this.search.text.delete(id);
+        }
+      }
     } else {
       for (const [key, value] of this.summaries)
         if (value.profile === profile) this.summaries.delete(key);
@@ -1377,12 +1389,19 @@ export class LocalStore {
         'Use a supported search query and page offset.',
       );
     const normalized = query.trim().toLowerCase();
-    if (
-      !this.search ||
-      this.search.profile !== profile ||
-      this.search.query !== normalized
-    )
-      this.search = { profile, query: normalized, matches: new Map() };
+    if (!this.search || this.search.profile !== profile)
+      this.search = {
+        profile,
+        query: normalized,
+        version: null,
+        bytes: 0,
+        text: new Map(),
+        matches: new Map(),
+      };
+    else if (this.search.query !== normalized) {
+      this.search.query = normalized;
+      this.search.matches.clear();
+    }
     const sql =
       'SELECT profile,id,revision,remote_revision,dirty,conflict,deleted,updated_at,(SELECT data_version FROM pragma_data_version) AS data_version FROM drafts WHERE profile=? AND deleted=0 ORDER BY updated_at DESC,id';
     const statement = this.database.prepare(
@@ -1392,9 +1411,17 @@ export class LocalStore {
       ? statement.iterate(profile)
       : statement.iterate(profile, offset);
     let skip = normalized ? offset : 0;
+    let scanned = false;
     const documents: DraftSummary[] = [];
     for (const input of rows) {
+      scanned = true;
       const row = headerSchema.parse(input);
+      if (this.search.version !== row.data_version) {
+        this.search.version = row.data_version;
+        this.search.text.clear();
+        this.search.bytes = 0;
+        this.search.matches.clear();
+      }
       const fingerprint = canonicalJson(row);
       let loaded: Draft | undefined;
       const read = () => (loaded ??= this.get(profile, row.id));
@@ -1403,13 +1430,27 @@ export class LocalStore {
         let matches =
           previous?.fingerprint === fingerprint ? previous.value : undefined;
         if (matches === undefined) {
-          const draft = read();
-          matches =
-            `${draft.title} ${draft.tags.join(' ')} ${richTextToPlainText(draft.content)}`
-              .toLowerCase()
-              .includes(normalized);
+          const cached = this.search.text.get(row.id);
+          let text: string;
+          if (cached?.fingerprint === fingerprint) text = cached.value;
+          else {
+            if (cached) this.invalidate(profile, row.id);
+            const draft = read();
+            text =
+              `${draft.title} ${draft.tags.join(' ')} ${richTextToPlainText(draft.content)}`.toLowerCase();
+            const bytes = text.length * 2;
+            // Keep admitted text rather than thrashing during an oversized scan.
+            if (
+              this.search.text.size < SEARCH_MAX_ENTRIES &&
+              this.search.bytes + bytes <= SEARCH_TEXT_MAX_BYTES
+            ) {
+              this.search.text.set(row.id, { fingerprint, value: text });
+              this.search.bytes += bytes;
+            }
+          }
+          matches = text.includes(normalized);
           this.search.matches.set(row.id, { fingerprint, value: matches });
-          if (this.search.matches.size > 10_000) {
+          if (this.search.matches.size > SEARCH_MAX_ENTRIES) {
             const first = this.search.matches.keys().next();
             if (!first.done) this.search.matches.delete(first.value);
           }
@@ -1440,6 +1481,7 @@ export class LocalStore {
       }
       documents.push(structuredClone(summary));
     }
+    if (!scanned) this.search = null;
     return { documents, has_more: false };
   }
   get(profile: string, id: string): Draft {

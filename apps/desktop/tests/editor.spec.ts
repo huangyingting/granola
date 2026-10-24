@@ -458,9 +458,29 @@ test('pages meeting summaries and saves the selected editor even when a search e
     await expect(
       page.getByRole('navigation', { name: 'Meetings' }).getByRole('button'),
     ).toHaveCount(50);
-    const warmed = await page.evaluate(() =>
-      window.notes.invoke({ operation: 'bootstrap' }),
-    );
+    const warmed = await page.evaluate(async () => {
+      const initial = await window.notes.invoke({ operation: 'bootstrap' });
+      if (!initial.ok || !('state' in initial))
+        throw new Error('The synthetic library is unavailable.');
+      const scanned = await window.notes.invoke({
+        operation: 'search',
+        scope: initial.state.scope,
+        query: 'zz-first-warmed-search',
+        offset: 0,
+      });
+      if (
+        !scanned.ok ||
+        !('state' in scanned) ||
+        scanned.state.documents.length
+      )
+        throw new Error('The full synthetic search scan failed.');
+      return window.notes.invoke({
+        operation: 'search',
+        scope: initial.state.scope,
+        query: '',
+        offset: 0,
+      });
+    });
     if (!warmed.ok || !('state' in warmed))
       throw new Error('The warmed synthetic library is unavailable.');
     const target = warmed.state.documents.find(
@@ -470,16 +490,30 @@ test('pages meeting summaries and saves the selected editor even when a search e
     const original = await draftCiphertext(application, directory, target.id);
     try {
       expect(
-        await page.evaluate(() =>
-          window.notes.invoke({ operation: 'bootstrap' }),
+        await page.evaluate(
+          (scope) =>
+            window.notes.invoke({
+              operation: 'search',
+              scope,
+              query: 'zz-other-warmed-query',
+              offset: 0,
+            }),
+          warmed.state.scope,
         ),
       ).toMatchObject({ ok: false, error: { code: 'local_data_corrupt' } });
     } finally {
       await draftCiphertext(application, directory, target.id, original);
     }
     expect(
-      await page.evaluate(() =>
-        window.notes.invoke({ operation: 'bootstrap' }),
+      await page.evaluate(
+        (scope) =>
+          window.notes.invoke({
+            operation: 'search',
+            scope,
+            query: '',
+            offset: 0,
+          }),
+        warmed.state.scope,
       ),
     ).toMatchObject({ ok: true });
     await expect(editor).toHaveText('Synthetic paged body 54.');
@@ -489,6 +523,19 @@ test('pages meeting summaries and saves the selected editor even when a search e
     await expect(
       page.getByRole('navigation', { name: 'Meetings' }).getByRole('button'),
     ).toHaveCount(5);
+    await expect(editor).toHaveText('Synthetic paged body 54.');
+    await page
+      .getByRole('textbox', { name: 'Search meetings' })
+      .fill('Synthetic paged body');
+    await expect(
+      page.getByRole('navigation', { name: 'Meetings' }).getByRole('button'),
+    ).toHaveCount(50);
+    await page
+      .getByRole('textbox', { name: 'Search meetings' })
+      .fill('Synthetic paged body 54.');
+    await expect(
+      page.getByRole('navigation', { name: 'Meetings' }).getByRole('button'),
+    ).toHaveCount(1);
     await expect(editor).toHaveText('Synthetic paged body 54.');
     await page
       .getByRole('textbox', { name: 'Search meetings' })

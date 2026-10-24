@@ -212,6 +212,54 @@ describe('Windows desktop synthetic service contract', () => {
     }
     expect(controller.snapshot().documents).toEqual(first.documents);
   });
+  it('bounded search text reuses nonselected full bodies across controller query refinements', async () => {
+    for (let index = 0; index < 8; index++)
+      fixture.seed(`Synthetic searchable full body ${index}.`);
+    await connect();
+    controller.snapshot();
+    await controller.execute({
+      operation: 'search',
+      scope: controller.scope,
+      query: 'zz-first-absent-query',
+      offset: 0,
+    });
+    const get = vi.spyOn(local, 'get');
+    const state = await controller.execute({
+      operation: 'search',
+      scope: controller.scope,
+      query: 'zz-second-absent-query',
+      offset: 0,
+    });
+    expect(state.documents).toEqual([]);
+    expect(state.selected?.content).toBeDefined();
+    expect(get).toHaveBeenCalledTimes(1);
+    expect(get.mock.calls[0]?.[1]).toBe(state.selected_id);
+  });
+  it('bounded search text is unavailable after authenticated revocation and a new search', async () => {
+    const document = fixture.seed('Synthetic full-body private needle.');
+    await connect();
+    await controller.execute({
+      operation: 'search',
+      scope: controller.scope,
+      query: 'private needle',
+      offset: 0,
+    });
+    const profile = controller.profile;
+    fixture.state.active = false;
+    await expect(controller.synchronize()).rejects.toMatchObject({
+      code: 'identity_not_provisioned',
+    });
+    const state = await controller.execute({
+      operation: 'search',
+      scope: controller.scope,
+      query: 'full-body',
+      offset: 0,
+    });
+    expect(state.documents).toEqual([]);
+    expect(state.selected).toBeNull();
+    expect(local.page(profile, 'private').documents).toEqual([]);
+    expect(() => local.get(profile, document.id)).toThrow('unavailable');
+  });
   it('summary history IPC rejects a full summary body in routine desktop state', async () => {
     const { jobs } = await savedSummaries(1);
     expect(

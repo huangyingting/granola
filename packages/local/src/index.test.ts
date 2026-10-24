@@ -1521,6 +1521,212 @@ describe('encrypted local drafts and durable outbox', () => {
     expect(next.documents).toHaveLength(1);
     expect(next.documents[0]?.id).toBe(first.id);
   });
+  it('bounded search text reuses normalized titles, tags and full bodies across refinements and clearing', () => {
+    const store = open();
+    const target = store.create(profile, {
+      ...fields(
+        'a'.repeat(300) + ' Full body needle. \u0130',
+        'Quarterly Roadmap',
+      ),
+      tags: ['LaunchPlan'],
+    });
+    store.create(profile, fields('Another private body.'));
+    store.create(profile, fields('A third private body.'));
+    store.page(profile);
+    expect(store.page(profile, 'zz-no-match').documents).toHaveLength(0);
+    const get = vi.spyOn(store, 'get');
+    for (const query of ['BODY NEEDLE', 'quarterly', 'launchplan', 'i\u0307']) {
+      expect(
+        store.page(profile, query).documents.map((draft) => draft.id),
+      ).toEqual([target.id]);
+    }
+    expect(store.page(profile).documents).toHaveLength(3);
+    expect(store.page(profile, 'needle').documents[0]?.id).toBe(target.id);
+    expect(get).not.toHaveBeenCalled();
+  });
+  it('bounded search text invalidates only the edited document across different queries', () => {
+    const store = open();
+    const target = store.create(profile, fields('Original body.'));
+    store.create(profile, fields('Another body.'));
+    store.page(profile);
+    store.page(profile, 'zz-no-match');
+    store.save(profile, target.id, 1, fields('A refined needle now exists.'));
+    const get = vi.spyOn(store, 'get');
+    expect(store.page(profile, 'refined needle').documents[0]?.id).toBe(
+      target.id,
+    );
+    expect(get).toHaveBeenCalledTimes(1);
+    get.mockClear();
+    expect(store.page(profile, 'REFINED').documents[0]?.id).toBe(target.id);
+    expect(get).not.toHaveBeenCalled();
+  });
+  it('bounded search text observes authenticated payload-only foreign changes on a different query', () => {
+    const store = open();
+    const target = store.create(profile, fields('Original searchable body.'));
+    store.page(profile, 'original');
+    rewriteDraftBody(target.id, fields('Replacement hidden needle.'));
+    expect(
+      store.page(profile, 'replacement hidden').documents[0]?.preview,
+    ).toBe('Replacement hidden needle.');
+    expect(store.page(profile, 'original').documents).toHaveLength(0);
+  });
+  it.each(['private', 'zz-no-match-two'])(
+    'bounded search text cannot hide warmed ciphertext corruption for a new query=%j',
+    (query) => {
+      const store = open();
+      const target = store.create(profile, fields('Private body.'));
+      store.page(profile, 'zz-no-match-one');
+      const sql = new DatabaseSync(path);
+      try {
+        const damaged = Buffer.from(
+          z
+            .instanceof(Uint8Array)
+            .parse(
+              sql
+                .prepare('SELECT payload FROM drafts WHERE profile=? AND id=?')
+                .get(profile, target.id)?.payload,
+            ),
+        );
+        damaged[13] = damaged[13]! ^ 0x80;
+        sql
+          .prepare('UPDATE drafts SET payload=? WHERE profile=? AND id=?')
+          .run(damaged, profile, target.id);
+        expect(() => store.page(profile, query)).toThrow(
+          'could not be unlocked',
+        );
+      } finally {
+        sql.close();
+      }
+    },
+  );
+  it('bounded search text discards rolled-back values before a different query', () => {
+    const store = open();
+    const target = store.create(profile, fields('Original body.'));
+    store.page(profile, 'original');
+    expect(() =>
+      store.atomic(() => {
+        store.save(profile, target.id, 1, fields('Uncommitted private body.'));
+        expect(store.page(profile, 'uncommitted').documents).toHaveLength(1);
+        throw new Error('Synthetic normalized-text rollback.');
+      }),
+    ).toThrow('Synthetic normalized-text rollback');
+    expect(store.page(profile, 'original body').documents).toHaveLength(1);
+    expect(store.page(profile, 'uncommitted private').documents).toHaveLength(
+      0,
+    );
+  });
+  it('bounded search text does not cross profiles or survive deletion and profile purge', () => {
+    const store = open();
+    const target = store.create(profile, fields('First profile private body.'));
+    store.applyRemote(
+      'other-profile',
+      remote(target, 1, {
+        notes: 'Other profile secret.',
+        content: richTextFromPlainText('Other profile secret.'),
+      }),
+    );
+    expect(store.page(profile, 'first profile').documents).toHaveLength(1);
+    expect(store.page('other-profile', 'first profile').documents).toHaveLength(
+      0,
+    );
+    expect(store.page('other-profile', 'other profile').documents).toHaveLength(
+      1,
+    );
+    expect(store.page(profile, 'other profile').documents).toHaveLength(0);
+    store.remove(profile, target.id);
+    expect(store.page(profile, 'first').documents).toHaveLength(0);
+    store.purgeProfile('other-profile');
+    store.applyRemote(
+      'other-profile',
+      remote(target, 1, {
+        notes: 'Fresh profile replacement.',
+        content: richTextFromPlainText('Fresh profile replacement.'),
+      }),
+    );
+    expect(store.page('other-profile', 'other profile').documents).toHaveLength(
+      0,
+    );
+    expect(store.page('other-profile', 'fresh profile').documents).toHaveLength(
+      1,
+    );
+  });
+  it('bounded search text stays out of SQLite and WAL and is rebuilt after closing', () => {
+    const body = `Mixed-Case-Synthetic-Private-${randomUUID()}`;
+    const store = open();
+    store.create(profile, fields(body));
+    store.page(profile, 'mixed-case');
+    store.page(profile, 'synthetic-private');
+    for (const file of [path, `${path}-wal`]) {
+      if (!existsSync(file)) continue;
+      const bytes = readFileSync(file);
+      expect(bytes.includes(Buffer.from(body))).toBe(false);
+      expect(bytes.includes(Buffer.from(body.toLowerCase()))).toBe(false);
+    }
+    close(store);
+    const restarted = open();
+    const get = vi.spyOn(restarted, 'get');
+    expect(restarted.page(profile, 'mixed-case').documents).toHaveLength(1);
+    expect(get).toHaveBeenCalledTimes(1);
+    expect(restarted.storageSchema()).toBe(8);
+  });
+  it('bounded search text limits normalized UTF-16 bytes without scan thrashing and releases edited entries', () => {
+    const store = open();
+    const value = fields('\u0130'.repeat(39_999));
+    const bytes =
+      `${value.title} ${value.tags.join(' ')} ${richTextToPlainText(value.content)}`.toLowerCase()
+        .length * 2;
+    const retained = Math.floor((16 * 1024 * 1024) / bytes);
+    const drafts = Array.from({ length: retained + 6 }, () =>
+      store.create(profile, value),
+    );
+    const get = vi.spyOn(store, 'get');
+    store.page(profile, 'zz-budget-one');
+    expect(get).toHaveBeenCalledTimes(drafts.length);
+    get.mockClear();
+    store.page(profile, 'zz-budget-two');
+    expect(get).toHaveBeenCalledTimes(6);
+    const uncached = new Set(get.mock.calls.map(([, id]) => id));
+    get.mockClear();
+    store.page(profile, 'zz-budget-two');
+    expect(get).not.toHaveBeenCalled();
+    store.page(profile, 'zz-budget-three');
+    expect(get).toHaveBeenCalledTimes(6);
+    const cached = drafts.find((draft) => !uncached.has(draft.id));
+    if (!cached) throw new Error('No retained synthetic search text.');
+    store.save(profile, cached.id, 1, fields('Short replacement.'));
+    get.mockClear();
+    store.page(profile, 'zz-budget-four');
+    expect(get).toHaveBeenCalledTimes(7);
+    get.mockClear();
+    store.page(profile, 'zz-budget-five');
+    expect(get).toHaveBeenCalledTimes(5);
+  });
+  it('bounded search text keeps query refinements in one read view during a payload-only foreign commit', () => {
+    const store = open();
+    const first = store.create(profile, fields('Shared search phrase.'));
+    const second = store.create(profile, fields('Shared search phrase.'));
+    store.page(profile, 'shared search phrase');
+    store.save(
+      profile,
+      first.id,
+      1,
+      fields('Shared search phrase.', 'Edited synthetic meeting'),
+    );
+    const read = store.get.bind(store);
+    let changed = false;
+    const get = vi.spyOn(store, 'get').mockImplementation((scope, id) => {
+      if (!changed) {
+        changed = true;
+        rewriteDraftBody(second.id, fields('Removed private body.'));
+      }
+      return read(scope, id);
+    });
+    expect(store.page(profile, 'shared search').documents).toHaveLength(2);
+    expect(get).toHaveBeenCalledTimes(1);
+    expect(store.page(profile, 'removed private').documents[0]?.id).toBe(
+      second.id,
+    );
+  });
   it('invalidates summary/search caches on rollback, deletion and profile purge without crossing account scopes', () => {
     const store = open();
     const draft = store.create(profile, fields('Original private body.'));

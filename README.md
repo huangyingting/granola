@@ -278,9 +278,13 @@ body, including text beyond its preview, without writing a plaintext search
 index. Returned summaries are detached snapshots. Warm list/search fingerprints
 include the SQLite read view's `data_version`, so ciphertext-only foreign commits
 cannot hide changed values or integrity failures; ordinary edits retain selective
-per-document invalidation. Paging and filtering preserve the current editor. Cold
-full-body search still scans and decrypts candidates in the main process; large-library latency
-and full job API/cache payloads remain performance release gates. Bootstrap and state
+per-document invalidation. Query refinements reuse up to 16 MiB of normalized
+UTF-16 search text (at most 10,000 entries) in Main memory, alongside bounded
+current-query matches; no search text or index is written to disk. Paging and
+filtering preserve the current editor. Cold full-body search still scans and
+decrypts candidates in the main process, as do uncached candidates beyond the
+text budget; large-library latency and full job API/cache payloads remain
+performance release gates. Bootstrap and state
 responses expose only the bounded first transcript page, including when reading
 legacy full-transcript caches. The encrypted legacy revision is not rewritten;
 later pages remain available offline. Main still decrypts the complete legacy
