@@ -34,6 +34,7 @@ import { MeetingQuestions } from './questions.js';
 import { ChatStore } from './chat.js';
 import {
   operationsSnapshot,
+  operationsHousekeepingSnapshot,
   taskOutcomesSnapshot,
   taskOutcomeKindsSnapshot,
 } from './operations.js';
@@ -262,6 +263,9 @@ export class Database {
   }
   async operations() {
     return operationsSnapshot(this);
+  }
+  async operationsHousekeeping() {
+    return operationsHousekeepingSnapshot(this);
   }
   async taskOutcomes() {
     return taskOutcomesSnapshot(this);

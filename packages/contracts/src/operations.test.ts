@@ -3,7 +3,147 @@ import {
   recordingMediaVerificationSchema,
   taskOutcomesSnapshotSchema,
   taskOutcomeKindsSnapshotSchema,
+  operationsSnapshotSchema,
+  operationsHousekeepingSnapshotSchema,
 } from './operations.js';
+
+describe('opt-in operational housekeeping contract', () => {
+  const housekeeping = {
+    sync: {
+      workspaces: '0',
+      expired_workspaces: '0',
+      expired_changes: '0',
+      oldest_expired_change_age_ms: null,
+    },
+    replay: {
+      expired_jobs: '0',
+      expired_events: '0',
+      oldest_expired_event_age_ms: null,
+    },
+    recordings: {
+      obsolete_runs: '0',
+      retired_runs: '0',
+      chunks_pending_cleanup: '0',
+    },
+    summaries: {
+      obsolete_runs: '0',
+      retired_runs: '0',
+      steps_pending_cleanup: '0',
+      resume_receipts_pending_cleanup: '0',
+    },
+  };
+  const pending = {
+    queued: '0',
+    running: '0',
+    succeeded: '0',
+    failed: '0',
+    cancelled: '0',
+    claimable: '0',
+    expired_leases: '0',
+    oldest_claimable_age_ms: null,
+  };
+  const totals = { input_tokens: '0', output_tokens: '0', audio_ms: '0' };
+  const base = {
+    version: 1,
+    scope: 'deployment',
+    observed_at: '2026-10-24T00:00:00.000Z',
+    jobs: { ...pending, retry_wait: '0' },
+    chat: pending,
+    live: {
+      open_leases: '0',
+      expired_open_leases: '0',
+      closed_last_hour: {
+        settled: '0',
+        failed: '0',
+        expired: '0',
+        cancelled: '0',
+      },
+    },
+    audio: {
+      expired_recordings_awaiting_revocation: '0',
+      pending_object_deletions: '0',
+      object_deletions_claimable: '0',
+      object_deletion_errors: '0',
+      tombstone_rechecks_claimable: '0',
+      oldest_claimable_deletion_age_ms: null,
+    },
+    usage: {
+      period_start: '2026-10-01',
+      period_end: '2026-11-01',
+      accounts: '0',
+      over_budget_accounts: '0',
+      settled: totals,
+      uncertain: totals,
+      settled_requests: '0',
+      uncertain_requests: '0',
+      unsettled_calls_all_periods: '0',
+    },
+  };
+  const valid = { ...base, version: 2, housekeeping };
+  it('keeps v1 separate and preserves exact backlog counts above safe integers', () => {
+    expect(operationsSnapshotSchema.parse(base)).toEqual(base);
+    expect(operationsHousekeepingSnapshotSchema.parse(valid)).toEqual(valid);
+    expect(operationsSnapshotSchema.safeParse(valid).success).toBe(false);
+    expect(
+      operationsSnapshotSchema.safeParse({ ...valid, version: 1 }).success,
+    ).toBe(false);
+    const large = '9007199254740993';
+    const value = {
+      ...valid,
+      housekeeping: {
+        ...housekeeping,
+        sync: {
+          workspaces: large,
+          expired_workspaces: large,
+          expired_changes: large,
+          oldest_expired_change_age_ms: '691200000',
+        },
+      },
+    };
+    expect(operationsHousekeepingSnapshotSchema.parse(value)).toEqual(value);
+  });
+  it.each([
+    { sync: { ...housekeeping.sync, expired_changes: '01' } },
+    { sync: { ...housekeeping.sync, expired_changes: '-1' } },
+    { sync: { ...housekeeping.sync, expired_changes: '1'.repeat(31) } },
+    { sync: { ...housekeeping.sync, expired_changes: undefined } },
+    { sync: undefined },
+    { sync: { ...housekeeping.sync, workspaces: 0 } },
+    { sync: { ...housekeeping.sync, expired_changes: '1' } },
+    { sync: { ...housekeeping.sync, oldest_expired_change_age_ms: '1' } },
+    { sync: { ...housekeeping.sync, workspace_id: 'private' } },
+    { replay: { ...housekeeping.replay, expired_jobs: '1' } },
+    { replay: { ...housekeeping.replay, expired_events: '1' } },
+    { replay: { ...housekeeping.replay, job_id: 'private' } },
+    { recordings: { ...housekeeping.recordings, retired_runs: '1' } },
+    { recordings: { ...housekeeping.recordings, chunks_pending_cleanup: '1' } },
+    { summaries: { ...housekeeping.summaries, steps_pending_cleanup: '1' } },
+    {
+      summaries: {
+        ...housekeeping.summaries,
+        resume_receipts_pending_cleanup: null,
+      },
+    },
+    {
+      summaries: {
+        ...housekeeping.summaries,
+        resume_receipts_pending_cleanup: '1',
+      },
+    },
+    { healthy: true },
+    { production_accepted: true },
+  ])(
+    'rejects malformed, inconsistent or identifying backlog fields %j',
+    (change) => {
+      expect(
+        operationsHousekeepingSnapshotSchema.safeParse({
+          ...valid,
+          housekeeping: { ...housekeeping, ...change },
+        }).success,
+      ).toBe(false);
+    },
+  );
+});
 
 describe('deployment recording-media verification contract', () => {
   const verified = {

@@ -35,6 +35,7 @@ async function main() {
       'restored-backup': { type: 'boolean' },
       'proof-sha256': { type: 'string' },
       'by-kind': { type: 'boolean' },
+      housekeeping: { type: 'boolean' },
     },
   });
   const archiveConfig = loadDeletionArchiveConfig(process.env, false);
@@ -49,6 +50,12 @@ async function main() {
       throw new ServiceError(
         'invalid_task_outcomes',
         '--by-kind is supported only for task-outcomes.',
+        400,
+      );
+    if (values.housekeeping && positionals[0] !== 'operations')
+      throw new ServiceError(
+        'invalid_operations',
+        '--housekeeping is supported only for operations.',
         400,
       );
     if (positionals[0] === 'migrate') {
@@ -123,13 +130,23 @@ async function main() {
         storage.close();
       }
     } else if (positionals[0] === 'operations') {
-      if (tokens.some((token) => token.kind === 'option'))
+      if (
+        tokens.some(
+          (token) => token.kind === 'option' && token.name !== 'housekeeping',
+        )
+      )
         throw new ServiceError(
           'invalid_operations',
-          'Operations is deployment-wide and does not accept filters or other options.',
+          'Operations is deployment-wide, does not accept filters and accepts only --housekeeping.',
           400,
         );
-      console.log(JSON.stringify(await database.operations()));
+      console.log(
+        JSON.stringify(
+          values.housekeeping
+            ? await database.operationsHousekeeping()
+            : await database.operations(),
+        ),
+      );
     } else if (positionals[0] === 'task-outcomes') {
       if (
         tokens.some(

@@ -85,6 +85,73 @@ export const operationsSnapshotSchema = z.strictObject({
 });
 export type OperationsSnapshot = z.infer<typeof operationsSnapshotSchema>;
 
+export const operationsHousekeepingSnapshotSchema = operationsSnapshotSchema
+  .extend({
+    version: z.literal(2),
+    housekeeping: z.strictObject({
+      sync: z.strictObject({
+        workspaces: count,
+        expired_workspaces: count,
+        expired_changes: count,
+        oldest_expired_change_age_ms: age,
+      }),
+      replay: z.strictObject({
+        expired_jobs: count,
+        expired_events: count,
+        oldest_expired_event_age_ms: age,
+      }),
+      recordings: z.strictObject({
+        obsolete_runs: count,
+        retired_runs: count,
+        chunks_pending_cleanup: count,
+      }),
+      summaries: z.strictObject({
+        obsolete_runs: count,
+        retired_runs: count,
+        steps_pending_cleanup: count,
+        resume_receipts_pending_cleanup: count,
+      }),
+    }),
+  })
+  .superRefine(({ housekeeping: h }, context) => {
+    const counts = [
+      h.sync.workspaces,
+      h.sync.expired_workspaces,
+      h.sync.expired_changes,
+      h.replay.expired_jobs,
+      h.replay.expired_events,
+      ...Object.values(h.recordings),
+      ...Object.values(h.summaries),
+    ];
+    if (counts.some((value) => !count.safeParse(value).success)) return;
+    if (
+      BigInt(h.sync.expired_workspaces) > BigInt(h.sync.workspaces) ||
+      BigInt(h.sync.expired_workspaces) > BigInt(h.sync.expired_changes) ||
+      (h.sync.expired_changes === '0') !==
+        (h.sync.expired_workspaces === '0') ||
+      (h.sync.expired_changes === '0') !==
+        (h.sync.oldest_expired_change_age_ms === null) ||
+      BigInt(h.replay.expired_jobs) > BigInt(h.replay.expired_events) ||
+      (h.replay.expired_events === '0') !== (h.replay.expired_jobs === '0') ||
+      (h.replay.expired_events === '0') !==
+        (h.replay.oldest_expired_event_age_ms === null) ||
+      BigInt(h.recordings.retired_runs) > BigInt(h.recordings.obsolete_runs) ||
+      BigInt(h.summaries.retired_runs) > BigInt(h.summaries.obsolete_runs) ||
+      (h.recordings.obsolete_runs === '0' &&
+        h.recordings.chunks_pending_cleanup !== '0') ||
+      (h.summaries.obsolete_runs === '0' &&
+        (h.summaries.steps_pending_cleanup !== '0' ||
+          h.summaries.resume_receipts_pending_cleanup !== '0'))
+    )
+      context.addIssue({
+        code: 'custom',
+        message: 'Housekeeping backlog counts and ages are inconsistent.',
+      });
+  });
+export type OperationsHousekeepingSnapshot = z.infer<
+  typeof operationsHousekeepingSnapshotSchema
+>;
+
 const terminalEntriesSchema = z
   .strictObject({
     ...outcomes,

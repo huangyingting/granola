@@ -11,7 +11,10 @@ import {
   it,
   vi,
 } from 'vitest';
-import { operationsSnapshotSchema } from '@windows-ai-notes/contracts/operations';
+import {
+  operationsSnapshotSchema,
+  operationsHousekeepingSnapshotSchema,
+} from '@windows-ai-notes/contracts/operations';
 import { summaryRequestSchema } from '@windows-ai-notes/contracts/server';
 import { Database, type Transaction } from './index.js';
 
@@ -142,6 +145,39 @@ describe.skipIf(!databaseUrl)('deployment-only PostgreSQL diagnostics', () => {
     expect(snapshot.usage.settled).toEqual(zero);
     expect(snapshot.usage.accounts).toBe('0');
     expect(snapshot.scope).toBe('deployment');
+    const detailed = await db.operationsHousekeeping();
+    expect(detailed.version).toBe(2);
+    expect(detailed.housekeeping).toEqual({
+      sync: {
+        workspaces: '0',
+        expired_workspaces: '0',
+        expired_changes: '0',
+        oldest_expired_change_age_ms: null,
+      },
+      replay: {
+        expired_jobs: '0',
+        expired_events: '0',
+        oldest_expired_event_age_ms: null,
+      },
+      recordings: {
+        obsolete_runs: '0',
+        retired_runs: '0',
+        chunks_pending_cleanup: '0',
+      },
+      summaries: {
+        obsolete_runs: '0',
+        retired_runs: '0',
+        steps_pending_cleanup: '0',
+        resume_receipts_pending_cleanup: '0',
+      },
+    });
+    expect(
+      operationsHousekeepingSnapshotSchema.safeParse(detailed).success,
+    ).toBe(true);
+    expect(operationsSnapshotSchema.safeParse(detailed).success).toBe(false);
+    expect(
+      operationsHousekeepingSnapshotSchema.safeParse(snapshot).success,
+    ).toBe(false);
     expect(operationsSnapshotSchema.safeParse(snapshot).success).toBe(true);
     expect(
       operationsSnapshotSchema.safeParse({ ...snapshot, notes: privateMarker })
@@ -154,6 +190,48 @@ describe.skipIf(!databaseUrl)('deployment-only PostgreSQL diagnostics', () => {
           jobs: { ...snapshot.jobs, queued },
         }).success,
       ).toBe(false);
+  });
+  it('opts the compiled CLI into v2 without exposing IDs, accepting filters or changing default v1', async () => {
+    const source = await fixture();
+    const expected = await db.operationsHousekeeping();
+    const result = spawnSync(
+      process.execPath,
+      [cli, 'operations', '--housekeeping'],
+      {
+        env: { ...process.env, DATABASE_URL: scopedUrl },
+        encoding: 'utf8',
+        timeout: 10_000,
+      },
+    );
+    expect(result.status, result.stderr).toBe(0);
+    expect(
+      operationsHousekeepingSnapshotSchema.parse(JSON.parse(result.stdout))
+        .housekeeping,
+    ).toEqual(expected.housekeeping);
+    for (const secret of [
+      privateMarker,
+      source.user.user_id,
+      source.user.workspace_id,
+      source.document.id,
+      scopedUrl,
+    ])
+      expect(result.stdout).not.toContain(secret);
+    expect((await db.operations()).version).toBe(1);
+    for (const args of [
+      ['operations', '--housekeeping', '--user-id', source.user.user_id],
+      ['migrate', '--housekeeping'],
+      ['task-outcomes', '--housekeeping'],
+    ]) {
+      const invalid = spawnSync(process.execPath, [cli, ...args], {
+        env: { ...process.env, DATABASE_URL: scopedUrl },
+        encoding: 'utf8',
+        timeout: 10_000,
+      });
+      expect(invalid.status, invalid.stderr).toBe(1);
+      expect(invalid.stdout).toBe('');
+      expect(invalid.stderr).toContain('invalid_operations');
+      expect(invalid.stderr).not.toContain(scopedUrl);
+    }
   });
   it('reports retained outcomes but excludes future, revoked and deleted work from claimable jobs', async () => {
     const source = await fixture();
@@ -451,6 +529,33 @@ describe.skipIf(!databaseUrl)('deployment-only PostgreSQL diagnostics', () => {
     expect(filtered.stdout).toBe('');
     expect(filtered.stderr).toContain('does not accept filters');
   });
+  it('does not downgrade to v1 or return empty backlog when housekeeping metadata is unavailable', async () => {
+    await db.pool.query(
+      'ALTER TABLE recording_transcription_chunks RENAME TO unavailable_processing_chunks',
+    );
+    try {
+      await expect(db.operationsHousekeeping()).rejects.toThrow();
+      expect((await db.operations()).version).toBe(1);
+      const failed = spawnSync(
+        process.execPath,
+        [cli, 'operations', '--housekeeping'],
+        {
+          env: { ...process.env, DATABASE_URL: scopedUrl },
+          encoding: 'utf8',
+          timeout: 10_000,
+        },
+      );
+      expect(failed.status).toBe(1);
+      expect(failed.stdout).toBe('');
+      expect(failed.stderr).toContain('Database command failed.');
+      for (const detail of [scopedUrl, schema, 'unavailable_processing_chunks'])
+        expect(failed.stderr).not.toContain(detail);
+    } finally {
+      await db.pool.query(
+        'ALTER TABLE unavailable_processing_chunks RENAME TO recording_transcription_chunks',
+      );
+    }
+  });
   it('fails explicitly on malformed accounting, then rolls back cleanly instead of returning healthy zeroes', async () => {
     const source = await fixture();
     await db.usage.setLimits(source.user.user_id, {
@@ -468,6 +573,9 @@ describe.skipIf(!databaseUrl)('deployment-only PostgreSQL diagnostics', () => {
       ],
     );
     await expect(db.operations()).rejects.toThrow(
+      'Operational usage accounting is invalid.',
+    );
+    await expect(db.operationsHousekeeping()).rejects.toThrow(
       'Operational usage accounting is invalid.',
     );
     const result = spawnSync(process.execPath, [cli, 'operations'], {

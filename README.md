@@ -1487,6 +1487,8 @@ database credentials; this is not an HTTP admin endpoint:
 ```sh
 pnpm build
 pnpm operations
+# Opt into v2 with physical housekeeping backlogs; default output stays v1.
+pnpm operations --housekeeping
 ```
 
 The versioned JSON snapshot uses one **read-only, repeatable-read PostgreSQL
@@ -1514,6 +1516,19 @@ aggregates the current UTC month, counts accounts whose settled plus uncertain
 usage exceeds current allowances, and separately counts unsettled calls across
 all months. Unsettled includes both in-flight and unknown receipts, not proven
 provider failures; media/token usage is not an Azure invoice.
+
+The optional `--housekeeping` view adds exact physical sync/replay backlog counts,
+affected workspace/job counts and oldest expired-row ages, plus obsolete and
+already-retired recording/summary runs and their remaining chunk/stage/resume
+rows. It shares the same read-only snapshot and the janitor's actual eligibility
+predicates. Age is since the original row's creation, not measured time waiting
+for cleanup. Age-based backlogs include rows blocked behind retained or busy
+prefixes; obsolete runs include retired runs even if authority/state later
+changes. These are not lock-aware claimable counts, worker heartbeats or measured
+purge throughput. Reading never prunes, retires, resolves usage or clears recovery
+quarantine. Compare successive observations with the deployment's retention and
+capacity requirements; no alert thresholds or production-readiness claim are
+inferred. No account/resource filters or HTTP diagnostics endpoint are added.
 
 API completion records log only a server-generated request UUID, registered route
 template (or `null` for unmatched routes), normalized method, response status,

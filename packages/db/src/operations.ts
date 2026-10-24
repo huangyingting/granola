@@ -1,5 +1,7 @@
 import {
   operationsSnapshotSchema,
+  operationsHousekeepingSnapshotSchema,
+  type OperationsSnapshot,
   taskOutcomesSnapshotSchema,
   taskOutcomeKindsSnapshotSchema,
 } from '@windows-ai-notes/contracts/operations';
@@ -8,6 +10,10 @@ import {
   recordingCleanupEligibility,
   recordingObjectDisposable,
 } from './recordings.js';
+import {
+  recordingRunCleanupEligibility,
+  summaryRunCleanupEligibility,
+} from './cleanup.js';
 
 const units = ['input_tokens', 'output_tokens', 'audio_ms'] as const;
 const zero = `'{"input_tokens":"0","output_tokens":"0","audio_ms":"0"}'::jsonb`;
@@ -55,6 +61,74 @@ function oldestAge(column: 'created_at' | 'eligible_at', filter: string) {
 }
 
 export async function operationsSnapshot(database: Database) {
+  return readOperations(database, async (_tx, snapshot) => snapshot);
+}
+
+export async function operationsHousekeepingSnapshot(database: Database) {
+  return readOperations(database, async (tx, snapshot) =>
+    operationsHousekeepingSnapshotSchema.parse({
+      ...snapshot,
+      version: 2,
+      housekeeping: await housekeeping(tx),
+    }),
+  );
+}
+
+async function housekeeping(tx: Transaction) {
+  const sync = await value(
+    tx,
+    `SELECT jsonb_build_object(
+       'workspaces',(SELECT count(*)::text FROM workspaces),
+       'expired_workspaces',count(DISTINCT workspace_id)::text,
+       'expired_changes',count(*)::text,
+       'oldest_expired_change_age_ms',${oldestAge('created_at', 'true')}
+     ) value FROM sync_changes WHERE created_at<now()-interval '7 days'`,
+  );
+  const replay = await value(
+    tx,
+    `SELECT jsonb_build_object(
+       'expired_jobs',count(DISTINCT job_id)::text,
+       'expired_events',count(*)::text,
+       'oldest_expired_event_age_ms',${oldestAge('created_at', 'true')}
+     ) value FROM job_events WHERE created_at<now()-interval '7 days'`,
+  );
+  const recordings = await value(
+    tx,
+    `WITH obsolete AS MATERIALIZED (
+       SELECT p.job_id,p.retired_at FROM recording_transcription_runs p
+       JOIN jobs j ON j.id=p.job_id JOIN documents d ON d.id=j.document_id
+       JOIN memberships m ON m.workspace_id=d.workspace_id AND m.user_id=j.owner_id
+       JOIN users u ON u.id=j.owner_id
+       WHERE p.retired_at IS NOT NULL OR ${recordingRunCleanupEligibility}
+     ) SELECT jsonb_build_object(
+       'obsolete_runs',count(*)::text,
+       'retired_runs',count(*) FILTER (WHERE retired_at IS NOT NULL)::text,
+       'chunks_pending_cleanup',(SELECT count(*)::text FROM recording_transcription_chunks c
+         JOIN obsolete p ON p.job_id=c.job_id)
+     ) value FROM obsolete`,
+  );
+  const summaries = await value(
+    tx,
+    `WITH obsolete AS MATERIALIZED (
+       SELECT p.job_id,p.retired_at FROM summary_runs p
+       JOIN jobs j ON j.id=p.job_id JOIN documents d ON d.id=j.document_id
+       JOIN memberships m ON m.workspace_id=d.workspace_id AND m.user_id=j.owner_id
+       JOIN users u ON u.id=j.owner_id
+       WHERE p.retired_at IS NOT NULL OR ${summaryRunCleanupEligibility}
+     ) SELECT jsonb_build_object(
+       'obsolete_runs',count(*)::text,
+       'retired_runs',count(*) FILTER (WHERE retired_at IS NOT NULL)::text,
+       'steps_pending_cleanup',(SELECT count(*)::text FROM summary_steps s JOIN obsolete p ON p.job_id=s.job_id),
+       'resume_receipts_pending_cleanup',(SELECT count(*)::text FROM summary_resumes r JOIN obsolete p ON p.job_id=r.job_id)
+     ) value FROM obsolete`,
+  );
+  return { sync, replay, recordings, summaries };
+}
+
+async function readOperations<T>(
+  database: Database,
+  finish: (tx: Transaction, snapshot: OperationsSnapshot) => Promise<T>,
+) {
   await database.assertSchemaReady();
   return database.transaction(async (tx) => {
     await tx.query(
@@ -166,16 +240,19 @@ export async function operationsSnapshot(database: Database) {
          'unsettled_calls_all_periods',(SELECT count(*)::text FROM ai_usage_calls WHERE settled_at IS NULL)
        ) value FROM accounts`,
     );
-    return operationsSnapshotSchema.parse({
-      version: 1,
-      scope: 'deployment',
-      observed_at: clock.observed_at.toISOString(),
-      jobs,
-      chat,
-      live,
-      audio,
-      usage,
-    });
+    return finish(
+      tx,
+      operationsSnapshotSchema.parse({
+        version: 1,
+        scope: 'deployment',
+        observed_at: clock.observed_at.toISOString(),
+        jobs,
+        chat,
+        live,
+        audio,
+        usage,
+      }),
+    );
   });
 }
 

@@ -1,5 +1,11 @@
 import type { Transaction } from './index.js';
 
+const runUnavailable = `d.deleted_at IS NOT NULL OR NOT m.active OR NOT u.active OR j.state='cancelled'
+  OR (j.state='failed' AND j.updated_at<now()-interval '24 hours')`;
+export const recordingRunCleanupEligibility = `(${runUnavailable} OR j.state='succeeded')`;
+export const summaryRunCleanupEligibility = `(${runUnavailable}
+  OR (j.state='succeeded' AND j.updated_at<now()-interval '7 days'))`;
+
 export async function cleanupBatch<T>(
   after: string | null,
   select: (
@@ -57,12 +63,8 @@ export async function pruneJobHistory(tx: Transaction): Promise<void> {
            ORDER BY id LIMIT $3 FOR UPDATE SKIP LOCKED
          )
          SELECT j.id,
-           (d.deleted_at IS NOT NULL OR NOT m.active OR NOT u.active
-             OR j.state IN ('cancelled','succeeded')
-             OR (j.state='failed' AND j.updated_at<now()-interval '24 hours')) recording_expired,
-           (d.deleted_at IS NOT NULL OR NOT m.active OR NOT u.active OR j.state='cancelled'
-             OR (j.state='failed' AND j.updated_at<now()-interval '24 hours')
-             OR (j.state='succeeded' AND j.updated_at<now()-interval '7 days')) summary_expired
+           ${recordingRunCleanupEligibility} recording_expired,
+           ${summaryRunCleanupEligibility} summary_expired
          FROM batch j JOIN documents d ON d.id=j.document_id
          JOIN memberships m ON m.workspace_id=d.workspace_id AND m.user_id=j.owner_id
          JOIN users u ON u.id=j.owner_id ORDER BY j.id`,

@@ -289,6 +289,78 @@ describe.skipIf(!databaseUrl)('bounded transactional job housekeeping', () => {
       resumes: 0,
     });
   });
+  it('reports physical backlog before and after bounded pruning without erasing data or losing retired runs after reactivation', async () => {
+    const first = await job(id(1), 'recording_transcription');
+    const second = await job(id(2));
+    await recording(first, 1005);
+    await summary(second, 1005);
+    await events(first, 1005);
+    await db.pool.query(
+      "UPDATE sync_changes SET created_at=now()-interval '8 days'",
+    );
+    const before = await db.operationsHousekeeping();
+    expect(before.housekeeping).toMatchObject({
+      sync: { workspaces: '1', expired_workspaces: '1', expired_changes: '1' },
+      replay: { expired_jobs: '1', expired_events: '1005' },
+      recordings: {
+        obsolete_runs: '1',
+        retired_runs: '0',
+        chunks_pending_cleanup: '1005',
+      },
+      summaries: {
+        obsolete_runs: '1',
+        retired_runs: '0',
+        steps_pending_cleanup: '1005',
+        resume_receipts_pending_cleanup: '1005',
+      },
+    });
+    expect(
+      BigInt(before.housekeeping.sync.oldest_expired_change_age_ms!),
+    ).toBeGreaterThanOrEqual(8n * 24n * 60n * 60n * 1000n);
+    expect(
+      BigInt(before.housekeeping.replay.oldest_expired_event_age_ms!),
+    ).toBeGreaterThanOrEqual(8n * 24n * 60n * 60n * 1000n);
+    expect(await counts()).toMatchObject({
+      events: 1005,
+      chunks: 1005,
+      steps: 1005,
+      resumes: 1005,
+    });
+    await prune();
+    await db.pool.query("UPDATE jobs SET state='queued',updated_at=now()");
+    const partial = await db.operationsHousekeeping();
+    expect(partial.housekeeping).toMatchObject({
+      replay: { expired_events: '5' },
+      recordings: {
+        obsolete_runs: '1',
+        retired_runs: '1',
+        chunks_pending_cleanup: '5',
+      },
+      summaries: {
+        obsolete_runs: '1',
+        retired_runs: '1',
+        steps_pending_cleanup: '5',
+        resume_receipts_pending_cleanup: '5',
+      },
+    });
+    await db.transaction(async (tx) => {
+      await pruneJobHistory(tx);
+      await db.sync.prune(tx);
+    });
+    const after = (await db.operationsHousekeeping()).housekeeping;
+    expect(after.sync).toMatchObject({
+      expired_workspaces: '0',
+      expired_changes: '0',
+      oldest_expired_change_age_ms: null,
+    });
+    expect(after.replay).toEqual({
+      expired_jobs: '0',
+      expired_events: '0',
+      oldest_expired_event_age_ms: null,
+    });
+    expect(after.recordings.obsolete_runs).toBe('0');
+    expect(after.summaries.obsolete_runs).toBe('0');
+  });
   it.each([
     { state: 'queued', hours: 200, recordingKept: true, summaryKept: true },
     { state: 'running', hours: 200, recordingKept: true, summaryKept: true },
@@ -326,6 +398,13 @@ describe.skipIf(!databaseUrl)('bounded transactional job housekeeping', () => {
         1,
       );
       await summary(await job(id(2), 'summary', state, hours), 1);
+      const backlog = (await db.operationsHousekeeping()).housekeeping;
+      expect(backlog.recordings.obsolete_runs).toBe(
+        String(Number(!recordingKept)),
+      );
+      expect(backlog.summaries.obsolete_runs).toBe(
+        String(Number(!summaryKept)),
+      );
       await prune();
       expect(await counts()).toMatchObject({
         recordings: Number(recordingKept),
@@ -345,6 +424,9 @@ describe.skipIf(!databaseUrl)('bounded transactional job housekeeping', () => {
       );
       await summary(await job(id(2), 'summary', 'running', 0), 1);
       await db.pool.query(`UPDATE ${table} SET active=false`);
+      const backlog = (await db.operationsHousekeeping()).housekeeping;
+      expect(backlog.recordings.obsolete_runs).toBe('1');
+      expect(backlog.summaries.obsolete_runs).toBe('1');
       await prune();
       expect(await counts()).toMatchObject({
         recordings: 0,
