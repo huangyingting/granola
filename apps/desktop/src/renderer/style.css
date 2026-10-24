@@ -75,12 +75,7 @@ button {
 .brand-mark {
   width: 39px;
   height: 43px;
-  background: #5b62e8;
-  color: white;
-  border-radius: 14px 14px 14px 5px;
-  font-size: 32px;
-  text-align: center;
-  font-weight: 650;
+  object-fit: contain;
 }
 .subtle {
   display: block;

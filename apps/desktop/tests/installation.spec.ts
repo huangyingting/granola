@@ -32,6 +32,7 @@ import {
   verifyUpdateParent,
 } from '../src/main/update-trust.js';
 import { closeInstalled as close, runInstaller } from './installer-support.js';
+import { assertAppIcon } from './app-icon.js';
 
 test.skip(
   process.platform !== 'win32' ||
@@ -555,6 +556,10 @@ test('preserves encrypted data and new edits through actual installation, compat
     await expect(
       page.getByText('Encrypted on this device', { exact: true }),
     ).toBeVisible();
+    await assertAppIcon(lifecycle.application, page, [
+      baselineInstaller,
+      uninstaller,
+    ]);
     return page;
   }
 

@@ -9,6 +9,7 @@
   "type": "module",
   "main": "dist/main/main.js",
   "scripts": {
+    "icons": "node icons.mjs",
     "build": "tsc -b && node build.mjs",
     "start": "electron .",
     "test:ui": "playwright test",

@@ -286,6 +286,18 @@ pnpm desktop:test
 pnpm desktop:package:unsigned
 ```
 
+The renderer, favicon, Main window, executable and installer share the existing
+purple **n** mark. Windows uses the installer's stable application ID for taskbar
+grouping. Transparent 16–256px Windows icon frames and the window PNG are generated
+from `apps/desktop/src/renderer/public/app-icon.svg`; the desktop build rejects
+missing, malformed or stale derivatives instead of silently using Electron's
+default icon. The shared ICO uses uncompressed 32-bit bitmap frames for NSIS
+compatibility. Committed assets need no graphics tool for ordinary builds.
+After editing the SVG, regenerate them with
+`pnpm --filter @windows-ai-notes/desktop icons` using ImageMagick (`magick` on
+Windows, `convert` elsewhere). The source/asset hashes check build consistency;
+they are not publisher authentication or signing acceptance.
+
 The installer includes the self-contained x64 audio helper and its .NET runtime;
 an external .NET installation is not required. The helper inherits only
 OS/runtime location variables, never model keys, login credentials or startup

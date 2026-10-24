@@ -423,10 +423,13 @@ describe('fail-closed signed candidate policy', () => {
       directories: { output: 'fresh-output' },
       nsis: {
         guid: 'dbdb543e-07bd-5ef6-99a5-00d80b9bdfb6',
+        installerIcon: 'build/app-icon.ico',
+        uninstallerIcon: 'build/app-icon.ico',
         perMachine: false,
         deleteAppDataOnUninstall: false,
       },
       win: {
+        icon: 'build/app-icon.ico',
         signExecutable: true,
         signAndEditExecutable: true,
         signExts: ['AudioHost.dll', 'AudioHost.Core.dll'],

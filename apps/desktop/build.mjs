@@ -4,7 +4,9 @@ import { fileURLToPath } from 'node:url';
 import { readFile, writeFile } from 'node:fs/promises';
 import { bundledNotices } from './licenses.mjs';
 import { bundleMain } from './bundle.mjs';
+import { verifyDesktopIcons } from './icons.mjs';
 
+await verifyDesktopIcons();
 const main = await bundleMain('src/main/main.ts', 'dist/main/main.js');
 const preload = await bundle({
   entryPoints: ['src/preload.ts'],

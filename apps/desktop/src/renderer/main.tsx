@@ -265,7 +265,13 @@ function App() {
       )}
       <aside className="sidebar" inert={closing !== null}>
         <div className="brand">
-          <span className="brand-mark">n</span>
+          <img
+            className="brand-mark"
+            src="./app-icon.svg"
+            alt=""
+            aria-hidden="true"
+            draggable={false}
+          />
           <div>
             Notes<span className="subtle">A little more clarity</span>
           </div>

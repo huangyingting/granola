@@ -344,12 +344,15 @@ async function start() {
   }
   const directory = dirname(fileURLToPath(import.meta.url));
   const page = pathToFileURL(join(directory, '../renderer/index.html')).href;
+  if (process.platform === 'win32')
+    app.setAppUserModelId('io.github.windowsainotes.desktop');
   window = new BrowserWindow({
     width: 1250,
     height: 840,
     minWidth: 850,
     minHeight: 600,
     title: 'Windows AI Notes',
+    icon: join(directory, '../renderer/app-icon.png'),
     backgroundColor: '#f6f8fb',
     webPreferences: {
       preload: join(directory, '../preload.cjs'),

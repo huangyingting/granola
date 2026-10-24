@@ -21,9 +21,11 @@
   ],
   "forceCodeSigning": false,
   "npmRebuild": false,
-  "win": { "target": ["nsis"] },
+  "win": { "target": ["nsis"], "icon": "build/app-icon.ico" },
   "nsis": {
     "guid": "dbdb543e-07bd-5ef6-99a5-00d80b9bdfb6",
+    "installerIcon": "build/app-icon.ico",
+    "uninstallerIcon": "build/app-icon.ico",
     "include": "build/installer.nsh",
     "oneClick": false,
     "perMachine": false,

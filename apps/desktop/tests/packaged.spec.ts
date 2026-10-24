@@ -22,6 +22,7 @@ import {
   closeObservedMain,
   desktopProbeEnvironment,
 } from './installer-support.js';
+import { assertAppIcon } from './app-icon.js';
 
 const executable = process.env.DESKTOP_EXECUTABLE;
 async function rejectedMainActivation(application: ElectronApplication) {
@@ -302,6 +303,7 @@ test('opens the actual packaged sandboxed editor without workspace runtime depen
     await expect(
       page.getByText('Encrypted on this device', { exact: true }),
     ).toBeVisible();
+    await assertAppIcon(application, page);
     expect(await application.evaluate(({ app }) => app.isPackaged)).toBe(true);
     expect(await rejectedMainActivation(application)).toBe('update_not_ready');
     await expect(
