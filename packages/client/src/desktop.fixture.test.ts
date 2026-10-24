@@ -154,6 +154,45 @@ describe('Windows desktop synthetic service contract', () => {
       desktopStateSchema.safeParse({ ...controller.snapshot(), jobs }).success,
     ).toBe(false);
   });
+  it('conditional history preserves every full encrypted result across bodyless sync and offline restart', async () => {
+    const { document, jobs } = await savedSummaries();
+    const full = z.strictObject({ jobs: z.array(jobSchema).max(20) });
+    const before = local.getArtifact(
+      controller.profile,
+      document.id,
+      'job-history',
+      full,
+    );
+    fixture.change(document.id, 'A later synthetic human edit.');
+    await controller.synchronize();
+    expect(fixture.state.job_history_responses.not_modified).toBeGreaterThan(0);
+    expect(
+      local.getArtifact(controller.profile, document.id, 'job-history', full),
+    ).toEqual(before);
+    controller.dispose();
+    local.close();
+    local = new LocalStore(join(directory, 'notes.sqlite'), key);
+    controller = new WorkspaceController(
+      local,
+      fixture.issuer.browser,
+      () => {},
+      { allowLoopback: true },
+    );
+    fixture.state.jobs.clear();
+    const request = vi
+      .spyOn(ApiClient.prototype, 'request')
+      .mockRejectedValue(new Error('Unexpected offline revalidation.'));
+    for (const job of jobs)
+      await expect(
+        controller.summaries.readResult({
+          operation: 'getSummaryResult',
+          scope: controller.scope,
+          id: document.id,
+          job_id: job.id,
+        }),
+      ).resolves.toEqual(job.result);
+    expect(request).not.toHaveBeenCalled();
+  });
   it('summary history IPC loads selected full results offline after encrypted restart without network work', async () => {
     const { document, jobs } = await savedSummaries(2);
     controller.dispose();

@@ -14,7 +14,9 @@ import {
 } from 'vitest';
 import { createServer } from '@windows-ai-notes/api/server';
 import { Database } from '@windows-ai-notes/db';
+import { runOnce } from '@windows-ai-notes/worker';
 import { LocalStore } from '@windows-ai-notes/local';
+import { jobSchema } from '@windows-ai-notes/contracts/server';
 import {
   richTextFromPlainText,
   richTextToPlainText,
@@ -62,6 +64,43 @@ describe.skipIf(!databaseUrl)(
         randomUUID(),
       );
     }
+    async function enqueueSummary(id: string) {
+      return api.request(`/v1/documents/${id}/summary-runs`, jobSchema, {
+        method: 'POST',
+        key: randomUUID(),
+        body: { note_revision: 1, transcript_revision: 0 },
+      });
+    }
+    async function finishSummary() {
+      await runOnce(db, {
+        provider: 'fixture',
+        configurationVersion: 'conditional-history-v1',
+        summarize: async (snapshot) => ({
+          summary: {
+            overview: {
+              text: snapshot.notes,
+              citations: [
+                {
+                  source: 'note',
+                  id: snapshot.document_id,
+                  revision: snapshot.note_revision,
+                },
+              ],
+            },
+            topics: [],
+            decisions: [],
+            action_items: [],
+            open_questions: [],
+          },
+          usage: { input_tokens: 1, output_tokens: 2, audio_ms: 0 },
+        }),
+        transcribe: async () => {
+          throw new Error(
+            'Unexpected transcription for a conditional history fixture.',
+          );
+        },
+      });
+    }
     beforeAll(async () => {
       admin = new Database(databaseUrl!);
       await admin.pool.query(`CREATE SCHEMA "${schema}"`);
@@ -98,6 +137,100 @@ describe.skipIf(!databaseUrl)(
         await admin.pool.query(`DROP SCHEMA "${schema}" CASCADE`);
         await admin.close();
       }
+    });
+    it('conditional history revalidates after encrypted restart without retransferring completed bodies or losing offline results', async () => {
+      const remote = await seed();
+      const job = await enqueueSummary(remote.id);
+      await finishSummary();
+      await db.edit(actor.user_id, remote.id, 1, {
+        notes: 'A newer human note.',
+      });
+      const fetch = globalThis.fetch;
+      const deliveries: { status: number; tag: string | null }[] = [];
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+        const response = await fetch(input, init);
+        if (String(input).includes(`/documents/${remote.id}/jobs?`))
+          deliveries.push({
+            status: response.status,
+            tag: new Headers(init?.headers).get('if-none-match'),
+          });
+        return response;
+      });
+      await engine.synchronize();
+      const schema = z.strictObject({ jobs: z.array(jobSchema).max(20) });
+      const cached = local.getArtifact(
+        engine.profile,
+        remote.id,
+        'job-history',
+        schema,
+      );
+      expect(cached?.jobs[0]).toMatchObject({
+        state: 'succeeded',
+        input_stale: true,
+        result: { summary: { overview: { text: remote.notes } } },
+      });
+      engine.stop();
+      local.close();
+      stores.delete(local);
+      local = open();
+      engine = new SyncEngine(local, api, actor.user_id, actor.workspace_id);
+      await db.edit(actor.user_id, remote.id, 2, {
+        title: 'An unrelated metadata edit.',
+      });
+      await engine.synchronize();
+      expect(deliveries.map((delivery) => delivery.status)).toEqual([200, 304]);
+      expect(deliveries[0]!.tag).toBeNull();
+      expect(deliveries[1]!.tag).toMatch(/^"[a-f0-9]{64}"$/);
+      expect(
+        local.getArtifact(engine.profile, remote.id, 'job-history', schema),
+      ).toEqual(cached);
+      expect(
+        local.getArtifact(
+          engine.profile,
+          remote.id,
+          `job:${job.id}`,
+          jobSchema,
+        ),
+      ).toEqual(cached!.jobs[0]);
+    });
+    it('conditional history replaces changed job results and never suppresses workspace revocation', async () => {
+      const remote = await seed();
+      await enqueueSummary(remote.id);
+      const fetch = globalThis.fetch;
+      const tags: (string | null)[] = [];
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+        const response = await fetch(input, init);
+        if (String(input).includes(`/documents/${remote.id}/jobs?`)) {
+          expect(response.status).toBe(200);
+          tags.push(new Headers(init?.headers).get('if-none-match'));
+        }
+        return response;
+      });
+      await engine.synchronize();
+      await finishSummary();
+      await engine.synchronize();
+      expect(
+        local.getArtifact(
+          engine.profile,
+          remote.id,
+          'job-history',
+          z.object({ jobs: z.array(jobSchema) }),
+        )?.jobs[0],
+      ).toMatchObject({
+        state: 'succeeded',
+        result: { summary: { overview: { text: remote.notes } } },
+      });
+      expect(tags).toHaveLength(2);
+      expect(tags[0]).toBeNull();
+      expect(tags[1]).toMatch(/^"[a-f0-9]{64}"$/);
+      await db.pool.query(
+        'UPDATE memberships SET active=false WHERE workspace_id=$1 AND user_id=$2',
+        [actor.workspace_id, actor.user_id],
+      );
+      await expect(engine.synchronize()).rejects.toMatchObject({
+        code: 'workspace_access_revoked',
+      });
+      expect(local.page(engine.profile).documents).toEqual([]);
     });
     it('retries a committed request after a lost response and restart before pulling, preserving newer typing', async () => {
       const draft = local.create('offline', fields('Original frozen request.'));

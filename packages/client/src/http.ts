@@ -1,7 +1,11 @@
 import { z } from 'zod';
+import { createHash } from 'node:crypto';
+import { canonicalJson } from '@windows-ai-notes/contracts/content';
 import {
   documentSchema,
   jobSchema,
+  jobHistorySchema,
+  type JobHistory,
   jobEventSchema,
   transcriptSchema,
   transcriptPageSchema,
@@ -209,6 +213,7 @@ export class ApiClient {
       key?: string;
       signal?: AbortSignal;
       empty?: boolean;
+      cached?: T;
     } = {},
   ): Promise<T> {
     const destination = new URL(path, this.base);
@@ -226,6 +231,24 @@ export class ApiClient {
       ...(options.signal ? [options.signal] : []),
     ]);
     signal.throwIfAborted();
+    let cached: { value: T; etag: string } | null = null;
+    if (options.cached !== undefined) {
+      const parsed = schema.safeParse(options.cached);
+      if (
+        !parsed.success ||
+        (options.method ?? 'GET') !== 'GET' ||
+        options.body !== undefined ||
+        options.empty
+      )
+        throw new ClientError(
+          'invalid_cached_response',
+          'Only a valid saved JSON response can revalidate a read request.',
+        );
+      cached = {
+        value: parsed.data,
+        etag: `"${createHash('sha256').update(canonicalJson(parsed.data)).digest('hex')}"`,
+      };
+    }
     const headers = await this.headers();
     signal.throwIfAborted();
     let response: Response;
@@ -239,6 +262,7 @@ export class ApiClient {
             ? { 'Content-Type': 'application/json' }
             : {}),
           ...(options.key ? { 'Idempotency-Key': options.key } : {}),
+          ...(cached ? { 'If-None-Match': cached.etag } : {}),
         },
         ...(options.body === undefined
           ? {}
@@ -247,6 +271,18 @@ export class ApiClient {
         redirect: 'manual',
         cache: 'no-store',
       });
+      if (response.status === 304) {
+        await response.body?.cancel();
+        const etag = response.headers.get('etag');
+        if (!cached || (etag !== cached.etag && etag !== `W/${cached.etag}`))
+          throw new ClientError(
+            'invalid_server_response',
+            'The service did not confirm the saved response representation.',
+            response.status,
+          );
+        signal.throwIfAborted();
+        return cached.value;
+      }
       await checkResponse(response);
       if (options.empty) {
         if (response.status !== 204) {
@@ -591,11 +627,21 @@ export class ApiClient {
       },
     );
   }
-  jobs(id: string, signal: AbortSignal) {
+  async jobs(id: string, signal: AbortSignal, cached?: JobHistory) {
+    const document = resourceId.parse(id);
+    if (
+      cached &&
+      (!Array.isArray(cached.jobs) ||
+        cached.jobs.some((job) => !job || job.document_id !== document))
+    )
+      throw new ClientError(
+        'invalid_cached_response',
+        'The saved job history belongs to another meeting.',
+      );
     return this.request(
-      `/v1/documents/${resourceId.parse(id)}/jobs?limit=20`,
-      z.strictObject({ jobs: z.array(jobSchema).max(20) }),
-      { signal },
+      `/v1/documents/${document}/jobs?limit=20`,
+      jobHistorySchema,
+      { signal, ...(cached === undefined ? {} : { cached }) },
     );
   }
   mutation(mutation: Mutation, signal: AbortSignal) {

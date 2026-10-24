@@ -1,9 +1,11 @@
 import { createServer, type RequestListener } from 'node:http';
 import { once } from 'node:events';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { ApiClient, responseJson, serverUrl } from './http.js';
+import { jobSchema } from '@windows-ai-notes/contracts/server';
+import { canonicalJson } from '@windows-ai-notes/contracts/content';
 
 describe('bounded service transport', () => {
   const servers: ReturnType<typeof createServer>[] = [];
@@ -43,6 +45,42 @@ describe('bounded service transport', () => {
       requests: () => requests,
     };
   }
+  function history(document = randomUUID()) {
+    return {
+      jobs: [
+        jobSchema.parse({
+          id: randomUUID(),
+          document_id: document,
+          kind: 'summary',
+          state: 'succeeded',
+          attempt: 1,
+          input_stale: false,
+          result: {
+            kind: 'summary',
+            provider: 'fixture',
+            configuration_version: 'conditional-history-v1',
+            prompt_version: 'summary-v1',
+            usage: { input_tokens: 1, output_tokens: 2, audio_ms: 0 },
+            summary: {
+              overview: {
+                text: 'Full saved summary fixture.',
+                citations: [{ source: 'note', id: document, revision: 1 }],
+              },
+              topics: [],
+              decisions: [],
+              action_items: [],
+              open_questions: [],
+            },
+          },
+          error: null,
+          created_at: '2030-01-01T00:00:00.000Z',
+        }),
+      ],
+    };
+  }
+  function historyTag(value: unknown) {
+    return `"${createHash('sha256').update(canonicalJson(value)).digest('hex')}"`;
+  }
   afterEach(async () => {
     vi.restoreAllMocks();
     await Promise.all(
@@ -55,6 +93,197 @@ describe('bounded service transport', () => {
       ),
     );
     servers.length = 0;
+  });
+  it.each([false, true])(
+    'conditional history retains full cached results only after a matching authorized bodyless response with weak=%s',
+    async (weak) => {
+      const cached = history();
+      const saved = structuredClone(cached);
+      const tag = historyTag(saved);
+      let seen: {
+        path: string | undefined;
+        tag: string | undefined;
+        authorization: string | undefined;
+      } | null = null;
+      const base = await serve((request, response) => {
+        seen = {
+          path: request.url,
+          tag: request.headers['if-none-match'],
+          authorization: request.headers.authorization,
+        };
+        response.writeHead(304, { ETag: weak ? `W/${tag}` : tag });
+        response.end();
+      });
+      let credentials = 0;
+      const client = new ApiClient(
+        base,
+        async () => {
+          const result = cached.jobs[0]!.result;
+          if (result?.kind !== 'summary')
+            throw new Error('Expected a cached summary.');
+          result.summary.overview.text = 'Changed caller-owned cache value.';
+          return { Authorization: `Bearer synthetic-${++credentials}` };
+        },
+        { allowLoopback: true },
+      );
+      await expect(
+        client.jobs(
+          cached.jobs[0]!.document_id,
+          new AbortController().signal,
+          cached,
+        ),
+      ).resolves.toEqual(saved);
+      expect(seen).toEqual({
+        path: `/v1/documents/${cached.jobs[0]!.document_id}/jobs?limit=20`,
+        tag,
+        authorization: 'Bearer synthetic-1',
+      });
+      expect(credentials).toBe(1);
+    },
+  );
+  it.each([false, true])(
+    'conditional history accepts a full 200 when the representation changes=%s or an older server ignores revalidation',
+    async (changed) => {
+      const cached = history();
+      const next = changed
+        ? {
+            jobs: [
+              { ...cached.jobs[0]!, state: 'cancelled' as const, result: null },
+            ],
+          }
+        : cached;
+      let tag: string | undefined;
+      const base = await serve((request, response) => {
+        tag = request.headers['if-none-match'];
+        response.writeHead(200, { 'Content-Type': 'application/json' });
+        response.end(canonicalJson(next));
+      });
+      const client = new ApiClient(base, async () => ({}), {
+        allowLoopback: true,
+      });
+      await expect(
+        client.jobs(
+          cached.jobs[0]!.document_id,
+          new AbortController().signal,
+          cached,
+        ),
+      ).resolves.toEqual(next);
+      expect(tag).toBe(historyTag(cached));
+    },
+  );
+  it.each(['unsolicited', 'missing', 'mismatched'] as const)(
+    'conditional history rejects a %s revalidation receipt',
+    async (kind) => {
+      const cached = history();
+      const base = await serve((_request, response) => {
+        response.writeHead(
+          304,
+          kind === 'missing'
+            ? {}
+            : {
+                ETag:
+                  kind === 'mismatched'
+                    ? `"${'f'.repeat(64)}"`
+                    : historyTag(cached),
+              },
+        );
+        response.end();
+      });
+      const client = new ApiClient(base, async () => ({}), {
+        allowLoopback: true,
+      });
+      await expect(
+        client.jobs(
+          cached.jobs[0]!.document_id,
+          new AbortController().signal,
+          kind === 'unsolicited' ? undefined : cached,
+        ),
+      ).rejects.toMatchObject({ code: 'invalid_server_response' });
+    },
+  );
+  it.each([401, 403, 429, 503])(
+    'conditional history never substitutes cached success for HTTP %i',
+    async (status) => {
+      const cached = history();
+      const workspace = randomUUID();
+      const base = await serve((_request, response) => {
+        response.writeHead(status, { 'Content-Type': 'application/json' });
+        response.end(
+          JSON.stringify({
+            code: 'workspace_access_revoked',
+            message: 'Synthetic conditional-read failure.',
+            retryable: false,
+            request_id: 'synthetic-conditional-history',
+            purge_workspace_id: workspace,
+          }),
+        );
+      });
+      const client = new ApiClient(base, async () => ({}), {
+        allowLoopback: true,
+      });
+      await expect(
+        client.jobs(
+          cached.jobs[0]!.document_id,
+          new AbortController().signal,
+          cached,
+        ),
+      ).rejects.toMatchObject({
+        status,
+        code: 'workspace_access_revoked',
+        purgeWorkspaceId: workspace,
+      });
+    },
+  );
+  it('conditional history rejects foreign documents, invalid cached JSON and non-read revalidation before network work', async () => {
+    let requests = 0;
+    const cached = history();
+    const base = await serve((_request, response) => {
+      requests++;
+      response.end('{}');
+    });
+    const client = new ApiClient(base, async () => ({}), {
+      allowLoopback: true,
+    });
+    await expect(
+      client.jobs(randomUUID(), new AbortController().signal, cached),
+    ).rejects.toMatchObject({ code: 'invalid_cached_response' });
+    await expect(
+      client.request('/v1/me', z.strictObject({ id: z.uuidv4() }), {
+        cached: { id: 'invalid' },
+      }),
+    ).rejects.toMatchObject({ code: 'invalid_cached_response' });
+    await expect(
+      client.request('/v1/me', z.strictObject({ id: z.uuidv4() }), {
+        method: 'POST',
+        cached: { id: randomUUID() },
+      }),
+    ).rejects.toMatchObject({ code: 'invalid_cached_response' });
+    expect(requests).toBe(0);
+  });
+  it('conditional history remains cancellable while waiting for revalidation', async () => {
+    const cached = history();
+    let started!: () => void;
+    const beginning = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    let tag: string | undefined;
+    const base = await serve((request) => {
+      tag = request.headers['if-none-match'];
+      started();
+    });
+    const client = new ApiClient(base, async () => ({}), {
+      allowLoopback: true,
+    });
+    const controller = new AbortController();
+    const pending = client.jobs(
+      cached.jobs[0]!.document_id,
+      controller.signal,
+      cached,
+    );
+    await beginning;
+    controller.abort();
+    await expect(pending).rejects.toMatchObject({ code: 'request_cancelled' });
+    expect(tag).toBe(historyTag(cached));
   });
   it('requires HTTPS and an origin-only configuration, with explicit loopback development exceptions', () => {
     expect(serverUrl('https://notes.example.test:443/')).toBe(

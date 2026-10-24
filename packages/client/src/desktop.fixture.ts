@@ -192,6 +192,7 @@ export async function desktopFixture() {
     workspace,
     documents,
     jobs,
+    job_history_responses: { full: 0, not_modified: 0 },
     lose_finalization_response: false,
     lose_summary_response: false,
     lose_summary_resume_response: false,
@@ -932,13 +933,26 @@ export async function desktopFixture() {
             has_more: threads.length > offset + 50,
           });
         }
-        if (parts[4] === 'jobs')
-          return send(response, {
+        if (parts[4] === 'jobs') {
+          const body = canonicalJson({
             jobs: [...jobs.values()]
               .reverse()
               .filter((job) => job.document_id === id)
               .slice(0, 20),
           });
+          const etag = `"${createHash('sha256').update(body).digest('hex')}"`;
+          response.setHeader('ETag', etag);
+          if (request.headers['if-none-match'] === etag) {
+            state.job_history_responses.not_modified++;
+            response.writeHead(304);
+            response.end();
+            return;
+          }
+          state.job_history_responses.full++;
+          response.writeHead(200, { 'Content-Type': 'application/json' });
+          response.end(body);
+          return;
+        }
         if (parts[4] === 'transcript') {
           if (!state.transcript_online)
             return error(response, 'service_unavailable', 503);

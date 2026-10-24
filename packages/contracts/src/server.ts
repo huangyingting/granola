@@ -518,6 +518,9 @@ export const jobSchema = z.strictObject({
     .nullable()
     .optional(),
 });
+export const jobHistorySchema = z.strictObject({
+  jobs: z.array(jobSchema).max(20),
+});
 export const jobEventSchema = z.strictObject({
   job_id: resourceId,
   seq: z.number().int().positive(),
@@ -582,6 +585,7 @@ export type SummarySnapshot = z.infer<typeof summarySnapshotSchema>;
 export type JobInput = z.infer<typeof jobInputSchema>;
 export type JobResult = z.infer<typeof resultSchema>;
 export type Job = z.infer<typeof jobSchema>;
+export type JobHistory = z.infer<typeof jobHistorySchema>;
 export type Usage = z.infer<typeof usageSchema>;
 export type Failure = z.infer<typeof failureSchema>;
 

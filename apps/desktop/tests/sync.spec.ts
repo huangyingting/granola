@@ -628,6 +628,12 @@ test('recovers one summary and resume receipt, inspects frozen evidence, persist
     if (!restored.ok || !('state' in restored))
       throw new Error('The restored job metadata did not cross preload.');
     expect(restored.state.jobs).toEqual(delivered.jobs);
+    const revalidated = fixture.state.job_history_responses.not_modified;
+    fixture.change(remote.id, 'Newer human cloud notes remain authoritative.');
+    await synchronize(application);
+    expect(fixture.state.job_history_responses.not_modified).toBeGreaterThan(
+      revalidated,
+    );
     await page
       .getByRole('button', { name: 'Inspect source 1', exact: true })
       .first()

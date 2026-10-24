@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { jobEventStateSchema } from '@windows-ai-notes/contracts/generation';
 import { Readable } from 'node:stream';
 import Fastify from 'fastify';
@@ -25,7 +25,10 @@ import {
   syncSnapshotQuerySchema,
   syncChangesQuerySchema,
 } from '@windows-ai-notes/contracts/server';
-import { exportMeetingStream } from '@windows-ai-notes/contracts/content';
+import {
+  canonicalJson,
+  exportMeetingStream,
+} from '@windows-ai-notes/contracts/content';
 import {
   withAuditContext,
   setAuditActor,
@@ -57,6 +60,19 @@ const listQuery = z.strictObject({
   limit: z.coerce.number().int().min(1).max(100).default(25),
   offset: z.coerce.number().int().min(0).max(10_000).default(0),
 });
+const entityTag = /(?:W\/)?"[\x21\x23-\x7e\x80-\xff]*"/gu;
+const entityTagList =
+  /^[ \t]*(?:W\/)?"[\x21\x23-\x7e\x80-\xff]*"(?:[ \t]*,[ \t]*(?:W\/)?"[\x21\x23-\x7e\x80-\xff]*")*[ \t]*$/u;
+function notModified(value: string | undefined, etag: string) {
+  if (!value) return false;
+  if (/^[ \t]*\*[ \t]*$/u.test(value)) return true;
+  return (
+    entityTagList.test(value) &&
+    [...value.matchAll(entityTag)].some(
+      ([tag]) => (tag.startsWith('W/') ? tag.slice(2) : tag) === etag,
+    )
+  );
+}
 
 export async function createServer(
   db: Database,
@@ -335,7 +351,7 @@ export async function createServer(
       revision ?? (await db.document(user, id)).revision,
     );
   });
-  app.get('/v1/documents/:id/jobs', async (request) => {
+  app.get('/v1/documents/:id/jobs', async (request, reply) => {
     const { id } = parse(idParams, request.params);
     const query = parse(
       z.strictObject({
@@ -344,14 +360,19 @@ export async function createServer(
       }),
       request.query,
     );
-    return {
+    const body = canonicalJson({
       jobs: await db.jobs(
         principal(request).userId,
         id,
         query.limit,
         query.offset,
       ),
-    };
+    });
+    const etag = `"${createHash('sha256').update(body).digest('hex')}"`;
+    reply.header('ETag', etag);
+    if (notModified(request.headers['if-none-match'], etag))
+      return reply.code(304).send();
+    return reply.type('application/json').send(body);
   });
   app.get('/v1/documents/:id/export', async (request, reply) => {
     const { id } = parse(idParams, request.params);

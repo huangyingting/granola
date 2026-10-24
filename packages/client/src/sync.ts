@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { canonicalJson } from '@windows-ai-notes/contracts/content';
 import {
   documentSchema,
+  jobHistorySchema,
   resourceId,
   type TranscriptPage,
 } from '@windows-ai-notes/contracts/server';
@@ -128,7 +129,17 @@ export class SyncEngine {
       });
       if (this.transcriptReceived) delivery = { page: transcript, started };
     }
-    const history = await this.api.jobs(document.id, this.controller.signal);
+    const cached = this.local.getArtifact(
+      this.profile,
+      document.id,
+      'job-history',
+      jobHistorySchema,
+    );
+    const history = await this.api.jobs(
+      document.id,
+      this.controller.signal,
+      cached ?? undefined,
+    );
     for (const job of history.jobs) {
       if (job.document_id !== document.id)
         throw new ClientError(

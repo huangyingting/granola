@@ -6,6 +6,7 @@ import {
   oidcClientConfigurationSchema,
   resourceId,
   jobSchema,
+  jobHistorySchema,
   cachedTranscriptSchema,
   transcriptPageSchema,
   makeTranscriptPage,
@@ -297,12 +298,8 @@ export class WorkspaceController {
       return structuredClone(cached.jobs);
     this.jobHistory = null;
     const jobs = (
-      this.local.getArtifact(
-        profile,
-        document,
-        'job-history',
-        z.strictObject({ jobs: z.array(jobSchema).max(20) }),
-      )?.jobs ?? []
+      this.local.getArtifact(profile, document, 'job-history', jobHistorySchema)
+        ?.jobs ?? []
     ).map((job) => {
       if (job.result?.kind !== 'summary') return job;
       const { summary: _summary, ...result } = job.result;
@@ -752,7 +749,7 @@ export class WorkspaceController {
       profile,
       id,
       'job-history',
-      z.strictObject({ jobs: z.array(jobSchema).max(20) }),
+      jobHistorySchema,
     );
     this.local.atomic(() => {
       this.local.putArtifact(profile, id, `job:${job.id}`, job);

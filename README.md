@@ -298,6 +298,15 @@ refreshes without changing the encrypted cache format. Cold reads and reads
 after writes still decrypt the complete history; this does not shrink server
 job responses, establish a large-library latency SLO or authorize a new AI request.
 
+Job-history synchronization revalidates the complete saved representation with a
+content ETag. An unchanged authorized response transfers no summary bodies;
+changed histories and older servers still return the full compatible JSON.
+Authorization and document visibility are checked before revalidation, and the
+client requires a matching receipt rather than substituting cached success for
+errors, revocation or cancellation. Full results remain encrypted and available
+offline after restart. This saves unchanged response bytes, not the server's
+history query/serialization or Main's full-cache decryption and writes.
+
 ```sh
 pnpm audio:publish
 pnpm desktop:build

@@ -1268,4 +1268,113 @@ describe.skipIf(!databaseUrl)('PostgreSQL API and durable AI worker', () => {
     ).toBe(true);
     expect(changes.changes).toHaveLength(4);
   });
+  it('conditional history returns deterministic full-representation tags and bodyless matching reads', async () => {
+    const owner = await actor();
+    const doc = await document(owner);
+    await enqueue(owner, doc.id);
+    await runOnce(db, providers);
+    const url = `/v1/documents/${doc.id}/jobs?limit=20`;
+    const first = await app.inject({ url, headers: owner.headers });
+    expect(first.statusCode).toBe(200);
+    const tag = `"${createHash('sha256').update(first.body).digest('hex')}"`;
+    expect(first.headers.etag).toBe(tag);
+    expect(first.json().jobs[0].result.summary.overview.text).toBe(doc.notes);
+    for (const condition of [tag, `W/${tag}`, `"opaque,tag", W/${tag}`, '*']) {
+      const response = await app.inject({
+        url,
+        headers: { ...owner.headers, 'if-none-match': condition },
+      });
+      expect(response.statusCode).toBe(304);
+      expect(response.body).toBe('');
+      expect(response.headers.etag).toBe(tag);
+      expect(response.headers['cache-control']).toBe('no-store');
+    }
+    const invalid = await app.inject({
+      url,
+      headers: { ...owner.headers, 'if-none-match': `"unterminated, ${tag}` },
+    });
+    expect(invalid.statusCode).toBe(200);
+  });
+  it('conditional history invalidates on lifecycle, staleness and pagination changes without hiding full results', async () => {
+    const owner = await actor();
+    const doc = await document(owner);
+    await enqueue(owner, doc.id);
+    const url = `/v1/documents/${doc.id}/jobs?limit=20`;
+    const queued = await app.inject({ url, headers: owner.headers });
+    await runOnce(db, providers);
+    const completed = await app.inject({
+      url,
+      headers: {
+        ...owner.headers,
+        'if-none-match': String(queued.headers.etag),
+      },
+    });
+    expect(completed.statusCode).toBe(200);
+    expect(completed.headers.etag).not.toBe(queued.headers.etag);
+    expect(completed.json().jobs[0]).toMatchObject({
+      state: 'succeeded',
+      input_stale: false,
+    });
+    await db.edit(owner.user_id, doc.id, 1, { notes: 'A later human edit.' });
+    const stale = await app.inject({
+      url,
+      headers: {
+        ...owner.headers,
+        'if-none-match': String(completed.headers.etag),
+      },
+    });
+    expect(stale.statusCode).toBe(200);
+    expect(stale.headers.etag).not.toBe(completed.headers.etag);
+    expect(stale.json().jobs[0]).toMatchObject({
+      input_stale: true,
+      result: { summary: { overview: { text: doc.notes } } },
+    });
+    const page = await app.inject({
+      url: `${url}&offset=1`,
+      headers: {
+        ...owner.headers,
+        'if-none-match': String(stale.headers.etag),
+      },
+    });
+    expect(page.statusCode).toBe(200);
+    expect(page.json()).toEqual({ jobs: [] });
+    expect(page.headers.etag).not.toBe(stale.headers.etag);
+  });
+  it('conditional history still authorizes ownership, membership and deletion before matching a cache tag', async () => {
+    const owner = await actor();
+    const other = await actor(owner.workspace_id);
+    const doc = await document(owner);
+    const url = `/v1/documents/${doc.id}/jobs?limit=20`;
+    const first = await app.inject({ url, headers: owner.headers });
+    expect(first.statusCode).toBe(200);
+    expect(typeof first.headers.etag).toBe('string');
+    const condition = { 'if-none-match': String(first.headers.etag) };
+    expect((await app.inject({ url, headers: condition })).statusCode).toBe(
+      401,
+    );
+    expect(
+      (await app.inject({ url, headers: { ...other.headers, ...condition } }))
+        .statusCode,
+    ).toBe(404);
+    await db.pool.query(
+      'UPDATE memberships SET active=false WHERE workspace_id=$1 AND user_id=$2',
+      [owner.workspace_id, owner.user_id],
+    );
+    const revoked = await app.inject({
+      url,
+      headers: { ...owner.headers, ...condition },
+    });
+    expect(revoked.statusCode).toBe(404);
+    expect(revoked.json()).toMatchObject({ code: 'document_not_found' });
+    expect(revoked.headers.etag).toBeUndefined();
+    await db.pool.query(
+      'UPDATE memberships SET active=true WHERE workspace_id=$1 AND user_id=$2',
+      [owner.workspace_id, owner.user_id],
+    );
+    await db.deleteDocument(owner.user_id, doc.id);
+    expect(
+      (await app.inject({ url, headers: { ...owner.headers, ...condition } }))
+        .statusCode,
+    ).toBe(404);
+  });
 });
