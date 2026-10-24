@@ -3,7 +3,10 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Writable } from 'node:stream';
-import { setTimeout as delay } from 'node:timers/promises';
+import {
+  setImmediate as tick,
+  setTimeout as delay,
+} from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import {
   S3Client,
@@ -61,6 +64,8 @@ describe.skipIf(!databaseUrl)(
     let key: Buffer;
     let actor: { user_id: string; workspace_id: string };
     let events: DesktopChange[];
+    let requests: string[];
+    let apiGate: ((path: string) => Promise<void>) | null;
     const deliveries: DesktopDelivery[] = [];
     const schema = `notes_workspace_${randomUUID().replaceAll('-', '')}`;
     const fields = (text: string) => ({
@@ -154,6 +159,8 @@ describe.skipIf(!databaseUrl)(
       await db.migrate();
     });
     beforeEach(async () => {
+      requests = [];
+      apiGate = null;
       issuer = await oidcFixture();
       actor = await db.provision(
         issuer.configuration.issuer,
@@ -167,6 +174,10 @@ describe.skipIf(!databaseUrl)(
         jwksUrl: `${issuer.state.issuer}keys`,
         requiredScope: 'notes.access',
         desktop: issuer.configuration,
+      });
+      app.addHook('preHandler', async (request) => {
+        requests.push(request.url);
+        if (apiGate) await apiGate(request.url);
       });
       base = await app.listen({ host: '127.0.0.1', port: 0 });
       directory = mkdtempSync(join(tmpdir(), 'windows-notes-workspace-'));
@@ -223,6 +234,117 @@ describe.skipIf(!databaseUrl)(
       await Promise.all([closing, rejected]);
       expect(closed).toBe(true);
     });
+    it.each(
+      (['dispose', 'close'] as const).flatMap((mode) =>
+        ['/v1/me', '/v1/workspaces'].map((path) => ({ mode, path })),
+      ),
+    )(
+      '$mode cancels workspace selection held at $path without copying or late dispatch',
+      async ({ mode, path }) => {
+        await create('Offline source must not be copied after shutdown.');
+        await connect();
+        const previous = local.getValue('root', 'account', z.unknown());
+        const offline = local.list('offline');
+        const ready = gate(),
+          release = gate();
+        requests.length = 0;
+        apiGate = async (url) => {
+          if (url === path) {
+            ready.resolve();
+            await release.promise;
+          }
+        };
+        const resolved = vi.fn(),
+          rejected = vi.fn();
+        const observing = activate(true).then(resolved, rejected);
+        try {
+          await Promise.race([ready.promise, observing]);
+          expect(requests).toContain(path);
+          const eventCount = events.length;
+          if (mode === 'close') await controller.close();
+          else controller.dispose();
+          await tick();
+          expect(rejected).toHaveBeenCalledWith(
+            expect.objectContaining({ code: 'request_cancelled' }),
+          );
+          expect(resolved).not.toHaveBeenCalled();
+          expect(events).toHaveLength(eventCount);
+        } finally {
+          apiGate = null;
+          release.resolve();
+          await observing;
+        }
+        expect(requests).toEqual(
+          path === '/v1/me' ? ['/v1/me'] : ['/v1/me', '/v1/workspaces'],
+        );
+        expect(local.getValue('root', 'account', z.unknown())).toEqual(
+          previous,
+        );
+        expect(local.list('offline')).toEqual(offline);
+        expect(
+          local.list(
+            workspaceProfile(base, actor.user_id, actor.workspace_id, true),
+          ),
+        ).toEqual([]);
+        expect(accountSession().summary().status).toBe('active');
+        controller = open();
+        expect(controller.snapshot().connection.active_workspace).toBeNull();
+        expect((await activate(true)).documents).toHaveLength(1);
+      },
+    );
+    it.each(
+      (['dispose', 'close'] as const).flatMap((mode) =>
+        [true, false].map((preserve) => ({ mode, preserve })),
+      ),
+    )(
+      '$mode cancels a held revocation response after atomic disconnect with preserve=$preserve',
+      async ({ mode, preserve }) => {
+        await create('Existing offline draft.');
+        await connect();
+        await activate();
+        await create('Unsent workspace draft.');
+        const profile = controller.profile;
+        const ready = gate(),
+          release = gate();
+        issuer.state.revocationStarted = ready.resolve;
+        issuer.state.revocationGate = release.promise;
+        const resolved = vi.fn(),
+          rejected = vi.fn();
+        const observing = controller
+          .execute({
+            operation: 'disconnect',
+            scope: controller.scope,
+            preserve_unsent: preserve,
+          })
+          .then(resolved, rejected);
+        try {
+          await Promise.race([ready.promise, observing]);
+          expect(issuer.state.revoked).toHaveLength(1);
+          expect(accountSession().summary().status).toBe('signed_out');
+          expect(local.getValue('root', 'account', z.unknown())).toBeNull();
+          expect(local.list(profile)).toEqual([]);
+          expect(local.list('offline')).toHaveLength(preserve ? 2 : 1);
+          const eventCount = events.length;
+          if (mode === 'close') await controller.close();
+          else controller.dispose();
+          await tick();
+          expect(rejected).toHaveBeenCalledWith(
+            expect.objectContaining({ code: 'workspace_closed' }),
+          );
+          expect(resolved).not.toHaveBeenCalled();
+          expect(events).toHaveLength(eventCount);
+        } finally {
+          release.resolve();
+          await observing;
+        }
+        expect(issuer.state.revoked).toHaveLength(1);
+        controller = open();
+        const reopened = controller.snapshot();
+        expect(reopened.connection.status).toBe('offline');
+        expect(reopened.connection.user_id).toBeNull();
+        expect(reopened.documents).toHaveLength(preserve ? 2 : 1);
+      },
+    );
     it('loads current authenticated AI allowance without caching it and fences late results after a scope change', async () => {
       await expect(
         controller.accountUsage(controller.scope),

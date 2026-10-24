@@ -66,6 +66,8 @@ export class WorkspaceController {
   private started = false;
   private disposed = false;
   private auth: AbortController | null = null;
+  // Critical-state notifications cancel reads, not the transition itself.
+  private transition: AbortController | null = null;
   private generation = 0;
   private critical = false;
   private retryCount = 0;
@@ -437,6 +439,7 @@ export class WorkspaceController {
     this.generation++;
     this.auth?.abort();
     this.session?.cancel();
+    this.transition?.abort();
     this.selection.clear();
     this.jobHistory = null;
     this.stopEngine();
@@ -1380,12 +1383,13 @@ export class WorkspaceController {
       );
     this.critical = true;
     this.stopEngine();
-    this.status = 'switching';
-    this.emit('status');
+    const transition = (this.transition = new AbortController());
     const generation = this.generation;
     try {
-      const identity = await api.identity();
-      const memberships = await api.workspaces();
+      this.status = 'switching';
+      this.emit('status');
+      const identity = await api.identity(transition.signal);
+      const memberships = await api.workspaces(transition.signal);
       if (this.disposed || generation !== this.generation)
         throw new ClientError(
           'sync_cancelled',
@@ -1446,6 +1450,7 @@ export class WorkspaceController {
       }
       throw error;
     } finally {
+      if (this.transition === transition) this.transition = null;
       this.critical = false;
       if (!this.disposed) this.schedule(0);
     }
@@ -1470,8 +1475,7 @@ export class WorkspaceController {
       );
     this.stopEngine();
     this.critical = true;
-    this.status = 'disconnecting';
-    this.emit('status');
+    const transition = (this.transition = new AbortController());
     const account = this.account;
     const forget: () => undefined = () => {
       if (account)
@@ -1485,8 +1489,13 @@ export class WorkspaceController {
       this.local.purgeCredentials();
     };
     try {
+      this.status = 'disconnecting';
+      this.emit('status');
       const result = this.session
-        ? await this.session.logout(forget)
+        ? await this.session.logout(
+            forget,
+            AbortSignal.any([transition.signal, AbortSignal.timeout(20_000)]),
+          )
         : (this.local.atomic(forget), null);
       if (this.disposed)
         throw new ClientError('workspace_closed', 'The workspace has closed.');
@@ -1517,6 +1526,7 @@ export class WorkspaceController {
       }
       throw error;
     } finally {
+      if (this.transition === transition) this.transition = null;
       this.critical = false;
     }
   }

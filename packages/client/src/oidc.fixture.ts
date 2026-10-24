@@ -52,6 +52,8 @@ export async function oidcFixture() {
     metadataIssuer: null as string | null,
     revocationSupported: true,
     revocationRejected: false,
+    revocationGate: null as Promise<void> | null,
+    revocationStarted: null as (() => void) | null,
   };
   const clientId = 'synthetic-native-client';
   const audience = 'synthetic-notes-api';
@@ -250,6 +252,8 @@ export async function oidcFixture() {
       }
       state.revoked.push(form.get('token')!);
       refreshes.delete(form.get('token')!);
+      state.revocationStarted?.();
+      await state.revocationGate;
       response.end('{}');
       return;
     }

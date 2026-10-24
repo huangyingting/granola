@@ -240,6 +240,10 @@ without cancelling a shared account-owned token rotation; late credentials canno
 dispatch the cancelled request. Credential failures retain their original cause
 instead of becoming network failures. Live preparation reuses the same wait
 mechanism while retaining its consent/scope guards and 20-second preparation bound.
+Workspace shutdown also cancels selection preflights and disconnect's bounded
+revocation wait. Disconnect still atomically preserves or removes local drafts and
+forgets credentials; cancelling the reply cannot undo a provider-accepted
+revocation.
 
 Open **Account & sync**, enter your administrator's HTTPS service origin and
 choose **Sign in with browser**. Select a provisioned workspace after signing in.
