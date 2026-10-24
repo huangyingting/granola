@@ -142,7 +142,7 @@ test('observes 1100 encrypted Windows notes across fresh and warm searches, sele
         name: 'Meeting notes',
         exact: true,
       });
-      await expect(editor).toHaveText(expectedText);
+      await expect(editor).toHaveText(expectedText, { useInnerText: true });
       await expect(
         page.getByRole('navigation', { name: 'Meetings' }).getByRole('button'),
       ).toHaveCount(50);
@@ -169,7 +169,7 @@ test('observes 1100 encrypted Windows notes across fresh and warm searches, sele
         await expect(
           page.getByRole('button', { name: 'More meetings', exact: true }),
         ).toBeDisabled();
-        await expect(editor).toHaveText(expectedText);
+        await expect(editor).toHaveText(expectedText, { useInnerText: true });
       }
 
       const searched = await page.evaluate(async () => {
@@ -220,7 +220,7 @@ test('observes 1100 encrypted Windows notes across fresh and warm searches, sele
       await expect(
         page.getByRole('navigation', { name: 'Meetings' }).getByRole('button'),
       ).toHaveCount(0);
-      await expect(editor).toHaveText(expectedText);
+      await expect(editor).toHaveText(expectedText, { useInnerText: true });
       const savedText = `Synthetic measured selected save ${sample}.`;
       const content = richTextFromPlainText(savedText);
       const saving = await page.evaluate(async (content) => {
@@ -295,7 +295,7 @@ test('observes 1100 encrypted Windows notes across fresh and warm searches, sele
     page = await application.firstWindow();
     await expect(
       page.getByRole('textbox', { name: 'Meeting notes', exact: true }),
-    ).toHaveText(expectedText);
+    ).toHaveText(expectedText, { useInnerText: true });
     await close(application);
     application = null;
     for (const name of await readdir(directory)) {
