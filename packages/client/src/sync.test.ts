@@ -196,7 +196,10 @@ describe.skipIf(!databaseUrl)(
       local = open();
       engine = new SyncEngine(local, api, actor.user_id, actor.workspace_id);
       const encrypted = encryptedJobs(remote.id);
-      expect(encrypted).toHaveLength(2);
+      expect(encrypted).toHaveLength(3);
+      expect(encrypted.map((row) => row.id)).toContain(
+        `artifact:${remote.id}:job-history-metadata:v1`,
+      );
       await db.edit(actor.user_id, remote.id, 2, {
         title: 'An unrelated metadata edit.',
       });
@@ -226,7 +229,10 @@ describe.skipIf(!databaseUrl)(
       });
       await engine.synchronize();
       const encrypted = encryptedJobs(remote.id);
-      expect(encrypted).toHaveLength(2);
+      expect(encrypted).toHaveLength(3);
+      expect(encrypted.map((row) => row.id)).toContain(
+        `artifact:${remote.id}:job-history-metadata:v1`,
+      );
       const fetch = globalThis.fetch;
       const statuses: number[] = [];
       vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
