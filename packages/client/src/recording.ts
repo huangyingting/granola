@@ -26,7 +26,7 @@ import { retryDelay } from './retry.js';
 
 type AudioClient = Pick<
   AudioHostClient,
-  'request' | 'readChunk' | 'close' | 'failure'
+  'request' | 'readChunk' | 'close' | 'failure' | 'stopped'
 >;
 export interface RecordingUploadContext {
   profile: string;
@@ -175,16 +175,10 @@ export class RecordingController {
     const operation = (async () => {
       try {
         await client.close();
+        await client.stopped;
       } catch (error) {
         this.failRecording(error);
         throw error;
-      } finally {
-        if (this.client === client) {
-          this.levels = null;
-          this.client = null;
-          this.owner = null;
-          this.revoked = false;
-        }
       }
     })().finally(() => {
       this.closing = null;
@@ -352,6 +346,18 @@ export class RecordingController {
       try {
         const client = this.create((event) => this.observe(event));
         this.client = client;
+        void this.background
+          .track(
+            client.stopped.then(() => {
+              if (this.client !== client) return;
+              this.levels = null;
+              this.client = null;
+              this.owner = null;
+              this.revoked = false;
+              this.changed();
+            }),
+          )
+          .catch((error: unknown) => this.report(error));
         void client.failure
           .catch((error: unknown) => {
             const recover = async () => {

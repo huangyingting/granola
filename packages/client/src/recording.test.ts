@@ -142,6 +142,74 @@ describe('durable desktop capture coordination with a real framed helper process
     expect(controller.capturing).toBe(true);
     await controller.stop(() => {});
   });
+  it('retains capture ownership after a failed close until the real helper physically exits', async () => {
+    const draft = local.create('offline');
+    const { controller, create } = setup();
+    await controller.start('offline', draft.id, choices(), () => {});
+    const [client] = clients;
+    if (!client) throw new Error('The framed capture helper was not created.');
+    let stopped = false;
+    void client.stopped.then(() => {
+      stopped = true;
+    });
+    const failure = new Error('Synthetic close failure before physical exit.');
+    const close = vi.spyOn(client, 'close').mockRejectedValue(failure);
+    try {
+      await expect(controller.stop(() => {})).rejects.toBe(failure);
+      expect(
+        (await client.request({ command: 'list_devices' })).event_type,
+      ).toBe('devices');
+      expect(stopped).toBe(false);
+      expect(controller.capturing).toBe(true);
+      const snapshot = controller.snapshot('offline', draft.id);
+      expect(snapshot.active?.state).toBe('failed');
+      expect(snapshot.levels).toBeNull();
+      expect(snapshot.error?.code).toBe('audio_operation_failed');
+      await expect(
+        controller.start('offline', draft.id, choices(), () => {}),
+      ).rejects.toThrow('Stop the current recording');
+      expect(create).toHaveBeenCalledTimes(1);
+    } finally {
+      close.mockRestore();
+      await client.close();
+    }
+    await client.stopped;
+    expect(stopped).toBe(true);
+    expect(controller.capturing).toBe(false);
+    await controller.start('offline', draft.id, choices(), () => {});
+    expect(create).toHaveBeenCalledTimes(2);
+    await controller.close(() => {});
+  });
+  it('keeps repeated audio deletion attempts fenced while physical helper closure is unconfirmed', async () => {
+    const draft = local.create('offline');
+    const { controller, remove } = setup();
+    await controller.start('offline', draft.id, choices(), () => {});
+    const recording = controller.snapshot('offline', draft.id).active!;
+    const [client] = clients;
+    if (!client) throw new Error('The framed capture helper was not created.');
+    const failure = new Error('Synthetic close failure before physical exit.');
+    const close = vi.spyOn(client, 'close').mockRejectedValue(failure);
+    local.remove('offline', draft.id);
+    try {
+      for (let attempt = 0; attempt < 2; attempt++)
+        await expect(controller.cleanup()).rejects.toBe(failure);
+      expect(remove).not.toHaveBeenCalled();
+      expect(local.pendingRecordingDeletions()).toEqual([recording.id]);
+      expect(controller.capturing).toBe(true);
+      expect(
+        (await client.request({ command: 'list_devices' })).event_type,
+      ).toBe('devices');
+    } finally {
+      close.mockRestore();
+      await client.close();
+    }
+    await client.stopped;
+    await controller.cleanup();
+    expect(remove).toHaveBeenCalledExactlyOnceWith(recording.id);
+    expect(local.pendingRecordingDeletions()).toEqual([]);
+    expect(controller.capturing).toBe(false);
+    await controller.close(() => {});
+  });
   it('keeps framed level previews ephemeral, profile-scoped and separate from saved audio across pause/resume', async () => {
     const draft = local.create('offline');
     const { controller } = setup('capture-levels');

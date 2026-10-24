@@ -475,6 +475,11 @@ authorization.
 Main also retains a physical-close promise for every audio helper it creates.
 A child error, expired EOF deadline or unsuccessful kill is not process-exit
 evidence; a later retry still cannot release SQLite before those helpers close.
+The recording coordinator also retains the active capture client and ownership
+until that physical-close promise resolves. A failed close still reports its
+error, but cannot admit another capture or let repeated deletion attempts remove
+that recording's audio while the original helper remains alive. The saved failure
+and deletion journal remain available; confirmed exit releases the fence.
 Main also retains the actual installer-worker session until physical closure.
 `closeReady`, application quit and the last-window path share an exit fence:
 ordinary exit seals new worker preparation and waits for cancellation, while only
