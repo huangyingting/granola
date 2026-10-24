@@ -85,6 +85,7 @@ export class RecordingController {
   private closing: Promise<void> | null = null;
   private cleaning: Promise<void> | null = null;
   private reviewing: RecordingReview | null = null;
+  private temporary: AudioClient | null = null;
   private uploadContext: RecordingUploadContext | null = null;
   private uploadTask: Promise<void> | null = null;
   private uploadAbort: AbortController | null = null;
@@ -129,8 +130,16 @@ export class RecordingController {
   get capturing() {
     return this.client !== null && this.owner !== null;
   }
+  private get busy() {
+    return (
+      this.running ||
+      this.closing !== null ||
+      this.reviewing !== null ||
+      this.temporary !== null
+    );
+  }
   private async exclusive<T>(operation: () => Promise<T>): Promise<T> {
-    if (this.running || this.closing || this.reviewing)
+    if (this.busy)
       throw new LocalError(
         'audio_busy',
         'Wait for the current audio operation to finish.',
@@ -155,6 +164,34 @@ export class RecordingController {
   private report(error: unknown) {
     this.error = problem(error);
     this.changed();
+  }
+  private trackStopped(client: AudioClient, release: () => void) {
+    void this.background
+      .track(client.stopped.then(release))
+      .catch((error: unknown) => this.report(error));
+  }
+  private createTemporary() {
+    const client = this.create(() => {});
+    this.temporary = client;
+    this.trackStopped(client, () => {
+      if (this.temporary !== client) return;
+      this.temporary = null;
+      this.changed();
+      this.resumeUploads(this.uploadContext);
+    });
+    return client;
+  }
+  private releaseTemporary(client: AudioClient): Promise<void> {
+    if (this.closing) return this.closing;
+    const operation = (async () => {
+      await client.close();
+      await client.stopped;
+    })().finally(() => {
+      this.closing = null;
+      this.changed();
+    });
+    this.closing = operation;
+    return operation;
   }
   private failRecording(error: unknown) {
     const owner = this.owner;
@@ -347,18 +384,14 @@ export class RecordingController {
       try {
         const client = this.create((event) => this.observe(event));
         this.client = client;
-        void this.background
-          .track(
-            client.stopped.then(() => {
-              if (this.client !== client) return;
-              this.levels = null;
-              this.client = null;
-              this.owner = null;
-              this.revoked = false;
-              this.changed();
-            }),
-          )
-          .catch((error: unknown) => this.report(error));
+        this.trackStopped(client, () => {
+          if (this.client !== client) return;
+          this.levels = null;
+          this.client = null;
+          this.owner = null;
+          this.revoked = false;
+          this.changed();
+        });
         void client.failure
           .catch((error: unknown) => {
             const recover = async () => {
@@ -447,6 +480,11 @@ export class RecordingController {
     if (this.uploadTimer) clearTimeout(this.uploadTimer);
     this.uploadTimer = null;
     this.uploadAbort?.abort();
+    const temporary = this.temporary;
+    if (temporary) {
+      authorize();
+      await this.releaseTemporary(temporary);
+    }
     if (this.reviewing) {
       authorize();
       await this.closeReview();
@@ -580,7 +618,7 @@ export class RecordingController {
     const request = this.exclusive(async () => {
       const shared = this.client ?? this.reviewing?.client;
       const temporary = !shared;
-      const client = shared ?? this.create(() => {});
+      const client = shared ?? this.createTemporary();
       try {
         const event = await client.request({ command: 'list_devices' });
         if (event.event_type !== 'devices')
@@ -591,7 +629,7 @@ export class RecordingController {
           );
         return event.payload.devices;
       } finally {
-        if (temporary) await client.close();
+        if (temporary) await this.releaseTemporary(client);
       }
     }).finally(() => {
       this.deviceRequest = null;
@@ -629,7 +667,7 @@ export class RecordingController {
       const shared = this.client ?? this.reviewing?.client;
       let client: AudioClient | undefined;
       try {
-        client = shared ?? this.create(() => {});
+        client = shared ?? this.createTemporary();
         const event = await client.request({
           command: 'check_storage',
           storage_quota_bytes: quota * AUDIO_GIB,
@@ -637,7 +675,7 @@ export class RecordingController {
         if (!shared) {
           const temporary = client;
           client = undefined;
-          await temporary.close();
+          await this.releaseTemporary(temporary);
         }
         authorize();
         if (
@@ -656,7 +694,7 @@ export class RecordingController {
         this.storageError = problem(error);
         throw error;
       } finally {
-        if (!shared && client) await client.close();
+        if (!shared && client) await this.releaseTemporary(client);
       }
     });
   }
@@ -678,16 +716,12 @@ export class RecordingController {
   }
   private retainReview(review: RecordingReview) {
     this.reviewing = review;
-    void this.background
-      .track(
-        review.client.stopped.then(() => {
-          if (this.reviewing !== review) return;
-          this.reviewing = null;
-          this.changed();
-          this.resumeUploads(this.uploadContext);
-        }),
-      )
-      .catch((error: unknown) => this.report(error));
+    this.trackStopped(review.client, () => {
+      if (this.reviewing !== review) return;
+      this.reviewing = null;
+      this.changed();
+      this.resumeUploads(this.uploadContext);
+    });
   }
   private async releaseReview(review: RecordingReview) {
     review.revoked = true;
@@ -723,8 +757,7 @@ export class RecordingController {
       );
     if (
       this.client ||
-      this.running ||
-      this.reviewing ||
+      this.busy ||
       ['starting', 'recording', 'paused'].includes(recording.state)
     )
       throw new LocalError(
@@ -846,14 +879,7 @@ export class RecordingController {
         this.uploadAbort?.abort();
       return;
     }
-    if (
-      !context ||
-      this.running ||
-      this.closing ||
-      this.client ||
-      this.reviewing
-    )
-      return;
+    if (!context || this.busy || this.client) return;
     let intent: RecordingUploadIntent | null;
     try {
       context.authorize();
@@ -1360,7 +1386,7 @@ export class RecordingController {
           : null,
       ...page,
       offset,
-      busy: this.running || this.closing !== null || this.reviewing !== null,
+      busy: this.busy,
       pending_deletions: this.local.pendingRecordingDeletions().length,
       error: this.error,
       cleanup_error: this.cleanupError,

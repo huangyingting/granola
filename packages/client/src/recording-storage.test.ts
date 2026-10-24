@@ -129,6 +129,99 @@ describe('Main-owned device-wide native storage capacity', () => {
     expect(controller.capturing).toBe(true);
     await controller.stop(() => {});
   });
+  it.each(['devices', 'storage'] as const)(
+    'retains a temporary %s helper after a rejected close and refuses replacement until physical exit',
+    async (operation) => {
+      const { controller, create } = setup();
+      const pending =
+        operation === 'devices'
+          ? controller.listDevices()
+          : controller.checkStorage(() => {}, 2);
+      const [client] = clients;
+      if (!client)
+        throw new Error('The framed temporary helper was not created.');
+      let stopped = false;
+      void client.stopped.then(() => {
+        stopped = true;
+      });
+      const failure = new Error(
+        'Synthetic close failure before physical exit.',
+      );
+      const close = vi.spyOn(client, 'close').mockRejectedValue(failure);
+      try {
+        await expect(pending).rejects.toBe(failure);
+        expect(
+          (await client.request({ command: 'list_devices' })).event_type,
+        ).toBe('devices');
+        expect(stopped).toBe(false);
+        expect(controller.snapshot('offline', null)).toMatchObject({
+          busy: true,
+          storage: null,
+          storage_quota_gib: 5,
+          error: { code: 'audio_operation_failed' },
+        });
+        await expect(controller.listDevices()).rejects.toMatchObject({
+          code: 'audio_busy',
+        });
+        await expect(
+          controller.checkStorage(() => {}, 2),
+        ).rejects.toMatchObject({
+          code: 'audio_busy',
+        });
+        const draft = local.create('offline');
+        await expect(
+          controller.start('offline', draft.id, tracks(), () => {}),
+        ).rejects.toMatchObject({ code: 'audio_busy' });
+        for (let attempt = 0; attempt < 2; attempt++)
+          await expect(controller.close(() => {})).rejects.toBe(failure);
+        expect(create).toHaveBeenCalledTimes(1);
+      } finally {
+        close.mockRestore();
+        await client.close();
+      }
+      await client.stopped;
+      expect(stopped).toBe(true);
+      expect(controller.snapshot('offline', null).busy).toBe(false);
+      await controller.checkStorage(() => {}, 2);
+      expect(create).toHaveBeenCalledTimes(2);
+      expect(local.recordingQuotaGiB()).toBe(2);
+      await controller.close(() => {});
+    },
+  );
+  it('waits for physical temporary-helper closure before confirming the native storage policy', async () => {
+    const { controller } = setup();
+    let settled = false;
+    const pending = controller
+      .checkStorage(() => {}, 2)
+      .then(() => {
+        settled = true;
+      });
+    const [client] = clients;
+    if (!client)
+      throw new Error('The framed temporary helper was not created.');
+    const close = vi.spyOn(client, 'close').mockResolvedValue(undefined);
+    try {
+      for (let round = 0; round < 2; round++)
+        expect(
+          (await client.request({ command: 'list_devices' })).event_type,
+        ).toBe('devices');
+      expect(close).toHaveBeenCalledTimes(1);
+      expect(settled).toBe(false);
+      expect(local.recordingQuotaGiB()).toBe(5);
+      expect(controller.snapshot('offline', null)).toMatchObject({
+        busy: true,
+        storage: null,
+      });
+    } finally {
+      close.mockRestore();
+      await client.close();
+      await pending;
+    }
+    expect(settled).toBe(true);
+    expect(local.recordingQuotaGiB()).toBe(2);
+    expect(controller.snapshot('offline', null).busy).toBe(false);
+    await controller.close(() => {});
+  });
   it.each([0, 0.5, 51, Number.POSITIVE_INFINITY])(
     'rejects invalid device limit %s before spawning or changing persistence',
     async (quota) => {

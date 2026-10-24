@@ -485,6 +485,12 @@ physical-exit fence. A rejected close keeps audio operations busy, prevents
 replacement helpers and scheduled uploads, and preserves pending audio deletions.
 Confirmed exit releases only the matching helper and reconsiders existing
 explicit upload intents; it does not create consent or restart paid AI work.
+Temporary device-enumeration and storage helpers also retain ownership until
+physical closure. Failed cleanup cannot report idle, accumulate replacement
+helpers, admit uploads or let terminal shutdown finish. A storage policy is not
+confirmed locally until the temporary helper has actually stopped, even if its
+logical close completed earlier. Active capture still shares its existing
+helper for device and capacity checks.
 Main also retains the actual installer-worker session until physical closure.
 `closeReady`, application quit and the last-window path share an exit fence:
 ordinary exit seals new worker preparation and waits for cancellation, while only
