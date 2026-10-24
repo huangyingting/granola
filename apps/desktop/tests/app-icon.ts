@@ -40,60 +40,72 @@ export async function assertAppIcon(
       bitmap[offset + channel] = Math.round(
         (bitmap[offset + channel] * bitmap[offset + 3]) / 255,
       );
-  const icons = await application.evaluate(
-    async ({ app, nativeImage }, { png, pixels, files }) => {
-      const original = nativeImage.createFromBuffer(Buffer.from(png, 'base64'));
-      const { join } = process.getBuiltinModule('node:path');
-      const windowIcon = nativeImage.createFromPath(
-        join(app.getAppPath(), 'dist/renderer/app-icon.png'),
-      );
-      if (
-        windowIcon.isEmpty() ||
-        !windowIcon.toBitmap().equals(original.toBitmap())
-      )
-        throw new Error('The shipped window icon does not match its source.');
-      const desiredPixels = Buffer.from(pixels, 'base64');
-      const points: [number, number][] = [
-        [0, 0],
-        [16, 4],
-        [4, 16],
-        [16, 28],
-        [11, 19],
-        [20, 19],
-      ];
-      const sample = (bytes: Buffer) =>
-        points.map(([x, y]) =>
-          bytes
-            .subarray((y * 32 + x) * 4, (y * 32 + x) * 4 + 4)
-            .toString('hex'),
-        );
-      return Promise.all(
-        [process.execPath, ...files].map(async (file) => {
-          const actual = await app.getFileIcon(file, { size: 'normal' });
-          const actualPixels = actual.toBitmap({ scaleFactor: 1 });
-          return {
-            file,
-            empty: actual.isEmpty(),
-            size: actual.getSize(),
-            bytes: actualPixels.length,
-            expectedBytes: desiredPixels.length,
-            samples: sample(actualPixels),
-            expectedSamples: sample(desiredPixels),
-          };
-        }),
-      );
-    },
-    {
-      png: assets.png.toString('base64'),
-      pixels: bitmap.toString('base64'),
-      files,
-    },
+  const points: [number, number][] = [
+    [0, 0],
+    [16, 4],
+    [4, 16],
+    [16, 28],
+    [11, 19],
+    [20, 19],
+  ];
+  const expectedSamples = points.map(([x, y]) =>
+    bitmap.subarray((y * 32 + x) * 4, (y * 32 + x) * 4 + 4).toString('hex'),
   );
-  for (const observed of icons) {
-    expect(observed.empty, observed.file).toBe(false);
-    expect(observed.size, observed.file).toEqual({ width: 32, height: 32 });
-    expect(observed.bytes, observed.file).toBe(32 * 32 * 4);
-    expect(observed.expectedBytes, observed.file).toBe(observed.bytes);
-    expect(observed.samples, observed.file).toEqual(observed.expectedSamples);
-  }
+  const icons = () =>
+    application.evaluate(
+      async ({ app, nativeImage }, { png, pixels, files, points }) => {
+        const original = nativeImage.createFromBuffer(
+          Buffer.from(png, 'base64'),
+        );
+        const { join } = process.getBuiltinModule('node:path');
+        const windowIcon = nativeImage.createFromPath(
+          join(app.getAppPath(), 'dist/renderer/app-icon.png'),
+        );
+        if (
+          windowIcon.isEmpty() ||
+          !windowIcon.toBitmap().equals(original.toBitmap())
+        )
+          throw new Error('The shipped window icon does not match its source.');
+        const desiredPixels = Buffer.from(pixels, 'base64');
+        const sample = (bytes: Buffer) =>
+          points.map(([x, y]) =>
+            bytes
+              .subarray((y * 32 + x) * 4, (y * 32 + x) * 4 + 4)
+              .toString('hex'),
+          );
+        return Promise.all(
+          [process.execPath, ...files].map(async (file) => {
+            const actual = await app.getFileIcon(file, { size: 'normal' });
+            const actualPixels = actual.toBitmap({ scaleFactor: 1 });
+            return {
+              file,
+              empty: actual.isEmpty(),
+              size: actual.getSize(),
+              bytes: actualPixels.length,
+              expectedBytes: desiredPixels.length,
+              samples: sample(actualPixels),
+              expectedSamples: sample(desiredPixels),
+            };
+          }),
+        );
+      },
+      {
+        png: assets.png.toString('base64'),
+        pixels: bitmap.toString('base64'),
+        files,
+        points,
+      },
+    );
+  // Shell icon extraction can lag a completed NSIS file replacement.
+  await expect.poll(icons).toEqual(
+    Array.from({ length: files.length + 1 }, () => ({
+      file: expect.any(String),
+      empty: false,
+      size: { width: 32, height: 32 },
+      bytes: 32 * 32 * 4,
+      expectedBytes: 32 * 32 * 4,
+      samples: expectedSamples,
+      expectedSamples,
+    })),
+  );
 }
