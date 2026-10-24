@@ -9,7 +9,6 @@ import { richTextSchema, tagsSchema } from './content.js';
 import {
   resourceId,
   jobSchema,
-  cachedTranscriptSchema,
   transcriptPageSchema,
   transcriptTimelinePageSchema,
   MAX_TRANSCRIPT_SEGMENTS,
@@ -426,7 +425,7 @@ export const desktopStateSchema = z.strictObject({
   connection: desktopConnectionSchema,
   conflict: desktopConflictSchema.nullable(),
   transcript_revision: z.number().int().nonnegative(),
-  transcript: cachedTranscriptSchema.nullable(),
+  transcript: transcriptPageSchema.nullable(),
   jobs: z.array(jobSchema).max(20),
   summary_submission: summarySubmissionSchema.nullable().default(null),
   summary_generation: summaryWatchSchema.nullable().default(null),

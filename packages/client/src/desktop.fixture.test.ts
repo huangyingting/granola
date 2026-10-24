@@ -6,6 +6,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LocalStore } from '@windows-ai-notes/local';
 import { richTextFromPlainText } from '@windows-ai-notes/contracts/content';
 import { desktopStateSchema } from '@windows-ai-notes/contracts/desktop';
+import {
+  cachedTranscriptSchema,
+  transcriptPageSchema,
+  TRANSCRIPT_PAGE_TEXT_BYTES,
+  type TranscriptPage,
+} from '@windows-ai-notes/contracts/server';
 import { desktopFixture } from './desktop.fixture.js';
 import { WorkspaceController } from './workspace.js';
 
@@ -55,6 +61,154 @@ describe('Windows desktop synthetic service contract', () => {
     });
     await controller.synchronize();
   }
+  async function cacheLegacy(segments: TranscriptPage['segments']) {
+    const document = fixture.seed('Synthetic legacy notes.', segments);
+    await connect();
+    const transcript = {
+      document_id: document.id,
+      revision: 1,
+      source: 'manual' as const,
+      segments,
+    };
+    local.putArtifact(
+      controller.profile,
+      document.id,
+      'transcript:1',
+      transcript,
+    );
+    return transcript;
+  }
+  const legacySegments = (count: number, text = 'Synthetic legacy segment.') =>
+    Array.from({ length: count }, (_, index) => ({
+      id: randomUUID(),
+      start_ms: index * 1000,
+      end_ms: index * 1000 + 999,
+      text,
+    }));
+  it('cached transcript IPC projects a full legacy cache to fifty segments without rewriting it', async () => {
+    const transcript = await cacheLegacy(legacySegments(1000));
+    const state = controller.snapshot();
+    expect(state.transcript).toEqual({
+      document_id: transcript.document_id,
+      revision: 1,
+      source: 'manual',
+      offset: 0,
+      total_segments: 1000,
+      segments: transcript.segments.slice(0, 50),
+      has_more: true,
+    });
+    expect(Buffer.byteLength(JSON.stringify(state.transcript))).toBeLessThan(
+      20_000,
+    );
+    expect(
+      local.getArtifact(
+        controller.profile,
+        transcript.document_id,
+        'transcript:1',
+        cachedTranscriptSchema,
+      ),
+    ).toEqual(transcript);
+    expect(desktopStateSchema.parse(state)).toEqual(state);
+  });
+  it('cached transcript IPC enforces the UTF-8 page budget rather than counting characters', async () => {
+    const transcript = await cacheLegacy(
+      legacySegments(80, String.fromCodePoint(0x4e2d).repeat(1000)),
+    );
+    const first = transcriptPageSchema.parse(controller.snapshot().transcript);
+    expect(first.segments).toHaveLength(42);
+    expect(
+      first.segments.reduce(
+        (bytes, segment) => bytes + Buffer.byteLength(segment.text),
+        0,
+      ),
+    ).toBeLessThanOrEqual(TRANSCRIPT_PAGE_TEXT_BYTES);
+    const next = await controller.transcriptPage(
+      controller.scope,
+      transcript.document_id,
+      1,
+      first.segments.length,
+    );
+    expect([...first.segments, ...next.segments]).toEqual(transcript.segments);
+    expect(next.has_more).toBe(false);
+  });
+  it('cached transcript IPC preserves existing page provenance and recording evidence', async () => {
+    const transcript = await cacheLegacy(legacySegments(74));
+    const page = transcriptPageSchema.parse({
+      ...transcript,
+      segments: transcript.segments.slice(0, 50),
+      offset: 0,
+      total_segments: 74,
+      has_more: true,
+      is_candidate: true,
+      based_on_revision: 0,
+      recording: {
+        id: randomUUID(),
+        seal_sha256: '3'.repeat(64),
+        partial: true,
+        tracks: [{ track_id: randomUUID(), kind: 'microphone' }],
+        timeline_count: 2,
+      },
+    });
+    local.putArtifact(
+      controller.profile,
+      transcript.document_id,
+      'transcript:1',
+      page,
+    );
+    expect(controller.snapshot().transcript).toEqual(page);
+    expect(desktopStateSchema.parse(controller.snapshot()).transcript).toEqual(
+      page,
+    );
+  });
+  it('cached transcript IPC preserves every offline page after an encrypted restart', async () => {
+    const transcript = await cacheLegacy(legacySegments(127));
+    controller.dispose();
+    local.close();
+    local = new LocalStore(join(directory, 'notes.sqlite'), key);
+    controller = new WorkspaceController(
+      local,
+      fixture.issuer.browser,
+      () => {},
+      {
+        allowLoopback: true,
+      },
+    );
+    fixture.state.transcript_online = false;
+    const first = transcriptPageSchema.parse(controller.snapshot().transcript);
+    const second = await controller.transcriptPage(
+      controller.scope,
+      transcript.document_id,
+      1,
+      50,
+    );
+    const last = await controller.transcriptPage(
+      controller.scope,
+      transcript.document_id,
+      1,
+      100,
+    );
+    expect([...first.segments, ...second.segments, ...last.segments]).toEqual(
+      transcript.segments,
+    );
+    expect(last.has_more).toBe(false);
+    expect(
+      local.getArtifact(
+        controller.profile,
+        transcript.document_id,
+        'transcript:1',
+        cachedTranscriptSchema,
+      ),
+    ).toEqual(transcript);
+  });
+  it('cached transcript IPC rejects an unprojected full cache at the desktop contract boundary', async () => {
+    const transcript = await cacheLegacy(legacySegments(60));
+    expect(
+      desktopStateSchema.safeParse({
+        ...controller.snapshot(),
+        transcript,
+      }).success,
+    ).toBe(false);
+  });
   it('serves valid signed identity, synchronization, mutation, transcript and logout responses', async () => {
     const document = fixture.seed(
       'Synthetic remote source.',

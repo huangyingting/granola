@@ -277,7 +277,12 @@ editor receives a full draft. Search covers titles, tags and the complete note
 body, including text beyond its preview, without writing a plaintext search
 index. Paging and filtering preserve the current editor. Cold full-body search
 still scans and decrypts candidates in the main process; large-library latency
-and full transcript/job payloads remain performance release gates.
+and full job payloads remain performance release gates. Bootstrap and state
+responses expose only the bounded first transcript page, including when reading
+legacy full-transcript caches. The encrypted legacy revision is not rewritten;
+later pages remain available offline. Main still decrypts the complete legacy
+value before projecting that first page, so this is not a cold-cache latency or
+Main-memory acceptance claim.
 
 ```sh
 pnpm audio:publish

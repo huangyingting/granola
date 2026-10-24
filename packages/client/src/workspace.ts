@@ -304,6 +304,28 @@ export class WorkspaceController {
     }
     this.selection.set(profile, selected?.id ?? null);
     const details = selected ? this.local.details(profile, selected.id) : null;
+    const cached =
+      selected && details?.transcript_revision
+        ? this.cachedTranscript(
+            profile,
+            selected.id,
+            details.transcript_revision,
+          )
+        : null;
+    const transcript = !cached
+      ? null
+      : 'offset' in cached
+        ? transcriptPageSchema.parse(cached)
+        : makeTranscriptPage(
+            {
+              document_id: cached.document_id,
+              revision: cached.revision,
+              source: cached.source,
+              total_segments: cached.segments.length,
+            },
+            0,
+            cached.segments,
+          );
     const account = this.account;
     const summaryIntent = selected
       ? this.local.getArtifact(
@@ -368,14 +390,7 @@ export class WorkspaceController {
       ),
       chat_generation: this.chat.events.snapshot(profile, selected?.id ?? null),
       transcript_revision: details?.transcript_revision ?? 0,
-      transcript:
-        selected && details?.transcript_revision
-          ? this.cachedTranscript(
-              profile,
-              selected.id,
-              details.transcript_revision,
-            )
-          : null,
+      transcript,
       jobs: selected
         ? (this.local.getArtifact(
             profile,

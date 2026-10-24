@@ -1315,20 +1315,18 @@ test('separately confirms Azure processing, reconciles a lost reply after restar
     await rm(directory, { recursive: true, force: true });
   }
 });
-test('pages long transcripts without losing editor text and reads opened pages offline after restart', async () => {
+test('pages current and legacy cached transcripts without losing editor text across offline restarts', async () => {
   const directory = await mkdtemp(
     join(tmpdir(), 'windows-notes-transcript-pages-'),
   );
   const fixture = await desktopFixture();
-  fixture.seed(
-    'Synthetic notes remain editable.',
-    Array.from({ length: 137 }, (_, index) => ({
-      id: randomUUID(),
-      start_ms: index * 1000,
-      end_ms: index * 1000 + 999,
-      text: `Synthetic transcript segment ${index}.`,
-    })),
-  );
+  const segments = Array.from({ length: 137 }, (_, index) => ({
+    id: randomUUID(),
+    start_ms: index * 1000,
+    end_ms: index * 1000 + 999,
+    text: `Synthetic transcript segment ${index}.`,
+  }));
+  const remote = fixture.seed('Synthetic notes remain editable.', segments);
   let application: ElectronApplication | null = null;
   try {
     application = await launch(directory);
@@ -1412,6 +1410,89 @@ test('pages long transcripts without losing editor text and reads opened pages o
     await expect(
       page.getByText('Segments 51-100 of 137', { exact: true }),
     ).toBeVisible();
+    fixture.state.transcript_online = false;
+    await application.evaluate(
+      ({ safeStorage }, { directory, id, segments }) => {
+        const { readFileSync } = process.getBuiltinModule('node:fs');
+        const { join } = process.getBuiltinModule('node:path');
+        const { DatabaseSync } = process.getBuiltinModule('node:sqlite');
+        const require = process
+          .getBuiltinModule('node:module')
+          .createRequire(
+            join(process.cwd(), 'synthetic-legacy-transcript.cjs'),
+          );
+        const {
+          LocalStore,
+        }: typeof import('@windows-ai-notes/local') = require('@windows-ai-notes/local');
+        const path = join(directory, 'notes.sqlite');
+        const inspect = new DatabaseSync(path, { readOnly: true });
+        let profile: unknown;
+        try {
+          profile = inspect
+            .prepare('SELECT profile FROM drafts WHERE id=?')
+            .get(id)?.profile;
+        } finally {
+          inspect.close();
+        }
+        if (typeof profile !== 'string')
+          throw new Error(
+            'The synthetic legacy meeting has no cached profile.',
+          );
+        const key = Buffer.from(
+          safeStorage.decryptString(
+            readFileSync(join(directory, 'content-key.protected')),
+          ),
+          'base64',
+        );
+        try {
+          const local = new LocalStore(path, key);
+          try {
+            local.putArtifact(profile, id, 'transcript:1', {
+              document_id: id,
+              revision: 1,
+              source: 'manual',
+              segments,
+            });
+          } finally {
+            local.close();
+          }
+        } finally {
+          key.fill(0);
+        }
+      },
+      { directory, id: remote.id, segments },
+    );
+    await close(application);
+    application = await launch(directory);
+    page = await application.firstWindow();
+    await expect(
+      page.getByRole('textbox', { name: 'Meeting notes', exact: true }),
+    ).toHaveText('Synthetic edited notes survive transcript navigation.');
+    const bootstrap = await page.evaluate(() =>
+      window.notes.invoke({ operation: 'bootstrap' }),
+    );
+    if (!bootstrap.ok || !('state' in bootstrap))
+      throw new Error(
+        'The legacy cache could not cross the actual preload boundary.',
+      );
+    expect(bootstrap.state.transcript).toMatchObject({
+      offset: 0,
+      total_segments: 137,
+      has_more: true,
+      segments: segments.slice(0, 50),
+    });
+    await page
+      .getByText('Transcript', { exact: false })
+      .filter({ hasText: 'Revision 1' })
+      .first()
+      .click();
+    for (const text of ['Segments 51-100 of 137', 'Segments 101-137 of 137']) {
+      await page
+        .getByRole('button', { name: 'Next transcript page', exact: true })
+        .click();
+      await expect(page.getByText(text, { exact: true })).toBeVisible();
+    }
+    await expect(page.locator('.transcript-segment')).toHaveCount(37);
     await close(application);
     application = null;
   } finally {

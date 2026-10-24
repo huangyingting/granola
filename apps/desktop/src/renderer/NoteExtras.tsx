@@ -4,7 +4,6 @@ import type { Presentation } from '@windows-ai-notes/contracts/presentation';
 import type { z } from 'zod';
 import { richTextToPlainText } from '@windows-ai-notes/contracts/content';
 import {
-  makeTranscriptPage,
   type TranscriptPage,
   transcriptTimelinePageSchema,
 } from '@windows-ai-notes/contracts/server';
@@ -135,20 +134,7 @@ function Transcript({
   candidate?: boolean;
 }) {
   function initial(): TranscriptPage | null {
-    if (revision !== state.transcript_revision) return null;
-    const value = state.transcript;
-    if (!value) return null;
-    if ('offset' in value) return value;
-    return makeTranscriptPage(
-      {
-        document_id: value.document_id,
-        revision: value.revision,
-        source: value.source,
-        total_segments: value.segments.length,
-      },
-      0,
-      value.segments,
-    );
+    return revision === state.transcript_revision ? state.transcript : null;
   }
   const [page, setPage] = useState(initial);
   const [presentation, setPresentation] = useState<Presentation | undefined>();
