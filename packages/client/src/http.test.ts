@@ -5,7 +5,10 @@ import { setImmediate as tick } from 'node:timers/promises';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { ApiClient, responseJson, serverUrl } from './http.js';
-import { jobSchema } from '@windows-ai-notes/contracts/server';
+import {
+  jobSchema,
+  jobHistorySchema,
+} from '@windows-ai-notes/contracts/server';
 import { canonicalJson } from '@windows-ai-notes/contracts/content';
 
 describe('bounded service transport', () => {
@@ -85,6 +88,7 @@ describe('bounded service transport', () => {
   const transports = [
     { kind: 'JSON', deadline: 20_000 },
     { kind: 'conditional history', deadline: 20_000 },
+    { kind: 'receipt history', deadline: 20_000 },
     { kind: 'job events', deadline: 60_000 },
     { kind: 'question events', deadline: 60_000 },
   ] as const;
@@ -99,6 +103,8 @@ describe('bounded service transport', () => {
         return client.identity(signal);
       case 'conditional history':
         return client.jobs(id, signal, history(id));
+      case 'receipt history':
+        return client.jobsIfChanged(id, signal, historyTag({ jobs: [] }));
       case 'job events':
         return client.events(id, 0, async () => undefined, signal);
       case 'question events':
@@ -126,6 +132,121 @@ describe('bounded service transport', () => {
       ),
     );
     servers.length = 0;
+  });
+  it.each([false, true])(
+    'receipt-only history returns no body only after a matching receipt with weak=%s',
+    async (weak) => {
+      const value = history();
+      const tag = historyTag(value);
+      const base = await serve((request, response) => {
+        expect(request.headers['if-none-match']).toBe(tag);
+        response.writeHead(304, { ETag: `${weak ? 'W/' : ''}${tag}` });
+        response.end();
+      });
+      const client = new ApiClient(base, async () => ({}), {
+        allowLoopback: true,
+      });
+      const parse = vi.spyOn(jobHistorySchema, 'safeParse');
+      await expect(
+        client.jobsIfChanged(
+          value.jobs[0]!.document_id,
+          new AbortController().signal,
+          tag,
+        ),
+      ).resolves.toBeNull();
+      expect(parse).not.toHaveBeenCalled();
+    },
+  );
+  it.each([undefined, '"other"', 'W/"other"'])(
+    'receipt-only history rejects an unconfirmed 304 tag: %s',
+    async (etag) => {
+      const base = await serve((_request, response) => {
+        response.writeHead(304, etag === undefined ? {} : { ETag: etag });
+        response.end();
+      });
+      const client = new ApiClient(base, async () => ({}), {
+        allowLoopback: true,
+      });
+      await expect(
+        client.jobsIfChanged(
+          randomUUID(),
+          new AbortController().signal,
+          historyTag({ jobs: [] }),
+        ),
+      ).rejects.toMatchObject({ code: 'invalid_server_response', status: 304 });
+    },
+  );
+  it('receipt-only history accepts a complete compatible 200 response', async () => {
+    const value = history();
+    const base = await serve((_request, response) => {
+      response.writeHead(200, { 'Content-Type': 'application/json' });
+      response.end(JSON.stringify(value));
+    });
+    const client = new ApiClient(base, async () => ({}), {
+      allowLoopback: true,
+    });
+    await expect(
+      client.jobsIfChanged(
+        value.jobs[0]!.document_id,
+        new AbortController().signal,
+        historyTag({ jobs: [] }),
+      ),
+    ).resolves.toEqual(value);
+  });
+  it('receipt-only history does not treat a null 200 response as unchanged', async () => {
+    const base = await serve((_request, response) => {
+      response.writeHead(200, { 'Content-Type': 'application/json' });
+      response.end('null');
+    });
+    const client = new ApiClient(base, async () => ({}), {
+      allowLoopback: true,
+    });
+    await expect(
+      client.jobsIfChanged(
+        randomUUID(),
+        new AbortController().signal,
+        historyTag({ jobs: [] }),
+      ),
+    ).rejects.toMatchObject({ code: 'invalid_server_response', status: 200 });
+  });
+  it.each([401, 403, 429, 500])(
+    'receipt-only history preserves HTTP %i instead of returning unchanged',
+    async (status) => {
+      const { client } = await unavailable(undefined, status);
+      await expect(
+        client.jobsIfChanged(
+          randomUUID(),
+          new AbortController().signal,
+          historyTag({ jobs: [] }),
+        ),
+      ).rejects.toMatchObject({ status });
+    },
+  );
+  it.each(['not-a-tag', '""', `W/"${'a'.repeat(64)}"`])(
+    'receipt-only history rejects malformed request tags before credential access: %s',
+    async (etag) => {
+      const credentials = vi.fn(async () => ({}));
+      const client = new ApiClient('http://127.0.0.1:1', credentials, {
+        allowLoopback: true,
+      });
+      await expect(
+        client.jobsIfChanged(randomUUID(), new AbortController().signal, etag),
+      ).rejects.toMatchObject({ code: 'invalid_cached_response' });
+      expect(credentials).not.toHaveBeenCalled();
+    },
+  );
+  it('receipt-only history cannot conditionally acknowledge a write', async () => {
+    const credentials = vi.fn(async () => ({}));
+    const client = new ApiClient('http://127.0.0.1:1', credentials, {
+      allowLoopback: true,
+    });
+    await expect(
+      client.request('/v1/documents', jobHistorySchema, {
+        method: 'POST',
+        etag: historyTag({ jobs: [] }),
+      }),
+    ).rejects.toMatchObject({ code: 'invalid_cached_response' });
+    expect(credentials).not.toHaveBeenCalled();
   });
   it.each([false, true])(
     'conditional history retains full cached results only after a matching authorized bodyless response with weak=%s',

@@ -134,10 +134,13 @@ const cacheVersionSchema = z.strictObject({
   version: z.number().int().positive(),
 });
 export type SyncCheckpoint = z.infer<typeof checkpointSchema>;
+export type RemoteArtifact =
+  | { id: string; value: unknown; receipt?: never }
+  | { id: 'job-history'; receipt: string; value?: never };
 export interface RemoteUpdate {
   id: string;
   document: Remote | null;
-  artifacts: { id: string; value: unknown }[];
+  artifacts: RemoteArtifact[];
 }
 const mutationFields = {
   id: resourceId,
@@ -208,6 +211,10 @@ export class LocalStore {
   private readonly key: Buffer;
   private draftLookup: StatementSync | null = null;
   private transactionDepth = 0;
+  private readonly historyReceipts = new Map<
+    string,
+    { etag: string; sources: { id: string; sha256: string }[] }
+  >();
   private readonly summaries = new Map<
     string,
     { profile: string; fingerprint: string; value: DraftSummary }
@@ -427,6 +434,7 @@ export class LocalStore {
       this.draftLookup = null;
       this.key.fill(0);
       this.summaries.clear();
+      this.historyReceipts.clear();
       this.search = null;
     }
   }
@@ -512,6 +520,7 @@ export class LocalStore {
       return result;
     } catch (error) {
       this.summaries.clear();
+      this.historyReceipts.clear();
       this.search = null;
       this.database.exec(
         nested ? `ROLLBACK TO ${savepoint}; RELEASE ${savepoint}` : 'ROLLBACK',
@@ -739,6 +748,134 @@ export class LocalStore {
       encrypted,
       aad('vault2', profile, name, documentId),
     ).jobs.map(toDesktopJob);
+  }
+  private historySources(
+    profile: string,
+    document: string,
+    names: string[],
+  ): { id: string; sha256: string }[] | null {
+    const rows = this.database
+      .prepare(
+        `SELECT id,document_id,payload FROM vault
+         WHERE profile=? AND id IN (SELECT value FROM json_each(?)) ORDER BY id`,
+      )
+      .all(profile, JSON.stringify(names));
+    if (
+      rows.length !== names.length ||
+      rows.some((row) => row.document_id !== document)
+    )
+      return null;
+    return rows.map((row) => ({
+      id: z.string().parse(row.id),
+      sha256: createHash('sha256')
+        .update(z.instanceof(Uint8Array).parse(row.payload))
+        .digest('hex'),
+    }));
+  }
+  getJobHistoryReceipt(profile: string, document: string): string | null {
+    const key = canonicalJson([profile, document]);
+    const receipt = this.historyReceipts.get(key);
+    if (!receipt) return null;
+    const row = this.row(profile, document);
+    const payload = row ? this.payload(row) : null;
+    const sources =
+      row &&
+      !row.deleted &&
+      !payload?.recovery &&
+      (payload?.server || payload?.conflict)
+        ? this.historySources(
+            profile,
+            document,
+            receipt.sources.map((source) => source.id),
+          )
+        : null;
+    if (!isDeepStrictEqual(sources, receipt.sources)) {
+      this.historyReceipts.delete(key);
+      return null;
+    }
+    this.historyReceipts.delete(key);
+    this.historyReceipts.set(key, receipt);
+    return receipt.etag;
+  }
+  private rememberJobHistory(
+    profile: string,
+    document: string,
+    artifacts: RemoteArtifact[],
+  ): void {
+    const values = new Map(
+      artifacts
+        .filter((artifact) => artifact.receipt === undefined)
+        .map((artifact) => [artifact.id, artifact.value]),
+    );
+    if (!values.has('job-history')) return;
+    const key = canonicalJson([profile, document]);
+    this.historyReceipts.delete(key);
+    const parsed = jobHistorySchema.safeParse(values.get('job-history'));
+    if (
+      !parsed.success ||
+      new Set(parsed.data.jobs.map((job) => job.id)).size !==
+        parsed.data.jobs.length ||
+      parsed.data.jobs.some(
+        (job) =>
+          job.document_id !== document ||
+          !isDeepStrictEqual(values.get(`job:${job.id}`), job),
+      )
+    )
+      return;
+    const sources = this.historySources(profile, document, [
+      `artifact:${document}:job-history`,
+      ...parsed.data.jobs.map((job) => `artifact:${document}:job:${job.id}`),
+    ]);
+    if (!sources) return;
+    if (this.historyReceipts.size >= 256) {
+      const oldest = this.historyReceipts.keys().next().value;
+      if (oldest !== undefined) this.historyReceipts.delete(oldest);
+    }
+    this.historyReceipts.set(key, {
+      etag: `"${createHash('sha256').update(canonicalJson(parsed.data)).digest('hex')}"`,
+      sources,
+    });
+  }
+  private acceptArtifact(
+    profile: string,
+    document: string,
+    artifact: RemoteArtifact,
+  ): void {
+    if (artifact.receipt === undefined) {
+      this.writeArtifact(profile, document, artifact.id, artifact.value, true);
+      return;
+    }
+    if (
+      artifact.id !== 'job-history' ||
+      typeof artifact.receipt !== 'string' ||
+      !/^"[a-f0-9]{64}"$/u.test(artifact.receipt) ||
+      artifact.value !== undefined
+    )
+      throw new LocalError(
+        'invalid_server_response',
+        'The synchronized job-history receipt is invalid.',
+      );
+    if (this.getJobHistoryReceipt(profile, document) === artifact.receipt)
+      return;
+    const history = this.getArtifact(
+      profile,
+      document,
+      'job-history',
+      jobHistorySchema,
+    );
+    if (
+      !history ||
+      history.jobs.some((job) => job.document_id !== document) ||
+      `"${createHash('sha256').update(canonicalJson(history)).digest('hex')}"` !==
+        artifact.receipt
+    )
+      throw new LocalError(
+        'local_sync_changed',
+        'The saved job history changed during synchronization. Retry this pass.',
+      );
+    for (const job of history.jobs)
+      this.writeArtifact(profile, document, `job:${job.id}`, job, true);
+    this.writeArtifact(profile, document, 'job-history', history, true);
   }
   deleteValue(profile: string, id: string): void {
     this.database
@@ -2062,7 +2199,7 @@ export class LocalStore {
     profile: string,
     expected: NonNullable<SyncCheckpoint['bootstrap']>,
     input: z.infer<typeof syncSnapshotSchema>,
-    artifacts: { document_id: string; id: string; value: unknown }[] = [],
+    artifacts: (RemoteArtifact & { document_id: string })[] = [],
   ): void {
     const page = syncSnapshotSchema.parse(input);
     this.transaction(() => {
@@ -2102,14 +2239,14 @@ export class LocalStore {
             'invalid_server_response',
             'A snapshot artifact belongs to another page.',
           );
-        this.writeArtifact(
-          profile,
-          artifact.document_id,
-          artifact.id,
-          artifact.value,
-          true,
-        );
+        this.acceptArtifact(profile, artifact.document_id, artifact);
       }
+      for (const document of page.documents)
+        this.rememberJobHistory(
+          profile,
+          document.id,
+          artifacts.filter((artifact) => artifact.document_id === document.id),
+        );
       if (page.has_more)
         this.putValue(profile, 'sync:checkpoint', {
           cursor: null,
@@ -2155,13 +2292,8 @@ export class LocalStore {
             );
           this.applyRemote(profile, update.document);
           for (const artifact of update.artifacts)
-            this.writeArtifact(
-              profile,
-              update.id,
-              artifact.id,
-              artifact.value,
-              true,
-            );
+            this.acceptArtifact(profile, update.id, artifact);
+          this.rememberJobHistory(profile, update.id, update.artifacts);
         }
       }
       if (updates.length > 0 || cursor !== expected)
@@ -2245,6 +2377,7 @@ export class LocalStore {
   }
   purgeProfile(profile: string): void {
     this.invalidate(profile);
+    this.historyReceipts.clear();
     this.transaction(() => {
       this.queueRecordingDeletions(profile);
       this.database.prepare('DELETE FROM drafts WHERE profile=?').run(profile);

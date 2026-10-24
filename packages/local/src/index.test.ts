@@ -2370,6 +2370,360 @@ describe('encrypted local drafts and durable outbox', () => {
       sql.close();
     }
   }
+  function receiptStore() {
+    const saved = savedJobStore();
+    const { store, source, job } = saved;
+    const expected = store.beginSnapshot(profile).bootstrap!;
+    store.acceptSnapshot(
+      profile,
+      expected,
+      {
+        cursor: 'receipt_cursor_1',
+        documents: [remote(source)],
+        has_more: false,
+        next_after: null,
+      },
+      [
+        { document_id: source.id, id: `job:${job.id}`, value: job },
+        {
+          document_id: source.id,
+          id: 'job-history',
+          value: { jobs: [job] },
+        },
+      ],
+    );
+    const receipt = store.getJobHistoryReceipt(profile, source.id);
+    if (!receipt) throw new Error('The validated history receipt is missing.');
+    return { ...saved, receipt };
+  }
+  function receiptCommit(
+    saved: ReturnType<typeof receiptStore>,
+    mode: 'snapshot' | 'changes',
+  ) {
+    const { store, source, receipt } = saved;
+    const document = remote(source, 2, { title: 'Receipt metadata edit.' });
+    if (mode === 'snapshot') {
+      const expected = store.beginSnapshot(profile).bootstrap!;
+      return () =>
+        store.acceptSnapshot(
+          profile,
+          expected,
+          {
+            cursor: 'receipt_cursor_2',
+            documents: [document],
+            has_more: false,
+            next_after: null,
+          },
+          [{ document_id: source.id, id: 'job-history', receipt }],
+        );
+    }
+    return () =>
+      store.acceptChanges(profile, 'receipt_cursor_1', 'receipt_cursor_2', [
+        {
+          id: source.id,
+          document,
+          artifacts: [{ id: 'job-history', receipt }],
+        },
+      ]);
+  }
+  it.each(['snapshot', 'changes'] as const)(
+    'warm history receipts avoid full parsing and artifact writes during %s',
+    (mode) => {
+      const saved = receiptStore();
+      const commit = receiptCommit(saved, mode);
+      const probe = watchArtifactWrites();
+      const parse = vi.spyOn(jobHistorySchema, 'parse');
+      const safeParse = vi.spyOn(jobHistorySchema, 'safeParse');
+      try {
+        commit();
+        expect(parse).not.toHaveBeenCalled();
+        expect(safeParse).not.toHaveBeenCalled();
+        expect(probe.writes(saved.source.id)).toEqual([]);
+        expect(saved.store.syncCheckpoint(profile).cursor).toBe(
+          'receipt_cursor_2',
+        );
+      } finally {
+        parse.mockRestore();
+        safeParse.mockRestore();
+        probe.sql.close();
+      }
+    },
+  );
+  it('history receipts require a complete validated batch and remain scoped', () => {
+    const generic = savedJobStore();
+    expect(
+      generic.store.getJobHistoryReceipt(profile, generic.source.id),
+    ).toBeNull();
+    const saved = receiptStore();
+    expect(
+      saved.store.getJobHistoryReceipt('other', saved.source.id),
+    ).toBeNull();
+    expect(saved.store.getJobHistoryReceipt(profile, randomUUID())).toBeNull();
+    expect(saved.receipt).toMatch(/^"[a-f0-9]{64}"$/u);
+  });
+  it.each([
+    'missing result',
+    'foreign result',
+    'duplicate result',
+    'invalid history',
+  ])('history receipts are not minted from a batch with %s', (kind) => {
+    const { store, source, job } = savedJobStore();
+    const value =
+      kind === 'foreign result' ? { ...job, document_id: randomUUID() } : job;
+    const expected = store.beginSnapshot(profile).bootstrap!;
+    store.acceptSnapshot(
+      profile,
+      expected,
+      {
+        cursor: 'receipt_cursor_1',
+        documents: [remote(source)],
+        has_more: false,
+        next_after: null,
+      },
+      [
+        ...(kind === 'missing result'
+          ? []
+          : [{ document_id: source.id, id: `job:${job.id}`, value }]),
+        {
+          document_id: source.id,
+          id: 'job-history',
+          value: {
+            jobs:
+              kind === 'invalid history'
+                ? [{ invalid: true }]
+                : kind === 'duplicate result'
+                  ? [value, value]
+                  : [value],
+          },
+        },
+      ],
+    );
+    expect(store.getJobHistoryReceipt(profile, source.id)).toBeNull();
+  });
+  it('complete change batches can recreate a cleared history receipt', () => {
+    const saved = receiptStore();
+    expect(() =>
+      saved.store.atomic(() => {
+        throw new Error('Clear the process-local receipt.');
+      }),
+    ).toThrow('Clear the process-local receipt.');
+    saved.store.acceptChanges(profile, 'receipt_cursor_1', 'receipt_cursor_2', [
+      {
+        id: saved.source.id,
+        document: remote(saved.source, 2),
+        artifacts: [
+          { id: `job:${saved.job.id}`, value: saved.job },
+          { id: 'job-history', value: { jobs: [saved.job] } },
+        ],
+      },
+    ]);
+    expect(saved.store.getJobHistoryReceipt(profile, saved.source.id)).toBe(
+      saved.receipt,
+    );
+  });
+  it('history receipt LRU retains at most 256 documents and promotes matching reads', () => {
+    const saved = receiptStore();
+    const documents: string[] = [];
+    saved.store.atomic(() => {
+      const add = (count: number, expected: string, cursor: string) => {
+        const updates = Array.from({ length: count }, () => {
+          const source = saved.store.create('fixtures', fields('Receipt LRU.'));
+          const document = remote(source);
+          documents.push(source.id);
+          return {
+            id: source.id,
+            document,
+            artifacts: [{ id: 'job-history', value: { jobs: [] } }],
+          };
+        });
+        saved.store.acceptChanges(profile, expected, cursor, updates);
+      };
+      add(255, 'receipt_cursor_1', 'receipt_cursor_2');
+      expect(saved.store.getJobHistoryReceipt(profile, saved.source.id)).toBe(
+        saved.receipt,
+      );
+      add(1, 'receipt_cursor_2', 'receipt_cursor_3');
+    });
+    expect(saved.store.getJobHistoryReceipt(profile, saved.source.id)).toBe(
+      saved.receipt,
+    );
+    expect(saved.store.getJobHistoryReceipt(profile, documents[0]!)).toBeNull();
+    expect(
+      saved.store.getJobHistoryReceipt(profile, documents[1]!),
+    ).not.toBeNull();
+    expect(
+      saved.store.getJobHistoryReceipt(profile, documents[255]!),
+    ).not.toBeNull();
+  });
+  it.each(['history', 'result'] as const)(
+    'history receipts reject a changed %s ownership header',
+    (target) => {
+      const saved = receiptStore();
+      const other = saved.store.create(
+        'fixtures',
+        fields('Other receipt parent.'),
+      );
+      saved.store.applyRemote(profile, remote(other));
+      const sql = new DatabaseSync(path);
+      try {
+        sql
+          .prepare('UPDATE vault SET document_id=? WHERE profile=? AND id=?')
+          .run(
+            other.id,
+            profile,
+            `artifact:${saved.source.id}:${target === 'history' ? 'job-history' : `job:${saved.job.id}`}`,
+          );
+        expect(
+          saved.store.getJobHistoryReceipt(profile, saved.source.id),
+        ).toBeNull();
+      } finally {
+        sql.close();
+      }
+    },
+  );
+  it.each(['null receipt', 'non-history receipt'])(
+    'history receipt commits reject a runtime %s atomically',
+    (kind) => {
+      const saved = receiptStore();
+      const before = saved.store.syncCheckpoint(profile);
+      const artifact = JSON.parse(
+        JSON.stringify({
+          id: kind === 'null receipt' ? 'job-history' : `job:${saved.job.id}`,
+          receipt: kind === 'null receipt' ? null : saved.receipt,
+        }),
+      );
+      expect(() =>
+        saved.store.acceptChanges(
+          profile,
+          'receipt_cursor_1',
+          'receipt_cursor_2',
+          [
+            {
+              id: saved.source.id,
+              document: remote(saved.source, 2),
+              artifacts: [artifact],
+            },
+          ],
+        ),
+      ).toThrow(expect.objectContaining({ code: 'invalid_server_response' }));
+      expect(saved.store.syncCheckpoint(profile)).toEqual(before);
+    },
+  );
+  it('history receipt restart fallback validates full bodies without rewriting artifacts', () => {
+    const saved = receiptStore();
+    close(saved.store);
+    saved.store = open();
+    expect(
+      saved.store.getJobHistoryReceipt(profile, saved.source.id),
+    ).toBeNull();
+    const probe = watchArtifactWrites();
+    const parse = vi.spyOn(jobHistorySchema, 'parse');
+    try {
+      receiptCommit(saved, 'changes')();
+      expect(parse).toHaveBeenCalled();
+      expect(probe.writes(saved.source.id)).toEqual([]);
+      expect(
+        saved.store.getArtifact(
+          profile,
+          saved.source.id,
+          `job:${saved.job.id}`,
+          jobSchema,
+        ),
+      ).toEqual(saved.job);
+    } finally {
+      parse.mockRestore();
+      probe.sql.close();
+    }
+  });
+  it('history receipt fallback restores a missing individual result before advancing', () => {
+    const saved = receiptStore();
+    saved.store.deleteArtifact(profile, saved.source.id, `job:${saved.job.id}`);
+    expect(
+      saved.store.getJobHistoryReceipt(profile, saved.source.id),
+    ).toBeNull();
+    receiptCommit(saved, 'changes')();
+    expect(
+      saved.store.getArtifact(
+        profile,
+        saved.source.id,
+        `job:${saved.job.id}`,
+        jobSchema,
+      ),
+    ).toEqual(saved.job);
+    expect(saved.store.syncCheckpoint(profile).cursor).toBe('receipt_cursor_2');
+  });
+  it.each(['snapshot', 'changes'] as const)(
+    'history receipts reject a concurrently replaced full representation during %s',
+    (mode) => {
+      const saved = receiptStore();
+      const commit = receiptCommit(saved, mode);
+      const before = saved.store.syncCheckpoint(profile);
+      saved.store.putArtifact(profile, saved.source.id, 'job-history', {
+        jobs: [],
+      });
+      expect(commit).toThrow(
+        expect.objectContaining({ code: 'local_sync_changed' }),
+      );
+      expect(saved.store.syncCheckpoint(profile)).toEqual(before);
+      expect(saved.store.get(profile, saved.source.id).title).not.toBe(
+        'Receipt metadata edit.',
+      );
+    },
+  );
+  it.each(
+    (['snapshot', 'changes'] as const).flatMap((mode) =>
+      (['history', 'result'] as const).map((target) => ({ mode, target })),
+    ),
+  )(
+    'history receipts cannot hide late corrupt $target ciphertext during $mode',
+    ({ mode, target }) => {
+      const saved = receiptStore();
+      const commit = receiptCommit(saved, mode);
+      const before = saved.store.syncCheckpoint(profile);
+      const id = `artifact:${saved.source.id}:${target === 'history' ? 'job-history' : `job:${saved.job.id}`}`;
+      const sql = new DatabaseSync(path);
+      try {
+        sql
+          .prepare(
+            'UPDATE vault SET payload=randomblob(length(payload)) WHERE profile=? AND id=?',
+          )
+          .run(profile, id);
+        const damaged = sql
+          .prepare('SELECT payload FROM vault WHERE profile=? AND id=?')
+          .get(profile, id);
+        expect(commit).toThrow(
+          expect.objectContaining({ code: 'local_data_corrupt' }),
+        );
+        expect(saved.store.syncCheckpoint(profile)).toEqual(before);
+        expect(
+          sql
+            .prepare('SELECT payload FROM vault WHERE profile=? AND id=?')
+            .get(profile, id),
+        ).toEqual(damaged);
+        expect(saved.store.get(profile, saved.source.id).title).not.toBe(
+          'Receipt metadata edit.',
+        );
+      } finally {
+        sql.close();
+      }
+    },
+  );
+  it('history receipts are forgotten after rollback and profile purge', () => {
+    const saved = receiptStore();
+    expect(() =>
+      saved.store.atomic(() => {
+        throw new Error('Synthetic rollback.');
+      }),
+    ).toThrow('Synthetic rollback.');
+    expect(
+      saved.store.getJobHistoryReceipt(profile, saved.source.id),
+    ).toBeNull();
+    const fresh = receiptStore();
+    fresh.store.purgeProfile(profile);
+    expect(
+      fresh.store.getJobHistoryReceipt(profile, fresh.source.id),
+    ).toBeNull();
+  });
   function replaceJobFixture(document: string, id: string, value: unknown) {
     const name = `artifact:${document}:${id}`;
     const nonce = randomBytes(12);

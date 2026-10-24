@@ -17,7 +17,11 @@ import { createServer } from '@windows-ai-notes/api/server';
 import { Database } from '@windows-ai-notes/db';
 import { runOnce } from '@windows-ai-notes/worker';
 import { LocalStore } from '@windows-ai-notes/local';
-import { jobSchema } from '@windows-ai-notes/contracts/server';
+import {
+  jobSchema,
+  jobHistorySchema,
+  resultSchema,
+} from '@windows-ai-notes/contracts/server';
 import {
   richTextFromPlainText,
   richTextToPlainText,
@@ -220,6 +224,168 @@ describe.skipIf(!databaseUrl)(
         ),
       ).toEqual(cached!.jobs[0]);
     });
+    it('warm 20-result revalidation skips full-history reads and parsing without changing encrypted results', async () => {
+      const remote = await seed();
+      const job = await enqueueSummary(remote.id);
+      await finishSummary();
+      const completed = await db.job(actor.user_id, job.id);
+      if (completed.result?.kind !== 'summary')
+        throw new Error('The synthetic warm-history result is incomplete.');
+      const fact = {
+        text: 'Synthetic substantial saved-history fact. '.repeat(75),
+        citations: completed.result.summary.overview.citations,
+      };
+      const result = resultSchema.parse({
+        ...completed.result,
+        summary: {
+          overview: fact,
+          topics: Array.from({ length: 6 }, () => fact),
+          decisions: Array.from({ length: 6 }, () => fact),
+          action_items: Array.from({ length: 6 }, () => ({
+            ...fact,
+            owner: null,
+            due_date: null,
+          })),
+          open_questions: Array.from({ length: 6 }, () => fact),
+        },
+      });
+      await db.pool.query('UPDATE jobs SET result=$2 WHERE id=$1', [
+        job.id,
+        JSON.stringify(result),
+      ]);
+      await db.pool.query(
+        `INSERT INTO jobs(id,document_id,workspace_id,owner_id,kind,idempotency_key,
+          request_hash,input,state,attempt,result,created_at)
+         SELECT gen_random_uuid(),j.document_id,j.workspace_id,j.owner_id,j.kind,
+          gen_random_uuid()::text,j.request_hash,j.input,j.state,j.attempt,j.result,
+          j.created_at-(cohort.ordinal*interval '1 millisecond')
+         FROM jobs j CROSS JOIN generate_series(1,19) cohort(ordinal) WHERE j.id=$1`,
+        [job.id],
+      );
+      await db.edit(actor.user_id, remote.id, 1, {
+        notes: 'A newer human note before warm revalidation.',
+      });
+      await engine.synchronize();
+      const cached = local.getArtifact(
+        engine.profile,
+        remote.id,
+        'job-history',
+        jobHistorySchema,
+      )!;
+      expect(cached.jobs).toHaveLength(20);
+      expect(Buffer.byteLength(JSON.stringify(cached))).toBeGreaterThan(
+        1_000_000,
+      );
+      const encrypted = encryptedJobs(remote.id);
+      expect(encrypted).toHaveLength(22);
+      const read = vi.spyOn(local, 'getArtifact');
+      const parse = vi.spyOn(jobHistorySchema, 'parse');
+      const safeParse = vi.spyOn(jobHistorySchema, 'safeParse');
+      const conditional = vi.spyOn(api, 'jobsIfChanged');
+      for (let index = 0; index < 3; index++) {
+        await db.edit(actor.user_id, remote.id, index + 2, {
+          title: `Warm metadata edit ${index}.`,
+        });
+        await engine.synchronize();
+      }
+      expect(conditional).toHaveBeenCalledTimes(3);
+      for (const response of conditional.mock.results)
+        await expect(response.value).resolves.toBeNull();
+      expect(
+        read.mock.calls.filter((args) => args[2].startsWith('job')),
+      ).toEqual([]);
+      expect(parse).not.toHaveBeenCalled();
+      expect(safeParse).not.toHaveBeenCalled();
+      expect(encryptedJobs(remote.id)).toEqual(encrypted);
+      read.mockRestore();
+      parse.mockRestore();
+      safeParse.mockRestore();
+      expect(
+        local.getArtifact(engine.profile, remote.id, `job:${job.id}`, jobSchema)
+          ?.result,
+      ).toEqual(result);
+      expect(
+        local.getArtifact(
+          engine.profile,
+          remote.id,
+          'job-history',
+          jobHistorySchema,
+        ),
+      ).toEqual(cached);
+    });
+    it.each(['corrupt result', 'changed history', 'identical re-encryption'])(
+      'checks local ciphertext again after a real 304 with late %s',
+      async (kind) => {
+        const remote = await seed();
+        const job = await enqueueSummary(remote.id);
+        await finishSummary();
+        await db.edit(actor.user_id, remote.id, 1, {
+          notes: 'A newer human note before the receipt race.',
+        });
+        await engine.synchronize();
+        const cached = local.getArtifact(
+          engine.profile,
+          remote.id,
+          'job-history',
+          jobHistorySchema,
+        )!;
+        const before = local.syncCheckpoint(engine.profile);
+        const fetch = globalThis.fetch;
+        let delivered = false;
+        let changed: ReturnType<typeof encryptedJobs> | undefined;
+        vi.spyOn(globalThis, 'fetch').mockImplementation(
+          async (input, init) => {
+            const response = await fetch(input, init);
+            if (String(input).includes(`/documents/${remote.id}/jobs?`)) {
+              expect(response.status).toBe(304);
+              delivered = true;
+              if (kind === 'corrupt result') {
+                const sql = new DatabaseSync(join(directory, 'notes.sqlite'));
+                try {
+                  sql
+                    .prepare(
+                      'UPDATE vault SET payload=randomblob(length(payload)) WHERE profile=? AND id=?',
+                    )
+                    .run(engine.profile, `artifact:${remote.id}:job:${job.id}`);
+                } finally {
+                  sql.close();
+                }
+              } else
+                local.putArtifact(
+                  engine.profile,
+                  remote.id,
+                  'job-history',
+                  kind === 'changed history' ? { jobs: [] } : cached,
+                );
+              changed = encryptedJobs(remote.id);
+            }
+            return response;
+          },
+        );
+        await db.edit(actor.user_id, remote.id, 2, {
+          title: 'The in-flight remote metadata edit.',
+        });
+        if (kind === 'identical re-encryption') {
+          await engine.synchronize();
+          expect(local.get(engine.profile, remote.id).title).toBe(
+            'The in-flight remote metadata edit.',
+          );
+          expect(local.syncCheckpoint(engine.profile)).not.toEqual(before);
+        } else {
+          await expect(engine.synchronize()).rejects.toMatchObject({
+            code:
+              kind === 'changed history'
+                ? 'local_sync_changed'
+                : 'local_data_corrupt',
+          });
+          expect(local.syncCheckpoint(engine.profile)).toEqual(before);
+          expect(local.get(engine.profile, remote.id).title).toBe(remote.title);
+        }
+        expect(delivered).toBe(true);
+        expect(changed).toBeDefined();
+        expect(encryptedJobs(remote.id)).toEqual(changed);
+      },
+    );
     it('unchanged full200 history avoids encrypted artifact writes when an older server ignores revalidation', async () => {
       const remote = await seed();
       await enqueueSummary(remote.id);

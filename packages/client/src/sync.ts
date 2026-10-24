@@ -129,26 +129,45 @@ export class SyncEngine {
       });
       if (this.transcriptReceived) delivery = { page: transcript, started };
     }
-    const cached = this.local.getArtifact(
-      this.profile,
-      document.id,
-      'job-history',
-      jobHistorySchema,
-    );
-    const history = await this.api.jobs(
-      document.id,
-      this.controller.signal,
-      cached ?? undefined,
-    );
-    for (const job of history.jobs) {
-      if (job.document_id !== document.id)
+    const receipt = this.local.getJobHistoryReceipt(this.profile, document.id);
+    let history: z.infer<typeof jobHistorySchema> | null;
+    if (receipt) {
+      history = await this.api.jobsIfChanged(
+        document.id,
+        this.controller.signal,
+        receipt,
+      );
+    } else {
+      const cached = this.local.getArtifact(
+        this.profile,
+        document.id,
+        'job-history',
+        jobHistorySchema,
+      );
+      history = await this.api.jobs(
+        document.id,
+        this.controller.signal,
+        cached ?? undefined,
+      );
+    }
+    if (history) {
+      for (const job of history.jobs) {
+        if (job.document_id !== document.id)
+          throw new ClientError(
+            'invalid_server_response',
+            'The service returned another document job.',
+          );
+        artifacts.push({ id: `job:${job.id}`, value: job });
+      }
+      artifacts.push({ id: 'job-history', value: history });
+    } else {
+      if (!receipt)
         throw new ClientError(
           'invalid_server_response',
-          'The service returned another document job.',
+          'The service did not return the saved job history.',
         );
-      artifacts.push({ id: `job:${job.id}`, value: job });
+      artifacts.push({ id: 'job-history', receipt });
     }
-    artifacts.push({ id: 'job-history', value: history });
     if (delivery) deliveries.push(delivery);
     return artifacts;
   }
@@ -213,11 +232,9 @@ export class SyncEngine {
               checkpoint.bootstrap,
               signal,
             );
-            const artifacts: {
+            const artifacts: (RemoteUpdate['artifacts'][number] & {
               document_id: string;
-              id: string;
-              value: unknown;
-            }[] = [];
+            })[] = [];
             for (const document of page.documents) {
               this.checkDocument(document);
               const values = await this.artifacts(document, deliveries);

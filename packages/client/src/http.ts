@@ -196,6 +196,18 @@ async function checkResponse(response: Response) {
     );
   }
 }
+interface RequestOptions<T> {
+  method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+  body?: unknown;
+  key?: string;
+  signal?: AbortSignal;
+  empty?: boolean;
+  cached?: T;
+  etag?: never;
+}
+type ConditionalRequestOptions = Omit<RequestOptions<never>, 'etag'> & {
+  etag: string;
+};
 export class ApiClient {
   readonly base: string;
   constructor(
@@ -208,15 +220,18 @@ export class ApiClient {
   async request<T>(
     path: string,
     schema: z.ZodType<T>,
-    options: {
-      method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
-      body?: unknown;
-      key?: string;
-      signal?: AbortSignal;
-      empty?: boolean;
-      cached?: T;
-    } = {},
-  ): Promise<T> {
+    options: ConditionalRequestOptions,
+  ): Promise<T | null>;
+  async request<T>(
+    path: string,
+    schema: z.ZodType<T>,
+    options?: RequestOptions<T>,
+  ): Promise<T>;
+  async request<T>(
+    path: string,
+    schema: z.ZodType<T>,
+    options: RequestOptions<T> | ConditionalRequestOptions = {},
+  ): Promise<T | null> {
     const destination = new URL(path, this.base);
     if (
       !path.startsWith('/v1/') ||
@@ -239,8 +254,21 @@ export class ApiClient {
         true,
       );
     if (signal.aborted) throw cancelled();
-    let cached: { value: T; etag: string } | null = null;
-    if (options.cached !== undefined) {
+    let cached: { value: T | null; etag: string } | null = null;
+    if (options.etag !== undefined) {
+      if (
+        !/^"[a-f0-9]{64}"$/u.test(options.etag) ||
+        options.cached !== undefined ||
+        (options.method ?? 'GET') !== 'GET' ||
+        options.body !== undefined ||
+        options.empty
+      )
+        throw new ClientError(
+          'invalid_cached_response',
+          'Use a valid saved-content receipt only for a JSON read request.',
+        );
+      cached = { value: null, etag: options.etag };
+    } else if (options.cached !== undefined) {
       const parsed = schema.safeParse(options.cached);
       if (
         !parsed.success ||
@@ -653,6 +681,13 @@ export class ApiClient {
       `/v1/documents/${document}/jobs?limit=20`,
       jobHistorySchema,
       { signal, ...(cached === undefined ? {} : { cached }) },
+    );
+  }
+  jobsIfChanged(id: string, signal: AbortSignal, etag: string) {
+    return this.request(
+      `/v1/documents/${resourceId.parse(id)}/jobs?limit=20`,
+      jobHistorySchema,
+      { signal, etag },
     );
   }
   mutation(mutation: Mutation, signal: AbortSignal) {

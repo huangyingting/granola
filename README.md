@@ -363,8 +363,18 @@ repeatable-read PostgreSQL view; unchanged proofs avoid transferring full result
 to Node, parsing them again or rebuilding the canonical response. Cold reads,
 changed proofs, process restarts and evictions strictly validate the full rows
 and preserve the same complete-representation SHA256 tags. This does not remove
-PostgreSQL reads/JSON hashing, shrink changed responses or avoid Main's
-full-cache decryption. Synchronization
+PostgreSQL reads/JSON hashing or shrink changed responses. Main also keeps at most
+256 process-local, body-free history receipts, minted only after a complete,
+validated atomic artifact batch. Each binds the full content ETag to the exact
+ciphertext and document context of both the history and every current individual
+result. Warm unchanged reads verify those records in one SQLite read view before
+requesting revalidation, then verify them again inside the document/cursor commit;
+matching proofs avoid decrypting or parsing full saved summaries. Cold starts,
+evictions and changed proofs retain strict full-body validation. A mid-flight
+history change cannot advance the cursor under an old receipt, and damaged
+individual result ciphertext still fails rather than being silently replaced.
+These RAM-only receipts change no encrypted format or storage schema and do not
+eliminate ciphertext reads/hashing. Synchronization
 compares cached artifacts inside the same SQLite transaction and skips encryption
 and writes for identical values, including when an older server returns `200`.
 Changed and missing artifacts are still saved atomically with the document and
