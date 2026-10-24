@@ -1,7 +1,9 @@
 # Windows AI Notes
 
 An independent, self-hostable Windows meeting-notes project. The implementation
-includes a **secure offline-first desktop editor with account synchronization, P0 audio/recovery probe and initial server-side AI slice**, following the
+includes a **secure offline-first desktop editor with account synchronization,
+encrypted audio capture/recovery, and Azure-backed transcription, cited summaries
+and current-meeting chat**, following the
 [implementation plan](WINDOWS-AI-NOTES-IMPLEMENTATION-PLAN.md). It does not use
 Granola code, branding, credentials, or private services.
 
@@ -9,8 +11,9 @@ Granola code, branding, credentials, or private services.
 The server can transcribe short WAV clips and separately confirmed uploaded
 recordings with Azure Speech, and produce cited meeting summaries with Azure OpenAI.
 The Electron editor supports browser login, isolated cloud workspaces, background
-synchronization and explicit conflict recovery. Live transcription and interactive
-AI workflows remain in progress; chunk-boundary recognition quality is not certified.
+synchronization and explicit conflict recovery. Summary review, cited chat and
+durable streaming/replay are connected. Live captions remain bounded preview
+sessions, not certified continuous STT; chunk-boundary recognition quality is not certified.
 Real Windows audio behavior still requires the hardware checks below.
 
 ## Implemented
@@ -197,10 +200,10 @@ The main-process client core also implements bounded HTTPS transport and durable
 synchronization: frozen requests replay before pulls, snapshot pagination survives
 restarts, missing-document reconciliation preserves unsubmitted edits, and
 workspace revocation purges only the affected cache. Cursors, changed documents
-and encrypted transcript/job artifacts commit together. The v1/v2/v3/v4/v5 local vault is
-migrated transactionally to v6 without resetting keys, drafts, recording intents or retries.
-Legacy full-transcript caches remain readable offline. Older previews reject this
-version rather than misinterpreting paged evidence or recording jobs. Real
+and encrypted transcript/job artifacts commit together. Existing v1-v7 local vaults
+migrate transactionally to v8 without resetting keys, drafts, recording intents or retries.
+Legacy full-transcript caches remain readable offline. Previews that cannot read
+this storage version fail closed rather than misinterpreting stored data. Real
 HTTP/PostgreSQL/SQLite tests cover lost responses, two-device conflicts, expiry,
 deletion and revocation.
 
@@ -214,7 +217,7 @@ in text exports. Desktop note exports still export written notes only.
 
 Stop older API/worker instances before running `pnpm db:migrate`, then start the
 updated binaries together. Migration 006 adds account-wide AI allowances,
-reservations and settled receipts; the encrypted desktop schema remains v6.
+reservations and settled receipts, independently of desktop storage migrations.
 Migration 005 adds recording jobs, temporary per-chunk
 processing, candidate versions and paged capture timelines. PostgreSQL migration 004
 preserves existing segment IDs, order and revisions while normalizing legacy JSON
@@ -483,9 +486,11 @@ until cleanup finishes, and normal close awaits update cleanup after the existin
 editor-flush and recording-stop handshake. Navigating to this page also flushes
 edits and remains available when local note storage cannot be unlocked.
 Rejected and incomplete cached downloads are reported without deleting them.
-**Installation remains unavailable: downloading does not execute an installer
+**Public installation/restart controls remain unavailable: downloading does not execute an installer
 or restart the app. No production update channel has been activated;
-safe installation/restart and failed-upgrade recovery remain unfinished.**
+the private Main activation path is implemented, but genuine first-party signed
+positive acceptance and an authorized failed-update recovery policy and
+implementation remain release gates.**
 
 The native installation preflight separately requires the existing current-user,
 64-bit NSIS registry identity, exact location/version/uninstall commands, bundled
@@ -1053,8 +1058,8 @@ therefore pause when their account allowance cannot reserve another stage.
 Original cited segments remain inspectable after a newer canonical transcript
 replaces the selected revision. These structural checks do not prove semantic
 support, complete decision/action recall or language quality; approved
-real-meeting evaluation remains a release gate. Desktop chat workflows are described
-below; desktop chat streaming/replay remains unfinished.
+real-meeting evaluation remains a release gate. Implemented desktop chat workflows,
+including streaming and durable replay, are described below.
 
 ### Current-meeting questions and durable chat
 
