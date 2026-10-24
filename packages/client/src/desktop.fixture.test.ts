@@ -14,6 +14,7 @@ import {
 import {
   cachedTranscriptSchema,
   jobSchema,
+  jobHistorySchema,
   transcriptPageSchema,
   TRANSCRIPT_PAGE_TEXT_BYTES,
   type TranscriptPage,
@@ -333,7 +334,7 @@ describe('Windows desktop synthetic service contract', () => {
       full,
     );
     const encrypted = encryptedJobs(document.id);
-    expect(encrypted).toHaveLength(21);
+    expect(encrypted).toHaveLength(22);
     fixture.change(document.id, 'A later synthetic human edit.');
     await controller.synchronize();
     expect(fixture.state.job_history_responses.not_modified).toBeGreaterThan(0);
@@ -470,10 +471,45 @@ describe('Windows desktop synthetic service contract', () => {
       recording,
     ]);
   });
+  it('cold saved job status avoids full-history parsing without rewriting encrypted results', async () => {
+    const { document } = await savedSummaries(2);
+    const encrypted = encryptedJobs(document.id);
+    controller.dispose();
+    local.close();
+    local = new LocalStore(join(directory, 'notes.sqlite'), key);
+    const version = local.cacheVersion();
+    const parse = vi.spyOn(jobHistorySchema, 'parse');
+    controller = new WorkspaceController(
+      local,
+      fixture.issuer.browser,
+      () => {},
+      { allowLoopback: true },
+    );
+    expect(controller.snapshot().jobs).toHaveLength(2);
+    expect(parse).not.toHaveBeenCalled();
+    expect(encryptedJobs(document.id)).toEqual(encrypted);
+    expect(local.cacheVersion()).toBe(version);
+  });
+  it('selected note writes do not require parsing unchanged saved full job bodies', async () => {
+    const { document } = await savedSummaries(2);
+    const before = controller.snapshot();
+    const encrypted = encryptedJobs(document.id);
+    const parse = vi.spyOn(jobHistorySchema, 'parse');
+    const draft = local.get(controller.profile, document.id);
+    local.save(
+      controller.profile,
+      document.id,
+      draft.local_revision,
+      fields('Synthetic selected edit with unchanged saved output.'),
+    );
+    expect(controller.snapshot().jobs).toEqual(before.jobs);
+    expect(parse).not.toHaveBeenCalled();
+    expect(encryptedJobs(document.id)).toEqual(encrypted);
+  });
   it('warm job history reuses metadata without sharing mutable snapshot objects', async () => {
     const { jobs } = await savedSummaries(2);
     local.putValue('root', 'warm-history-fixture', true);
-    const read = vi.spyOn(local, 'getArtifact');
+    const read = vi.spyOn(local, 'getJobMetadata');
     const first = controller.snapshot();
     const result = first.jobs[0]!.result;
     if (result?.kind !== 'summary')
@@ -490,15 +526,13 @@ describe('Windows desktop synthetic service contract', () => {
         result: { usage: { input_tokens: 20 } },
       });
     }
-    expect(
-      read.mock.calls.filter((args) => args[2] === 'job-history'),
-    ).toHaveLength(1);
+    expect(read).toHaveBeenCalledTimes(1);
   });
   it('idle synchronization keeps warm summary metadata without rewriting storage or skipping fresh access checks', async () => {
     await savedSummaries();
     const jobs = controller.snapshot().jobs;
     const version = local.cacheVersion();
-    const read = vi.spyOn(local, 'getArtifact');
+    const read = vi.spyOn(local, 'getJobMetadata');
     const identity = vi.spyOn(ApiClient.prototype, 'identity');
     const memberships = vi.spyOn(ApiClient.prototype, 'workspaces');
     const changes = vi.spyOn(ApiClient.prototype, 'changes');
@@ -509,9 +543,7 @@ describe('Windows desktop synthetic service contract', () => {
     expect(identity).toHaveBeenCalledTimes(3);
     expect(memberships).toHaveBeenCalledTimes(3);
     expect(changes).toHaveBeenCalledTimes(3);
-    expect(
-      read.mock.calls.filter((args) => args[2] === 'job-history'),
-    ).toHaveLength(0);
+    expect(read).not.toHaveBeenCalled();
     expect(local.cacheVersion()).toBe(version);
   });
   it('idle synchronization still observes another live store changing warmed job metadata', async () => {

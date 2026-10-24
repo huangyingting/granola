@@ -17,6 +17,7 @@ import {
   updateDocumentSchema,
   resourceId,
   syncSnapshotSchema,
+  jobHistorySchema,
 } from '@windows-ai-notes/contracts/server';
 import {
   richTextFromPlainText,
@@ -25,6 +26,8 @@ import {
 } from '@windows-ai-notes/contracts/content';
 import {
   editableSchema,
+  desktopJobSchema,
+  toDesktopJob,
   type Draft,
   type EditableDraft,
   type DraftSummary,
@@ -57,6 +60,12 @@ type RetentionProof = z.infer<typeof retentionProofSchema>;
 const DAY = 86_400_000;
 const SEARCH_MAX_ENTRIES = 10_000;
 const SEARCH_TEXT_MAX_BYTES = 16 * 1024 * 1024;
+// Bump when history/metadata validation or projection semantics change.
+const JOB_METADATA_ID = 'job-history-metadata:v1';
+const jobMetadataSchema = z.strictObject({
+  source_sha256: z.string().regex(/^[a-f0-9]{64}$/),
+  jobs: z.array(desktopJobSchema).max(20),
+});
 
 type VerifiedRecording = RecordingUploadIntent & {
   plan: NonNullable<RecordingUploadIntent['plan']>;
@@ -538,7 +547,12 @@ export class LocalStore {
   }
   deleteArtifact(profile: string, document: string, id: string): void {
     this.get(profile, document);
-    this.deleteValue(profile, `artifact:${document}:${id}`);
+    if (id === 'job-history') {
+      this.transaction(() => {
+        this.deleteValue(profile, `artifact:${document}:${id}`);
+        this.deleteValue(profile, `artifact:${document}:${JOB_METADATA_ID}`);
+      });
+    } else this.deleteValue(profile, `artifact:${document}:${id}`);
   }
   deleteArtifactPrefix(
     profile: string,
@@ -564,7 +578,11 @@ export class LocalStore {
     id: string,
     value: unknown,
   ): void {
-    this.writeArtifact(profile, document, id, value, false);
+    if (id === 'job-history')
+      this.transaction(() =>
+        this.writeArtifact(profile, document, id, value, false),
+      );
+    else this.writeArtifact(profile, document, id, value, false);
   }
   private writeArtifact(
     profile: string,
@@ -573,6 +591,11 @@ export class LocalStore {
     value: unknown,
     skipUnchanged: boolean,
   ): void {
+    if (id.startsWith('job-history-metadata:'))
+      throw new LocalError(
+        'reserved_artifact',
+        'Saved job metadata is managed with its complete history.',
+      );
     const row = this.row(profile, document);
     const payload = row ? this.payload(row) : null;
     if (
@@ -605,6 +628,39 @@ export class LocalStore {
       )
         return;
     }
+    const history =
+      id === 'job-history' ? jobHistorySchema.safeParse(value) : null;
+    const encrypted = this.seal(
+      history?.success ? history.data : value,
+      aad('vault2', profile, name, document),
+    );
+    this.putEncryptedArtifact(profile, document, name, encrypted);
+    if (history) {
+      const metadataName = `artifact:${document}:${JOB_METADATA_ID}`;
+      if (history.success)
+        this.putEncryptedArtifact(
+          profile,
+          document,
+          metadataName,
+          this.seal(
+            {
+              source_sha256: createHash('sha256')
+                .update(encrypted)
+                .digest('hex'),
+              jobs: history.data.jobs.map(toDesktopJob),
+            },
+            aad('vault2', profile, metadataName, document),
+          ),
+        );
+      else this.deleteValue(profile, metadataName);
+    }
+  }
+  private putEncryptedArtifact(
+    profile: string,
+    document: string,
+    name: string,
+    encrypted: Uint8Array,
+  ): void {
     this.database
       .prepare(
         `
@@ -612,12 +668,7 @@ export class LocalStore {
       ON CONFLICT(profile,id) DO UPDATE SET document_id=excluded.document_id,payload=excluded.payload
     `,
       )
-      .run(
-        profile,
-        name,
-        document,
-        this.seal(value, aad('vault2', profile, name, document)),
-      );
+      .run(profile, name, document, encrypted);
   }
   getArtifact<T>(
     profile: string,
@@ -635,6 +686,59 @@ export class LocalStore {
     )
       return null;
     return this.getValue(profile, `artifact:${document}:${id}`, schema);
+  }
+  getJobMetadata(
+    profile: string,
+    document: string,
+  ): z.infer<typeof desktopJobSchema>[] {
+    const row = this.row(profile, document);
+    const payload = row ? this.payload(row) : null;
+    if (
+      !row ||
+      row.deleted ||
+      payload?.recovery ||
+      (!payload?.server && !payload?.conflict)
+    )
+      return [];
+    const name = `artifact:${document}:job-history`;
+    const metadataName = `artifact:${document}:${JOB_METADATA_ID}`;
+    const saved = this.database
+      .prepare(
+        `SELECT history.document_id,history.payload,
+                metadata.document_id AS metadata_document_id,
+                metadata.payload AS metadata_payload
+         FROM vault AS history
+         LEFT JOIN vault AS metadata
+           ON metadata.profile=history.profile AND metadata.id=?
+         WHERE history.profile=? AND history.id=?`,
+      )
+      .get(metadataName, profile, name);
+    if (!saved) return [];
+    const encrypted = z.instanceof(Uint8Array).parse(saved.payload);
+    const documentId = z.string().nullable().parse(saved.document_id) ?? '';
+    if (saved.metadata_payload !== null) {
+      if (saved.metadata_document_id !== document)
+        throw new LocalError(
+          'local_data_corrupt',
+          'Local data could not be unlocked or verified. It was not reset.',
+        );
+      const metadata = this.open(
+        jobMetadataSchema,
+        z.instanceof(Uint8Array).parse(saved.metadata_payload),
+        aad('vault2', profile, metadataName, document),
+      );
+      if (
+        documentId === document &&
+        metadata.source_sha256 ===
+          createHash('sha256').update(encrypted).digest('hex')
+      )
+        return metadata.jobs;
+    }
+    return this.open(
+      jobHistorySchema,
+      encrypted,
+      aad('vault2', profile, name, documentId),
+    ).jobs.map(toDesktopJob);
   }
   deleteValue(profile: string, id: string): void {
     this.database

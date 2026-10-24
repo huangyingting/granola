@@ -299,14 +299,7 @@ export class WorkspaceController {
     )
       return structuredClone(cached.jobs);
     this.jobHistory = null;
-    const jobs = (
-      this.local.getArtifact(profile, document, 'job-history', jobHistorySchema)
-        ?.jobs ?? []
-    ).map((job) => {
-      if (job.result?.kind !== 'summary') return job;
-      const { summary: _summary, ...result } = job.result;
-      return { ...job, result };
-    });
+    const jobs = this.local.getJobMetadata(profile, document);
     if (version !== null)
       this.jobHistory = { profile, document, version, jobs };
     return structuredClone(jobs);

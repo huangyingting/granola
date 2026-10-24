@@ -329,10 +329,16 @@ Main keeps only the latest selected history's bounded metadata projection in
 memory and reuses it while SQLite reports no local writes or commits from
 another connection. Transactions bypass this reuse, and scope changes,
 revocation and disposal clear it. Snapshots receive independent metadata objects.
-This avoids repeating full-history decryption/parsing on unchanged warm
-refreshes without changing the encrypted cache format. Cold reads and reads
-after writes still decrypt the complete history; this does not shrink server
-job responses, establish a large-library latency SLO or authorize a new AI request.
+Validated history writes also atomically maintain a private, versioned encrypted
+status projection bound to the complete history ciphertext. Cold status reads
+and reads after note writes authenticate this projection and hash the original
+ciphertext from the same SQLite read view, without decrypting or parsing saved
+summary bodies. Missing or stale projections from older writers use strict
+full-history validation without backfilling or rewriting data. Corrupt data
+still surfaces as an integrity error, and orphan projections cannot restore
+missing history. Full saved results and the storage schema stay unchanged.
+This does not eliminate ciphertext reads/hashing, shrink server job responses,
+establish a large-library latency SLO or authorize a new AI request.
 
 Job-history synchronization revalidates the complete saved representation with a
 content ETag. An unchanged authorized response transfers no summary bodies;

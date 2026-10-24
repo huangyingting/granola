@@ -1,6 +1,7 @@
 import {
   createCipheriv,
   createDecipheriv,
+  createHash,
   randomBytes,
   randomUUID,
 } from 'node:crypto';
@@ -10,7 +11,11 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
-import { documentSchema } from '@windows-ai-notes/contracts/server';
+import {
+  documentSchema,
+  jobSchema,
+  jobHistorySchema,
+} from '@windows-ai-notes/contracts/server';
 import {
   canonicalJson,
   richTextFromPlainText,
@@ -2309,6 +2314,397 @@ describe('encrypted local drafts and durable outbox', () => {
       store.putArtifact(profile, source.id, 'job:late', 'late private data'),
     ).toThrow('no longer available');
     expect(store.list(profile)).toHaveLength(0);
+  });
+  const metadataId = 'job-history-metadata:v1';
+  function savedJobStore() {
+    const store = open();
+    const source = store.create('fixtures', fields('Saved job meeting.'));
+    store.applyRemote(profile, remote(source));
+    const result = {
+      kind: 'summary' as const,
+      provider: 'fixture' as const,
+      configuration_version: 'encrypted-status-fixture-v1',
+      prompt_version: 'summary-v1',
+      usage: { input_tokens: 20, output_tokens: 30, audio_ms: 0 },
+    };
+    const job = jobSchema.parse({
+      id: randomUUID(),
+      document_id: source.id,
+      kind: 'summary',
+      state: 'succeeded',
+      attempt: 1,
+      input_stale: false,
+      error: null,
+      created_at: new Date().toISOString(),
+      result: {
+        ...result,
+        summary: {
+          overview: {
+            text: 'Synthetic complete offline result. '.repeat(100),
+            citations: [{ source: 'note', id: source.id, revision: 1 }],
+          },
+          topics: [],
+          decisions: [],
+          action_items: [],
+          open_questions: [],
+        },
+      },
+    });
+    store.putArtifact(profile, source.id, 'job-history', { jobs: [job] });
+    return { store, source, job, metadata: { ...job, result } };
+  }
+  function jobEnvelopes(document: string, account = profile) {
+    const sql = new DatabaseSync(path, { readOnly: true });
+    try {
+      return sql
+        .prepare(
+          'SELECT id,document_id,payload FROM vault WHERE profile=? AND id GLOB ? ORDER BY id',
+        )
+        .all(account, `artifact:${document}:job-history*`)
+        .map((row) => ({
+          id: z.string().parse(row.id),
+          document_id: z.string().nullable().parse(row.document_id),
+          payload: Buffer.from(z.instanceof(Uint8Array).parse(row.payload)),
+        }));
+    } finally {
+      sql.close();
+    }
+  }
+  function replaceJobFixture(document: string, id: string, value: unknown) {
+    const name = `artifact:${document}:${id}`;
+    const nonce = randomBytes(12);
+    const cipher = createCipheriv('aes-256-gcm', key, nonce);
+    cipher.setAAD(
+      Buffer.from(
+        canonicalJson([
+          'windows-ai-notes-local',
+          1,
+          'vault2',
+          profile,
+          name,
+          document,
+        ]),
+      ),
+    );
+    const sql = new DatabaseSync(path);
+    try {
+      sql
+        .prepare('UPDATE vault SET payload=? WHERE profile=? AND id=?')
+        .run(
+          Buffer.concat([
+            Buffer.from([1]),
+            nonce,
+            cipher.update(JSON.stringify(value)),
+            cipher.final(),
+            cipher.getAuthTag(),
+          ]),
+          profile,
+          name,
+        );
+    } finally {
+      sql.close();
+    }
+  }
+  it('encrypted job metadata survives cold reopen without parsing or rewriting full offline results', () => {
+    const { store, source, job, metadata } = savedJobStore();
+    const encrypted = jobEnvelopes(source.id);
+    expect(encrypted).toHaveLength(2);
+    const full = encrypted.find((row) => row.id.endsWith(':job-history'))!;
+    const projection = encrypted.find((row) => row.id.endsWith(metadataId))!;
+    expect(projection.payload.length).toBeLessThan(full.payload.length / 4);
+    close(store);
+    const reopened = open();
+    const version = reopened.cacheVersion();
+    const parse = vi.spyOn(jobHistorySchema, 'parse');
+    const first = reopened.getJobMetadata(profile, source.id);
+    expect(first).toEqual([metadata]);
+    first[0]!.state = 'cancelled';
+    first.length = 0;
+    expect(reopened.getJobMetadata(profile, source.id)).toEqual([metadata]);
+    expect(parse).not.toHaveBeenCalled();
+    expect(reopened.cacheVersion()).toBe(version);
+    expect(jobEnvelopes(source.id)).toEqual(encrypted);
+    expect(reopened.storageSchema()).toBe(8);
+    expect(
+      reopened.getArtifact(profile, source.id, 'job-history', jobHistorySchema),
+    ).toEqual({ jobs: [job] });
+    for (const file of [path, `${path}-wal`, `${path}-shm`])
+      if (existsSync(file))
+        expect(
+          readFileSync(file).includes(
+            Buffer.from('Synthetic complete offline result.'),
+          ),
+        ).toBe(false);
+  });
+  it('encrypted job metadata remains valid after selected note writes', () => {
+    const { store, source, metadata } = savedJobStore();
+    const encrypted = jobEnvelopes(source.id);
+    const parse = vi.spyOn(jobHistorySchema, 'parse');
+    const draft = store.get(profile, source.id);
+    store.save(
+      profile,
+      source.id,
+      draft.local_revision,
+      fields('Edited notes.'),
+    );
+    expect(store.getJobMetadata(profile, source.id)).toEqual([metadata]);
+    expect(parse).not.toHaveBeenCalled();
+    expect(jobEnvelopes(source.id)).toEqual(encrypted);
+  });
+  it('encrypted job metadata missing from a legacy history uses strict read-only fallback', () => {
+    const { store, source, metadata } = savedJobStore();
+    store.deleteArtifact(profile, source.id, metadataId);
+    const encrypted = jobEnvelopes(source.id);
+    const version = store.cacheVersion();
+    const parse = vi.spyOn(jobHistorySchema, 'parse');
+    for (let index = 0; index < 2; index++)
+      expect(store.getJobMetadata(profile, source.id)).toEqual([metadata]);
+    expect(parse).toHaveBeenCalledTimes(2);
+    expect(store.cacheVersion()).toBe(version);
+    expect(jobEnvelopes(source.id)).toEqual(encrypted);
+  });
+  it('encrypted job metadata accepts authenticated legacy nullable history headers only through full validation', () => {
+    const { store, source, job, metadata } = savedJobStore();
+    store.putValue(profile, `artifact:${source.id}:job-history`, {
+      jobs: [job],
+    });
+    const encrypted = jobEnvelopes(source.id);
+    const version = store.cacheVersion();
+    const parse = vi.spyOn(jobHistorySchema, 'parse');
+    expect(store.getJobMetadata(profile, source.id)).toEqual([metadata]);
+    expect(parse).toHaveBeenCalledOnce();
+    expect(store.cacheVersion()).toBe(version);
+    expect(jobEnvelopes(source.id)).toEqual(encrypted);
+  });
+  it('encrypted job metadata left by an older writer cannot hide a changed or malformed full history', () => {
+    const { store, source, job, metadata } = savedJobStore();
+    replaceJobFixture(source.id, 'job-history', {
+      jobs: [{ ...job, input_stale: true }],
+    });
+    const encrypted = jobEnvelopes(source.id);
+    const version = store.cacheVersion();
+    const parse = vi.spyOn(jobHistorySchema, 'parse');
+    for (let index = 0; index < 2; index++)
+      expect(store.getJobMetadata(profile, source.id)).toEqual([
+        { ...metadata, input_stale: true },
+      ]);
+    expect(parse).toHaveBeenCalledTimes(2);
+    expect(store.cacheVersion()).toBe(version);
+    expect(jobEnvelopes(source.id)).toEqual(encrypted);
+    replaceJobFixture(source.id, 'job-history', { jobs: [{ id: 'invalid' }] });
+    expect(() => store.getJobMetadata(profile, source.id)).toThrow(
+      'Local data could not be unlocked or verified.',
+    );
+  });
+  it.each(['job-history', metadataId])(
+    'encrypted job metadata surfaces corrupted %s ciphertext without repairing it',
+    (id) => {
+      const { store, source } = savedJobStore();
+      const sql = new DatabaseSync(path);
+      try {
+        sql
+          .prepare('UPDATE vault SET payload=? WHERE profile=? AND id=?')
+          .run(Buffer.alloc(30), profile, `artifact:${source.id}:${id}`);
+      } finally {
+        sql.close();
+      }
+      const encrypted = jobEnvelopes(source.id);
+      const version = store.cacheVersion();
+      for (let index = 0; index < 2; index++)
+        expect(() => store.getJobMetadata(profile, source.id)).toThrow(
+          'Local data could not be unlocked or verified.',
+        );
+      expect(store.cacheVersion()).toBe(version);
+      expect(jobEnvelopes(source.id)).toEqual(encrypted);
+    },
+  );
+  it.each([
+    ['job-history', null],
+    ['job-history', 'foreign-document'],
+    [metadataId, null],
+    [metadataId, 'foreign-document'],
+  ] as const)(
+    'encrypted job metadata cannot bypass the authenticated %s header changed to %s',
+    (id, document) => {
+      const { store, source } = savedJobStore();
+      const header =
+        document === null
+          ? null
+          : store.create(profile, fields('Another header-bound document.')).id;
+      const sql = new DatabaseSync(path);
+      try {
+        sql
+          .prepare('UPDATE vault SET document_id=? WHERE profile=? AND id=?')
+          .run(header, profile, `artifact:${source.id}:${id}`);
+      } finally {
+        sql.close();
+      }
+      expect(() => store.getJobMetadata(profile, source.id)).toThrow(
+        'Local data could not be unlocked or verified.',
+      );
+    },
+  );
+  it.each([
+    'extra-body',
+    'invalid-hash',
+    'too-many-jobs',
+    'unknown-field',
+  ] as const)(
+    'encrypted job metadata rejects authenticated %s projections',
+    (change) => {
+      const { store, source, job, metadata } = savedJobStore();
+      const full = jobEnvelopes(source.id).find((row) =>
+        row.id.endsWith(':job-history'),
+      )!;
+      const value = {
+        source_sha256:
+          change === 'invalid-hash'
+            ? 'invalid'
+            : createHash('sha256').update(full.payload).digest('hex'),
+        jobs:
+          change === 'too-many-jobs'
+            ? Array.from({ length: 21 }, () => metadata)
+            : [
+                change === 'extra-body'
+                  ? { ...metadata, result: job.result }
+                  : metadata,
+              ],
+        ...(change === 'unknown-field' ? { unexpected: true } : {}),
+      };
+      replaceJobFixture(source.id, metadataId, value);
+      const encrypted = jobEnvelopes(source.id);
+      expect(() => store.getJobMetadata(profile, source.id)).toThrow(
+        'Local data could not be unlocked or verified.',
+      );
+      expect(jobEnvelopes(source.id)).toEqual(encrypted);
+    },
+  );
+  it('encrypted job metadata cannot be forged through generic artifact or value writes', () => {
+    const { store, source, metadata } = savedJobStore();
+    const encrypted = jobEnvelopes(source.id);
+    const version = store.cacheVersion();
+    expect(() => store.putArtifact(profile, source.id, metadataId, {})).toThrow(
+      'Saved job metadata is managed with its complete history.',
+    );
+    expect(store.cacheVersion()).toBe(version);
+    expect(jobEnvelopes(source.id)).toEqual(encrypted);
+    store.putArtifact(profile, source.id, 'job-history', {
+      jobs: [{ id: 'invalid' }],
+    });
+    expect(jobEnvelopes(source.id)).toHaveLength(1);
+    expect(() => store.getJobMetadata(profile, source.id)).toThrow(
+      'Local data could not be unlocked or verified.',
+    );
+    const full = jobEnvelopes(source.id)[0]!;
+    store.putValue(profile, `artifact:${source.id}:${metadataId}`, {
+      source_sha256: createHash('sha256').update(full.payload).digest('hex'),
+      jobs: [metadata],
+    });
+    expect(() => store.getJobMetadata(profile, source.id)).toThrow(
+      'Local data could not be unlocked or verified.',
+    );
+  });
+  it.each(['write', 'delete'] as const)(
+    'encrypted job metadata rolls back the complete history if its second %s fails',
+    (operation) => {
+      const { store, source, job, metadata } = savedJobStore();
+      const encrypted = jobEnvelopes(source.id);
+      const sql = new DatabaseSync(path);
+      try {
+        sql.exec(`CREATE TRIGGER fixture_reject_metadata BEFORE ${operation === 'write' ? 'INSERT' : 'DELETE'} ON vault
+          WHEN ${operation === 'write' ? 'NEW' : 'OLD'}.id='artifact:${source.id}:${metadataId}'
+          BEGIN SELECT RAISE(ABORT,'Synthetic metadata failure.'); END;`);
+        const attempt = () => {
+          if (operation === 'write')
+            store.putArtifact(profile, source.id, 'job-history', {
+              jobs: [{ ...job, state: 'running', result: null }],
+            });
+          else store.deleteArtifact(profile, source.id, 'job-history');
+        };
+        expect(attempt).toThrow('Synthetic metadata failure.');
+        store.atomic(() => {
+          expect(attempt).toThrow('Synthetic metadata failure.');
+          store.putValue('root', 'after-failed-history', true);
+        });
+        expect(
+          store.getValue('root', 'after-failed-history', z.boolean()),
+        ).toBe(true);
+        expect(jobEnvelopes(source.id)).toEqual(encrypted);
+        expect(store.getJobMetadata(profile, source.id)).toEqual([metadata]);
+      } finally {
+        sql.close();
+      }
+    },
+  );
+  it('encrypted job metadata stays isolated from an uncommitted writer and rolls back with its full history', () => {
+    const { store, source, job, metadata } = savedJobStore();
+    const reader = open();
+    const encrypted = jobEnvelopes(source.id);
+    expect(() =>
+      store.atomic(() => {
+        store.putArtifact(profile, source.id, 'job-history', {
+          jobs: [{ ...job, state: 'running', result: null }],
+        });
+        expect(store.getJobMetadata(profile, source.id)[0]?.state).toBe(
+          'running',
+        );
+        expect(reader.getJobMetadata(profile, source.id)).toEqual([metadata]);
+        throw new Error('Synthetic history rollback.');
+      }),
+    ).toThrow('Synthetic history rollback.');
+    expect(jobEnvelopes(source.id)).toEqual(encrypted);
+    store.putArtifact(profile, source.id, 'job-history', {
+      jobs: [{ ...job, state: 'running', result: null }],
+    });
+    expect(reader.getJobMetadata(profile, source.id)[0]?.state).toBe('running');
+  });
+  it.each(['history', 'prefix', 'profile'] as const)(
+    'encrypted job metadata is removed with its %s without deleting individual results unnecessarily',
+    (operation) => {
+      const { store, source, job } = savedJobStore();
+      store.putArtifact(profile, source.id, `job:${job.id}`, job);
+      if (operation === 'history')
+        store.deleteArtifact(profile, source.id, 'job-history');
+      else if (operation === 'prefix')
+        store.deleteArtifactPrefix(profile, source.id, 'job-history');
+      else store.purgeProfile(profile);
+      expect(jobEnvelopes(source.id)).toEqual([]);
+      expect(store.getJobMetadata(profile, source.id)).toEqual([]);
+      if (operation !== 'profile')
+        expect(
+          store.getArtifact(profile, source.id, `job:${job.id}`, jobSchema),
+        ).toEqual(job);
+    },
+  );
+  it('encrypted job metadata never resurrects an orphan projection without its complete history', () => {
+    const { store, source } = savedJobStore();
+    const sql = new DatabaseSync(path);
+    try {
+      sql
+        .prepare('DELETE FROM vault WHERE profile=? AND id=?')
+        .run(profile, `artifact:${source.id}:job-history`);
+    } finally {
+      sql.close();
+    }
+    const encrypted = jobEnvelopes(source.id);
+    const version = store.cacheVersion();
+    expect(encrypted).toHaveLength(1);
+    expect(store.getJobMetadata(profile, source.id)).toEqual([]);
+    expect(store.cacheVersion()).toBe(version);
+    expect(jobEnvelopes(source.id)).toEqual(encrypted);
+  });
+  it('encrypted job metadata isolates identical identifiers across profiles and hides locally removed documents', () => {
+    const { store, source, job, metadata } = savedJobStore();
+    store.applyRemote('other-account', remote(source));
+    const other = { ...job, state: 'cancelled' as const, result: null };
+    store.putArtifact('other-account', source.id, 'job-history', {
+      jobs: [other],
+    });
+    expect(store.getJobMetadata(profile, source.id)).toEqual([metadata]);
+    expect(store.getJobMetadata('other-account', source.id)).toEqual([other]);
+    store.remove(profile, source.id);
+    expect(store.getJobMetadata(profile, source.id)).toEqual([]);
+    expect(store.getJobMetadata('other-account', source.id)).toEqual([other]);
   });
   function synchronizedArtifacts(
     text = 'Saved synthetic result.',

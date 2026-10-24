@@ -669,7 +669,10 @@ test('recovers one summary and resume receipt, inspects frozen evidence, persist
       throw new Error('The restored job metadata did not cross preload.');
     expect(restored.state.jobs).toEqual(delivered.jobs);
     const encrypted = await encryptedCache(application, directory, remote.id);
-    expect(encrypted).toHaveLength(2);
+    expect(encrypted).toHaveLength(3);
+    expect(encrypted.map((row) => row.id)).toContain(
+      `artifact:${remote.id}:job-history-metadata:v1`,
+    );
     const revalidated = fixture.state.job_history_responses.not_modified;
     fixture.change(remote.id, 'Newer human cloud notes remain authoritative.');
     await synchronize(application);
@@ -760,6 +763,11 @@ test('recovers one summary and resume receipt, inspects frozen evidence, persist
     await expect(editor.getByRole('status')).toHaveText(
       'Encrypted local draft',
     );
+    const beforeRestart = await encryptedCache(
+      application,
+      directory,
+      remote.id,
+    );
     await close(application);
     application = null;
     application = await launch(directory);
@@ -774,6 +782,15 @@ test('recovers one summary and resume receipt, inspects frozen evidence, persist
     await expect(
       editor.getByRole('textbox', { name: 'Summary review text' }),
     ).toHaveValue(reviewed);
+    const cold = await page.evaluate(() =>
+      window.notes.invoke({ operation: 'bootstrap' }),
+    );
+    if (!cold.ok || !('state' in cold))
+      throw new Error('Cold encrypted summary metadata did not cross preload.');
+    expect(cold.state.jobs).toEqual(delivered.jobs);
+    expect(await encryptedCache(application, directory, remote.id)).toEqual(
+      beforeRestart,
+    );
     fixture.state.summary_online = false;
     await page
       .getByRole('button', { name: 'Inspect source 1', exact: true })

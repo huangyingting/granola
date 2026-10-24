@@ -74,6 +74,13 @@ export const desktopJobSchema = jobSchema.extend({
     ])
     .nullable(),
 });
+export function toDesktopJob(
+  job: z.infer<typeof jobSchema>,
+): z.infer<typeof desktopJobSchema> {
+  if (job.result?.kind !== 'summary') return job;
+  const { summary: _summary, ...result } = job.result;
+  return { ...job, result };
+}
 export const desktopCommandSchema = z.discriminatedUnion('operation', [
   z.strictObject({ operation: z.literal('bootstrap') }),
   z.strictObject({
