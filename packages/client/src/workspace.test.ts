@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Writable } from 'node:stream';
+import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import {
   S3Client,
@@ -67,6 +68,13 @@ describe.skipIf(!databaseUrl)(
       content: richTextFromPlainText(text),
       tags: [],
     });
+    function gate() {
+      let resolve!: () => void;
+      const promise = new Promise<void>((complete) => {
+        resolve = complete;
+      });
+      return { promise, resolve };
+    }
     const open = (browser = issuer.browser, delivery?: DesktopDelivery) =>
       new WorkspaceController(local, browser, (event) => events.push(event), {
         allowLoopback: true,
@@ -332,9 +340,17 @@ describe.skipIf(!databaseUrl)(
       expect(accountSession().summary().status).toBe('active');
       expect(issuer.state.tokenCalls).toBe(1);
     });
-    it.skipIf(!process.env.TEST_S3_ENDPOINT)(
-      'durably reconciles lost transcription replies across restart, reviews candidates and fences late scope responses through real OIDC and private storage',
-      async () => {
+    it.skipIf(!process.env.TEST_S3_ENDPOINT).each([
+      { latency: 'normal', verificationDelay: 0, replyDelay: 0 },
+      { latency: 'slow verification', verificationDelay: 1200, replyDelay: 0 },
+      {
+        latency: 'slow finalization reply',
+        verificationDelay: 0,
+        replyDelay: 1200,
+      },
+    ])(
+      'durably reconciles lost transcription replies across restart, reviews candidates and fences late scope responses through real OIDC and private storage with $latency',
+      async ({ verificationDelay, replyDelay }) => {
         const config = {
           endpoint: process.env.TEST_S3_ENDPOINT!,
           region: 'us-east-1',
@@ -347,13 +363,25 @@ describe.skipIf(!databaseUrl)(
         };
         const s3 = new S3Client({ ...config, forcePathStyle: true });
         const nativeClients = new Set<AudioHostClient>();
+        const uploaded = gate(),
+          responseReady = gate(),
+          release = gate();
+        let watchingUpload = true;
         let recorder: RecordingController | undefined;
-        let release: (() => void) | undefined;
         let pending: Promise<unknown> | undefined;
         await s3.send(new CreateBucketCommand({ Bucket: config.bucket }));
         try {
           await app.close();
           const blobs = new RecordingBlobs(config);
+          if (verificationDelay) {
+            const promote = blobs.promote.bind(blobs);
+            vi.spyOn(blobs, 'promote').mockImplementationOnce(
+              async (...args) => {
+                await delay(verificationDelay, undefined, { signal: args[2] });
+                await promote(...args);
+              },
+            );
+          }
           app = await createServer(
             db,
             {
@@ -407,17 +435,26 @@ describe.skipIf(!databaseUrl)(
               nativeClients.add(client);
               return client;
             },
-            () => {},
+            () => {
+              if (!watchingUpload) return;
+              const status = local.recordingUploadStatus(
+                profile,
+                remote.id,
+                recording.id,
+              );
+              if (status?.state === 'complete' || status?.error) {
+                watchingUpload = false;
+                uploaded.resolve();
+              }
+            },
             async () => {},
           );
           recorder.resumeUploads(controller.recordingUploadContext());
           recorder.requestUpload(profile, remote.id, recording.id, false);
-          await vi.waitFor(() =>
-            expect(
-              local.recordingUploadStatus(profile, remote.id, recording.id)
-                ?.state,
-            ).toBe('complete'),
-          );
+          await uploaded.promise;
+          expect(
+            local.recordingUploadStatus(profile, remote.id, recording.id),
+          ).toMatchObject({ state: 'complete', error: null });
           await recorder.stop(() => {});
           const intentName = `recording-finalization:${recording.id}`;
           const original = ApiClient.prototype.finalizeRecording;
@@ -444,10 +481,10 @@ describe.skipIf(!databaseUrl)(
                 );
               }
               if (hold) {
+                if (replyDelay) await delay(replyDelay);
                 heldJob = job.id;
-                await new Promise<void>((resolve) => {
-                  release = resolve;
-                });
+                responseReady.resolve();
+                await release.promise;
               }
               return job;
             });
@@ -570,17 +607,19 @@ describe.skipIf(!databaseUrl)(
           expect(offline).not.toHaveBeenCalled();
           offline.mockRestore();
           hold = true;
-          pending = controller.finalizeRecording(command());
-          const failure = expect(pending).rejects.toMatchObject({
+          pending = expect(
+            controller.finalizeRecording(command()),
+          ).rejects.toMatchObject({
             code: 'workspace_changed',
           });
-          await vi.waitFor(() => expect(heldJob).toBeTypeOf('string'));
+          await Promise.race([responseReady.promise, pending]);
+          expect(heldJob).toBeTypeOf('string');
           await controller.execute({
             operation: 'workOffline',
             scope: controller.scope,
           });
-          release!();
-          await failure;
+          release.resolve();
+          await pending;
           expect(
             local.getArtifact(profile, remote.id, intentName, z.unknown()),
           ).toMatchObject({ job_id: null });
@@ -593,7 +632,8 @@ describe.skipIf(!databaseUrl)(
             ),
           ).toBeNull();
         } finally {
-          release?.();
+          watchingUpload = false;
+          release.resolve();
           if (pending) await Promise.allSettled([pending]);
           await recorder?.stop(() => {});
           for (const client of nativeClients) await client.close();

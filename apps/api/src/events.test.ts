@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { request, type ClientRequest } from 'node:http';
+import { once } from 'node:events';
+import { createConnection, type Socket } from 'node:net';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Database } from '@windows-ai-notes/db';
 import { ServiceError } from '@windows-ai-notes/contracts/server';
@@ -26,6 +28,8 @@ describe(
     let errors: Error[];
     let closed: Map<string, ReturnType<typeof gate>>;
     let stopping: ReturnType<typeof gate>;
+    let preCloseDrain: Promise<void>;
+    let sockets: Socket[];
 
     function gate() {
       let resolve!: () => void;
@@ -46,6 +50,19 @@ describe(
       client.end();
       return { client, serverClosed };
     }
+    async function preconnect() {
+      const accepted = new Promise<Socket>((resolve) =>
+        app.server.once('connection', resolve),
+      );
+      const client = createConnection({
+        host: '127.0.0.1',
+        port: Number(new URL(base).port),
+      });
+      sockets.push(client);
+      client.on('error', (error) => errors.push(error));
+      await once(client, 'connect');
+      return { client, server: await accepted };
+    }
     const get = (id = randomUUID()) =>
       fetch(`${base}${route(id)}`, {
         headers,
@@ -56,8 +73,10 @@ describe(
       releases = [];
       clients = [];
       errors = [];
+      sockets = [];
       closed = new Map();
       stopping = gate();
+      preCloseDrain = Promise.resolve();
       db = new Database('postgres://unused:unused@127.0.0.1:1/unused');
       vi.spyOn(db, 'assertReady').mockResolvedValue(undefined);
       vi.spyOn(db, 'identify').mockResolvedValue(user);
@@ -65,7 +84,10 @@ describe(
       vi.spyOn(db, 'events').mockImplementation(read);
       vi.spyOn(db.chat, 'events').mockImplementation(read);
       app = await createServer(db, { mode: 'development', host: '127.0.0.1' });
-      app.addHook('preClose', async () => stopping.resolve());
+      app.addHook('preClose', async () => {
+        stopping.resolve();
+        await preCloseDrain;
+      });
       app.server.on('request', (incoming, response) => {
         const observation = closed.get(incoming.url ?? '');
         if (observation) response.once('close', observation.resolve);
@@ -75,6 +97,7 @@ describe(
     afterEach(async () => {
       for (const release of releases) release();
       for (const client of clients) client.destroy();
+      for (const socket of sockets) socket.destroy();
       try {
         await app?.close();
       } finally {
@@ -86,6 +109,60 @@ describe(
       }
       for (const error of errors)
         expect(error).toMatchObject({ code: 'ECONNRESET' });
+    });
+
+    it('closes a preconnected socket that never sent an HTTP request before shutdown', async () => {
+      const socket = await preconnect();
+      const closing = app.close();
+      try {
+        await stopping.promise;
+        expect(socket.server.bytesRead).toBe(0);
+        expect(socket.server.destroyed).toBe(true);
+      } finally {
+        socket.client.destroy();
+        await closing;
+      }
+    });
+
+    it('rejects new preconnections while existing shutdown work is still draining', async () => {
+      const resume = gate();
+      preCloseDrain = resume.promise;
+      const closing = app.close();
+      let socket: Awaited<ReturnType<typeof preconnect>> | undefined;
+      try {
+        await stopping.promise;
+        socket = await preconnect();
+        expect(socket.server.destroyed).toBe(true);
+      } finally {
+        socket?.client.destroy();
+        resume.resolve();
+        await closing;
+      }
+    });
+
+    it('preserves a connection that already sent partial HTTP headers until normal shutdown admission rejects it', async () => {
+      const socket = await preconnect();
+      let response = '';
+      socket.client.setEncoding('utf8');
+      socket.client.on('data', (bytes: string) => {
+        response += bytes;
+      });
+      const received = once(socket.server, 'data');
+      socket.client.write('GET /health/live HTTP/1.1\r\nHost: localhost\r\n');
+      await received;
+      const closing = app.close();
+      try {
+        await stopping.promise;
+        expect(socket.server.destroyed).toBe(false);
+        const closed = once(socket.client, 'close');
+        socket.client.write('Connection: close\r\n\r\n');
+        await closed;
+        expect(response).toMatch(/^HTTP\/1\.1 503 /u);
+        expect(response).toMatch(/connection: close/iu);
+      } finally {
+        socket.client.destroy();
+        await closing;
+      }
     });
 
     it('does not let disconnected preflight reads occupy the shared job/question stream quota', async () => {

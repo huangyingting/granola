@@ -1669,7 +1669,10 @@ without a later ready record. A Worker stopped during database readiness does no
 proceed to storage validation or publish `worker_ready`.
 
 The API cases drain an open authenticated SSE subscription on `SIGTERM` and
-`SIGINT`. Another case loses a fully committed create response through the real
+`SIGINT`. Shutdown also closes unused TCP preconnections, including replacement
+connections left by cancelled requests, without forcibly closing connections
+that have already received HTTP bytes or bypassing active-stream drainage.
+Another case loses a fully committed create response through the real
 loopback proxy, physically terminates the owned API with `SIGKILL`, starts a new
 API process, reopens encrypted SQLite, and verifies frozen-request replay and
 newer typing without duplicate documents. Cleanup targets only owned child

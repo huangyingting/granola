@@ -1,5 +1,7 @@
 import { randomBytes, randomUUID } from 'node:crypto';
+import { once } from 'node:events';
 import { mkdtemp, rm } from 'node:fs/promises';
+import { createConnection } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -154,6 +156,37 @@ describe.skipIf(!databaseUrl || process.platform !== 'linux')(
       await expect(fetch(`${child.base}/health`)).rejects.toThrow();
       expect(child.stderr).toBe('');
     });
+    it.each(['SIGTERM', 'SIGINT'] as const)(
+      'closes an unused preconnected TCP socket and exits naturally on %s',
+      async (signal) => {
+        const child = await start();
+        await child.observed('api_ready');
+        const socket = createConnection({
+          host: '127.0.0.1',
+          port: Number(new URL(child.base).port),
+        });
+        try {
+          await once(socket, 'connect');
+          const closed = once(socket, 'close');
+          const response = await fetch(`${child.base}/health/live`, {
+            headers: { Connection: 'close' },
+          });
+          expect(response.status).toBe(200);
+          await response.json();
+          expect(child.child.kill(signal)).toBe(true);
+          const [exit] = await Promise.all([child.exit(), closed]);
+          expect(exit).toEqual({
+            code: 0,
+            signal: null,
+            error: undefined,
+          });
+          expect(socket.destroyed).toBe(true);
+          expect(child.stderr).toBe('');
+        } finally {
+          socket.destroy();
+        }
+      },
+    );
     it.each(['SIGTERM', 'SIGINT'] as const)(
       'drains an actual open SSE connection and closes naturally on %s',
       async (signal) => {

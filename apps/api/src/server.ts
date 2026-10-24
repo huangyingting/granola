@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import type { Socket } from 'node:net';
 import { jobEventStateSchema } from '@windows-ai-notes/contracts/generation';
 import { Readable } from 'node:stream';
 import Fastify from 'fastify';
@@ -92,6 +93,19 @@ export async function createServer(
   const authenticate = createAuthenticator(config, db);
   const streams = new Map<string, number>();
   const shutdown = new AbortController();
+  // An aborted fetch can leave a replacement TCP connection without an HTTP request.
+  const unusedConnections = new Set<Socket>();
+  app.server.on('connection', (socket) => {
+    if (socket.bytesRead !== 0) return;
+    if (shutdown.signal.aborted) {
+      socket.destroy();
+      return;
+    }
+    unusedConnections.add(socket);
+    const forget = () => unusedConnections.delete(socket);
+    socket.once('data', forget);
+    socket.once('close', forget);
+  });
   const assertNotStopping = () => {
     if (shutdown.signal.aborted)
       throw new ServiceError(
@@ -102,7 +116,12 @@ export async function createServer(
       );
   };
   app.addHook('onReady', async () => db.assertReady(shutdown.signal));
-  app.addHook('preClose', async () => shutdown.abort());
+  app.addHook('preClose', async () => {
+    shutdown.abort();
+    for (const socket of unusedConnections)
+      if (socket.bytesRead === 0) socket.destroy();
+    unusedConnections.clear();
+  });
   app.addHook('onSend', async (_request, reply, payload) => {
     if (shutdown.signal.aborted) reply.header('Connection', 'close');
     return payload;
