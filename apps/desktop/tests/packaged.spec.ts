@@ -313,8 +313,44 @@ test('opens the actual packaged sandboxed editor without workspace runtime depen
         for (const { size, bitmap } of iconImages(black))
           for (let offset = 40; offset < 40 + size * size * 4; offset += 4)
             bitmap.fill(0, offset, offset + 3);
-        const file = join(root, 'cached.ico');
-        await writeFile(file, black, { flag: 'wx' });
+        const blackIcon = join(root, 'black.ico');
+        const sourceIcon = join(root, 'source.ico');
+        await Promise.all([
+          writeFile(blackIcon, black, { flag: 'wx' }),
+          writeFile(sourceIcon, assets.ico, { flag: 'wx' }),
+        ]);
+        const file = join(root, 'cached.dll');
+        const source = join(root, 'source.dll');
+        const programs = process.env.ProgramFiles;
+        if (!programs)
+          throw new Error('The Windows Program Files directory is required.');
+        const { stdout, stderr } = await promisify(execFile)(
+          join(programs, 'PowerShell', '7', 'pwsh.exe'),
+          [
+            '-NoLogo',
+            '-NoProfile',
+            '-NonInteractive',
+            '-Command',
+            "$ErrorActionPreference='Stop'; Add-Type -TypeDefinition 'public class BlackIconFixture {}' -OutputAssembly $env:NOTES_BLACK_DLL -CompilerOptions ('/win32icon:'+$env:NOTES_BLACK_ICON); Add-Type -TypeDefinition 'public class SourceIconFixture {}' -OutputAssembly $env:NOTES_SOURCE_DLL -CompilerOptions ('/win32icon:'+$env:NOTES_SOURCE_ICON)",
+          ],
+          {
+            env: {
+              ...audioHostEnvironment(process.env),
+              NOTES_BLACK_DLL: file,
+              NOTES_SOURCE_DLL: source,
+              NOTES_BLACK_ICON: blackIcon,
+              NOTES_SOURCE_ICON: sourceIcon,
+            },
+            encoding: 'utf8',
+            timeout: 10_000,
+            maxBuffer: 64 * 1024,
+            windowsHide: true,
+          },
+        );
+        if (stdout || stderr)
+          throw new Error(
+            'Native icon fixture compilation emitted diagnostics.',
+          );
         const cachedPixels = () =>
           application.evaluate(async ({ app }, file) => {
             const icon = await app.getFileIcon(file, { size: 'normal' });
@@ -332,7 +368,7 @@ test('opens the actual packaged sandboxed editor without workspace runtime depen
             .subarray(offset, offset + 4)
             .toString('hex'),
         ).toBe('000000ff');
-        await writeFile(file, assets.ico);
+        await writeFile(file, readFileSync(source));
         expect(await cachedPixels()).toBe(cached);
         await assertAppIcon(application, page, [file]);
       } finally {
