@@ -97,6 +97,64 @@ describe('encrypted local drafts and durable outbox', () => {
     }
     expect(store.storageSchema()).toBe(8);
   });
+  it('cache version stays stable across reads and changes after same-connection writes', () => {
+    const store = open();
+    const before = store.cacheVersion();
+    expect(before).not.toBeNull();
+    expect(
+      store.getValue(profile, 'cache-version-fixture', z.string()),
+    ).toBeNull();
+    expect(store.storageSchema()).toBe(8);
+    expect(store.cacheVersion()).toBe(before);
+    store.putValue(profile, 'cache-version-fixture', 'First value.');
+    const written = store.cacheVersion();
+    expect(written).not.toBe(before);
+    store.deleteValue(profile, 'cache-version-fixture');
+    expect(store.cacheVersion()).not.toBe(written);
+    close(store);
+    expect(() => store.cacheVersion()).toThrow();
+  });
+  it('cache version observes another connection committing but not rolling back', () => {
+    const store = open();
+    const writer = open();
+    const before = store.cacheVersion();
+    writer.putValue(profile, 'cache-version-fixture', 'Committed value.');
+    const committed = store.cacheVersion();
+    expect(committed).not.toBe(before);
+    expect(() =>
+      writer.atomic(() => {
+        writer.putValue(profile, 'cache-version-fixture', 'Uncommitted value.');
+        throw new Error('Synthetic external rollback.');
+      }),
+    ).toThrow('Synthetic external rollback.');
+    expect(store.cacheVersion()).toBe(committed);
+    expect(store.getValue(profile, 'cache-version-fixture', z.string())).toBe(
+      'Committed value.',
+    );
+  });
+  it('cache version disables memoization inside nested transactions and recovers after rollback', () => {
+    const store = open();
+    const before = store.cacheVersion();
+    expect(() =>
+      store.atomic(() => {
+        expect(store.cacheVersion()).toBeNull();
+        store.atomic(() => {
+          expect(store.cacheVersion()).toBeNull();
+          store.putValue(
+            profile,
+            'cache-version-fixture',
+            'Uncommitted value.',
+          );
+        });
+        throw new Error('Synthetic local rollback.');
+      }),
+    ).toThrow('Synthetic local rollback.');
+    expect(store.cacheVersion()).not.toBeNull();
+    expect(store.cacheVersion()).not.toBe(before);
+    expect(
+      store.getValue(profile, 'cache-version-fixture', z.string()),
+    ).toBeNull();
+  });
   function savedUpload(store: LocalStore) {
     const draft = store.create(profile, fields('Private upload journal.'));
     const recording = store.beginRecording(profile, draft.id, tracks());

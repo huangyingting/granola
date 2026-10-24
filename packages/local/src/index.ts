@@ -116,6 +116,10 @@ const checkpointSchema = z.strictObject({
   cursor: syncSnapshotSchema.shape.cursor.nullable(),
   bootstrap: bootstrapSchema.nullable(),
 });
+const cacheVersionSchema = z.strictObject({
+  changes: z.number().int().nonnegative(),
+  version: z.number().int().positive(),
+});
 export type SyncCheckpoint = z.infer<typeof checkpointSchema>;
 export interface RemoteUpdate {
   id: string;
@@ -418,6 +422,18 @@ export class LocalStore {
         'Local storage did not initialize the supported schema.',
       );
     return version;
+  }
+  cacheVersion(): string | null {
+    // Uncommitted reads must not survive a rollback with the same change count.
+    if (this.transactionDepth > 0) return null;
+    const { changes, version } = cacheVersionSchema.parse(
+      this.database
+        .prepare(
+          'SELECT total_changes() AS changes, data_version AS version FROM pragma_data_version',
+        )
+        .get(),
+    );
+    return `${version}:${changes}`;
   }
   atomic(run: () => undefined): void {
     this.transaction(run);

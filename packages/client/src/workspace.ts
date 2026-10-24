@@ -80,6 +80,12 @@ export class WorkspaceController {
   private readonly selection = new Map<string, string | null>();
   private readonly transcriptReads = new Set<AbortController>();
   private readonly finalizationWrites = new Set<string>();
+  private jobHistory: {
+    profile: string;
+    document: string;
+    version: string;
+    jobs: DesktopState['jobs'];
+  } | null = null;
   constructor(
     private readonly local: LocalStore,
     private readonly openBrowser: (url: string) => Promise<void>,
@@ -197,6 +203,7 @@ export class WorkspaceController {
     if (this.critical || kind === 'scope' || kind === 'revoked')
       for (const read of this.transcriptReads) read.abort();
     if (kind === 'scope' || kind === 'revoked') {
+      this.jobHistory = null;
       this.query = '';
       this.offset = 0;
     }
@@ -278,6 +285,33 @@ export class WorkspaceController {
     this.local.putValue('root', 'account', account);
     this.account = account;
   }
+  private cachedJobs(profile: string, document: string): DesktopState['jobs'] {
+    const version = this.local.cacheVersion();
+    const cached = this.jobHistory;
+    if (
+      version !== null &&
+      cached?.profile === profile &&
+      cached.document === document &&
+      cached.version === version
+    )
+      return structuredClone(cached.jobs);
+    this.jobHistory = null;
+    const jobs = (
+      this.local.getArtifact(
+        profile,
+        document,
+        'job-history',
+        z.strictObject({ jobs: z.array(jobSchema).max(20) }),
+      )?.jobs ?? []
+    ).map((job) => {
+      if (job.result?.kind !== 'summary') return job;
+      const { summary: _summary, ...result } = job.result;
+      return { ...job, result };
+    });
+    if (version !== null)
+      this.jobHistory = { profile, document, version, jobs };
+    return structuredClone(jobs);
+  }
   snapshot(): DesktopState {
     if (this.disposed)
       throw new ClientError('workspace_closed', 'This workspace has closed.');
@@ -303,6 +337,7 @@ export class WorkspaceController {
       if (first) selected = this.local.get(profile, first.id);
     }
     this.selection.set(profile, selected?.id ?? null);
+    if (!selected) this.jobHistory = null;
     const details = selected ? this.local.details(profile, selected.id) : null;
     const cached =
       selected && details?.transcript_revision
@@ -391,20 +426,7 @@ export class WorkspaceController {
       chat_generation: this.chat.events.snapshot(profile, selected?.id ?? null),
       transcript_revision: details?.transcript_revision ?? 0,
       transcript,
-      jobs: selected
-        ? (
-            this.local.getArtifact(
-              profile,
-              selected.id,
-              'job-history',
-              z.strictObject({ jobs: z.array(jobSchema).max(20) }),
-            )?.jobs ?? []
-          ).map((job) => {
-            if (job.result?.kind !== 'summary') return job;
-            const { summary: _summary, ...result } = job.result;
-            return { ...job, result };
-          })
-        : [],
+      jobs: selected ? this.cachedJobs(profile, selected.id) : [],
     };
   }
   start() {
@@ -419,6 +441,7 @@ export class WorkspaceController {
     this.auth?.abort();
     this.session?.cancel();
     this.selection.clear();
+    this.jobHistory = null;
     this.stopEngine();
   }
   async close() {

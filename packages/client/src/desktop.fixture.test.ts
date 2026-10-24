@@ -2,6 +2,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { LocalStore } from '@windows-ai-notes/local';
@@ -257,6 +258,145 @@ describe('Windows desktop synthetic service contract', () => {
     expect(desktopStateSchema.parse(controller.snapshot()).jobs).toEqual([
       recording,
     ]);
+  });
+  it('warm job history reuses metadata without sharing mutable snapshot objects', async () => {
+    const { jobs } = await savedSummaries(2);
+    local.putValue('root', 'warm-history-fixture', true);
+    const read = vi.spyOn(local, 'getArtifact');
+    const first = controller.snapshot();
+    const result = first.jobs[0]!.result;
+    if (result?.kind !== 'summary')
+      throw new Error('Expected saved summary metadata.');
+    result.usage.input_tokens = 999;
+    first.jobs[0]!.state = 'cancelled';
+    first.jobs.length = 0;
+    for (let index = 0; index < 5; index++) {
+      const state = controller.snapshot();
+      expect(state.jobs).toHaveLength(2);
+      expect(state.jobs[0]).toMatchObject({
+        id: jobs[0]!.id,
+        state: 'succeeded',
+        result: { usage: { input_tokens: 20 } },
+      });
+    }
+    expect(
+      read.mock.calls.filter((args) => args[2] === 'job-history'),
+    ).toHaveLength(1);
+  });
+  it('warm job history invalidates after same-connection replacement and deletion', async () => {
+    const { document, jobs } = await savedSummaries(1);
+    expect(controller.snapshot().jobs[0]?.state).toBe('succeeded');
+    const changed = { ...jobs[0]!, state: 'running' as const, result: null };
+    local.putArtifact(controller.profile, document.id, 'job-history', {
+      jobs: [changed],
+    });
+    expect(controller.snapshot().jobs).toEqual([changed]);
+    local.deleteArtifact(controller.profile, document.id, 'job-history');
+    expect(controller.snapshot().jobs).toEqual([]);
+  });
+  it('warm job history observes writes from another live encrypted store', async () => {
+    const { document, jobs } = await savedSummaries(1);
+    const writer = new LocalStore(join(directory, 'notes.sqlite'), key);
+    try {
+      expect(controller.snapshot().jobs[0]?.state).toBe('succeeded');
+      const changed = {
+        ...jobs[0]!,
+        state: 'cancelled' as const,
+        result: null,
+      };
+      writer.putArtifact(controller.profile, document.id, 'job-history', {
+        jobs: [changed],
+      });
+      expect(controller.snapshot().jobs).toEqual([changed]);
+    } finally {
+      writer.close();
+    }
+  });
+  it('warm job history never reuses uncommitted snapshots after nested rollback', async () => {
+    const { document, jobs } = await savedSummaries(1);
+    const profile = controller.profile;
+    expect(controller.snapshot().jobs[0]?.state).toBe('succeeded');
+    expect(() =>
+      local.atomic(() => {
+        expect(() =>
+          local.atomic(() => {
+            local.putArtifact(profile, document.id, 'job-history', {
+              jobs: [{ ...jobs[0]!, state: 'cancelled', result: null }],
+            });
+            expect(controller.snapshot().jobs[0]?.state).toBe('cancelled');
+            throw new Error('Synthetic nested history rollback.');
+          }),
+        ).toThrow('Synthetic nested history rollback.');
+        expect(controller.snapshot().jobs[0]?.state).toBe('succeeded');
+        local.putArtifact(profile, document.id, 'job-history', {
+          jobs: [{ ...jobs[0]!, state: 'running', result: null }],
+        });
+        expect(controller.snapshot().jobs[0]?.state).toBe('running');
+        throw new Error('Synthetic outer history rollback.');
+      }),
+    ).toThrow('Synthetic outer history rollback.');
+    expect(controller.snapshot().jobs[0]?.state).toBe('succeeded');
+  });
+  it('warm job history fails closed when another connection corrupts a warmed artifact', async () => {
+    const { document } = await savedSummaries(1);
+    expect(controller.snapshot().jobs).toHaveLength(1);
+    const writer = new DatabaseSync(join(directory, 'notes.sqlite'));
+    try {
+      writer
+        .prepare('UPDATE vault SET payload=? WHERE profile=? AND id=?')
+        .run(
+          Buffer.alloc(30),
+          controller.profile,
+          `artifact:${document.id}:job-history`,
+        );
+      for (let index = 0; index < 2; index++)
+        expect(() => controller.snapshot()).toThrow(
+          'Local data could not be unlocked or verified.',
+        );
+    } finally {
+      writer.close();
+    }
+  });
+  it('warm job history follows selection and removes remotely deleted results', async () => {
+    const { document } = await savedSummaries(1);
+    const other = fixture.seed('Another synthetic meeting.');
+    await controller.synchronize();
+    await controller.execute({
+      operation: 'select',
+      scope: controller.scope,
+      id: document.id,
+    });
+    expect(controller.snapshot().jobs).toHaveLength(1);
+    await controller.execute({
+      operation: 'select',
+      scope: controller.scope,
+      id: other.id,
+    });
+    expect(controller.snapshot().jobs).toEqual([]);
+    await controller.execute({
+      operation: 'select',
+      scope: controller.scope,
+      id: document.id,
+    });
+    expect(controller.snapshot().jobs).toHaveLength(1);
+    fixture.remove(document.id);
+    await controller.synchronize();
+    expect(controller.snapshot().jobs).toEqual([]);
+  });
+  it('warm job history isolates the same document and job identifiers across profiles', async () => {
+    const { document, jobs } = await savedSummaries(1);
+    local.applyRemote('offline', document);
+    const offline = { ...jobs[0]!, state: 'cancelled' as const, result: null };
+    local.putArtifact('offline', document.id, 'job-history', {
+      jobs: [offline],
+    });
+    expect(controller.snapshot().jobs[0]?.state).toBe('succeeded');
+    await controller.execute({
+      operation: 'workOffline',
+      scope: controller.scope,
+    });
+    expect(controller.profile).toBe('offline');
+    expect(controller.snapshot().jobs).toEqual([offline]);
   });
   it('cached transcript IPC projects a full legacy cache to fifty segments without rewriting it', async () => {
     const transcript = await cacheLegacy(legacySegments(1000));

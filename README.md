@@ -289,8 +289,14 @@ usage, but not completed summary bodies. The selected saved result is loaded
 through scoped read-only IPC, with inline loading/retry and stale-view checks;
 ordinary state refreshes do not reload an unchanged result. Full encrypted job
 artifacts and history remain intact for offline reads and compatible rollback.
-This does not shrink server job responses or avoid decrypting the complete
-cached history in Main, and it does not authorize a new AI request.
+Main keeps only the latest selected history's bounded metadata projection in
+memory and reuses it while SQLite reports no local writes or commits from
+another connection. Transactions bypass this reuse, and scope changes,
+revocation and disposal clear it. Snapshots receive independent metadata objects.
+This avoids repeating full-history decryption/parsing on unchanged warm
+refreshes without changing the encrypted cache format. Cold reads and reads
+after writes still decrypt the complete history; this does not shrink server
+job responses, establish a large-library latency SLO or authorize a new AI request.
 
 ```sh
 pnpm audio:publish

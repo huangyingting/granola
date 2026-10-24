@@ -57,6 +57,56 @@ async function synchronize(application: ElectronApplication) {
     });
   });
 }
+async function cacheArtifact(
+  application: ElectronApplication,
+  directory: string,
+  id: string,
+  artifact: string,
+  value: unknown,
+) {
+  await application.evaluate(
+    ({ safeStorage }, { directory, id, artifact, value }) => {
+      const { readFileSync } = process.getBuiltinModule('node:fs');
+      const { join } = process.getBuiltinModule('node:path');
+      const { DatabaseSync } = process.getBuiltinModule('node:sqlite');
+      const require = process
+        .getBuiltinModule('node:module')
+        .createRequire(join(process.cwd(), 'synthetic-cache-artifact.cjs'));
+      const {
+        LocalStore,
+      }: typeof import('@windows-ai-notes/local') = require('@windows-ai-notes/local');
+      const path = join(directory, 'notes.sqlite');
+      const inspect = new DatabaseSync(path, { readOnly: true });
+      let profile: unknown;
+      try {
+        profile = inspect
+          .prepare('SELECT profile FROM drafts WHERE id=?')
+          .get(id)?.profile;
+      } finally {
+        inspect.close();
+      }
+      if (typeof profile !== 'string')
+        throw new Error('The synthetic meeting has no cached profile.');
+      const key = Buffer.from(
+        safeStorage.decryptString(
+          readFileSync(join(directory, 'content-key.protected')),
+        ),
+        'base64',
+      );
+      try {
+        const local = new LocalStore(path, key);
+        try {
+          local.putArtifact(profile, id, artifact, value);
+        } finally {
+          local.close();
+        }
+      } finally {
+        key.fill(0);
+      }
+    },
+    { directory, id, artifact, value },
+  );
+}
 test('recovers consented chat and recovery receipts across Windows restarts, inspects encrypted frozen history offline and reconciles conversation deletion', async () => {
   test.setTimeout(180_000);
   const directory = await mkdtemp(join(tmpdir(), 'windows-notes-chat-ui-'));
@@ -550,6 +600,34 @@ test('recovers one summary and resume receipt, inspects frozen evidence, persist
       job_id: job.id,
       result: fixture.state.jobs.get(job.id)!.result,
     });
+    for (let index = 0; index < 3; index++) {
+      const warm = await page.evaluate(() =>
+        window.notes.invoke({ operation: 'bootstrap' }),
+      );
+      if (!warm.ok || !('state' in warm))
+        throw new Error('The warmed job history is not available.');
+      expect(warm.state.jobs).toEqual(delivered.jobs);
+    }
+    const cached = fixture.state.jobs.get(job.id)!;
+    await cacheArtifact(application, directory, remote.id, 'job-history', {
+      jobs: [{ ...cached, input_stale: !cached.input_stale }],
+    });
+    const changed = await page.evaluate(() =>
+      window.notes.invoke({ operation: 'bootstrap' }),
+    );
+    if (!changed.ok || !('state' in changed))
+      throw new Error('The live encrypted cache update did not cross preload.');
+    expect(changed.state.jobs[0]?.input_stale).toBe(!cached.input_stale);
+    expect(changed.state.jobs[0]?.result).not.toHaveProperty('summary');
+    await cacheArtifact(application, directory, remote.id, 'job-history', {
+      jobs: [cached],
+    });
+    const restored = await page.evaluate(() =>
+      window.notes.invoke({ operation: 'bootstrap' }),
+    );
+    if (!restored.ok || !('state' in restored))
+      throw new Error('The restored job metadata did not cross preload.');
+    expect(restored.state.jobs).toEqual(delivered.jobs);
     await page
       .getByRole('button', { name: 'Inspect source 1', exact: true })
       .first()
@@ -1471,57 +1549,12 @@ test('pages current and legacy cached transcripts without losing editor text acr
       page.getByText('Segments 51-100 of 137', { exact: true }),
     ).toBeVisible();
     fixture.state.transcript_online = false;
-    await application.evaluate(
-      ({ safeStorage }, { directory, id, segments }) => {
-        const { readFileSync } = process.getBuiltinModule('node:fs');
-        const { join } = process.getBuiltinModule('node:path');
-        const { DatabaseSync } = process.getBuiltinModule('node:sqlite');
-        const require = process
-          .getBuiltinModule('node:module')
-          .createRequire(
-            join(process.cwd(), 'synthetic-legacy-transcript.cjs'),
-          );
-        const {
-          LocalStore,
-        }: typeof import('@windows-ai-notes/local') = require('@windows-ai-notes/local');
-        const path = join(directory, 'notes.sqlite');
-        const inspect = new DatabaseSync(path, { readOnly: true });
-        let profile: unknown;
-        try {
-          profile = inspect
-            .prepare('SELECT profile FROM drafts WHERE id=?')
-            .get(id)?.profile;
-        } finally {
-          inspect.close();
-        }
-        if (typeof profile !== 'string')
-          throw new Error(
-            'The synthetic legacy meeting has no cached profile.',
-          );
-        const key = Buffer.from(
-          safeStorage.decryptString(
-            readFileSync(join(directory, 'content-key.protected')),
-          ),
-          'base64',
-        );
-        try {
-          const local = new LocalStore(path, key);
-          try {
-            local.putArtifact(profile, id, 'transcript:1', {
-              document_id: id,
-              revision: 1,
-              source: 'manual',
-              segments,
-            });
-          } finally {
-            local.close();
-          }
-        } finally {
-          key.fill(0);
-        }
-      },
-      { directory, id: remote.id, segments },
-    );
+    await cacheArtifact(application, directory, remote.id, 'transcript:1', {
+      document_id: remote.id,
+      revision: 1,
+      source: 'manual',
+      segments,
+    });
     await close(application);
     application = await launch(directory);
     page = await application.firstWindow();
