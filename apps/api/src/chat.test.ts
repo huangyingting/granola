@@ -779,6 +779,16 @@ describe.skipIf(!databaseUrl)(
         Array.from({ length: state.last_event_id }, (_, index) => index + 1),
       );
       await db.pool.query(
+        'DELETE FROM chat_events WHERE turn_id=$1 AND seq=52',
+        [turn.id],
+      );
+      const lateGap = await app.inject({
+        url: `/v1/chat-turns/${turn.id}/events`,
+        headers,
+      });
+      expect(lateGap.statusCode).toBe(410);
+      expect(lateGap.json().code).toBe('event_cursor_expired');
+      await db.pool.query(
         'DELETE FROM chat_events WHERE turn_id=$1 AND seq<50',
         [turn.id],
       );

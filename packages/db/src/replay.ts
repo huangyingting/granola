@@ -31,6 +31,7 @@ type Row = {
   first: number | null;
   last: number;
   expired: number | null;
+  remaining: number;
 } & (Frame | { seq: null; event_type: null; payload: null; created_at: null });
 
 export async function readReplay(
@@ -59,11 +60,12 @@ export async function readReplay(
          WHERE p.id=$1 AND p.owner_id=$2 AND d.deleted_at IS NULL
        ), bounds AS (
          SELECT p.id,p.document_id,p.state,p.event_seq last,min(e.seq) first,
-           max(e.seq) FILTER (WHERE e.created_at<now()-interval '7 days') expired
+           max(e.seq) FILTER (WHERE e.created_at<now()-interval '7 days') expired,
+           count(e.seq) FILTER (WHERE e.seq>$3 AND e.seq<=p.event_seq)::integer remaining
          FROM authorized p LEFT JOIN ${resource.events} e ON e.${resource.key}=p.id
          GROUP BY p.id,p.document_id,p.state,p.event_seq
        )
-       SELECT b.document_id,b.state,b.first,b.last,b.expired,e.* FROM bounds b
+       SELECT b.document_id,b.state,b.first,b.last,b.expired,b.remaining,e.* FROM bounds b
        LEFT JOIN LATERAL (
          SELECT seq,event_type,payload,created_at FROM ${resource.events}
          WHERE ${resource.key}=b.id AND seq>$3 AND created_at>=now()-interval '7 days'
@@ -87,7 +89,9 @@ export async function readReplay(
       410,
     );
   if (
-    after < Math.max((bounds.first ?? bounds.last + 1) - 1, bounds.expired ?? 0)
+    after <
+      Math.max((bounds.first ?? bounds.last + 1) - 1, bounds.expired ?? 0) ||
+    bounds.remaining !== bounds.last - after
   )
     throw expired();
   const events: Frame[] = [];

@@ -302,18 +302,15 @@ describe.skipIf(!databaseUrl)('bounded transactional job housekeeping', () => {
       await db.pool.query('DELETE FROM job_events WHERE seq=$1', [
         location === 'middle' ? 2 : location === 'tail' ? 3 : 52,
       ]);
-      let cursor = 0;
-      if (location === 'later batch') {
-        const first = await db.events(actor.user_id, key, 0);
-        expect(first.events).toHaveLength(50);
-        cursor = first.events.at(-1)!.seq;
-      }
-      await expect(db.events(actor.user_id, key, cursor)).rejects.toMatchObject(
-        {
+      await expect(db.events(actor.user_id, key, 0)).rejects.toMatchObject({
+        code: 'event_cursor_expired',
+        status: 410,
+      });
+      if (location === 'later batch')
+        await expect(db.events(actor.user_id, key, 50)).rejects.toMatchObject({
           code: 'event_cursor_expired',
           status: 410,
-        },
-      );
+        });
       expect((await db.eventState(actor.user_id, key)).last_event_id).toBe(
         count,
       );

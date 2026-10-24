@@ -1035,8 +1035,10 @@ Job and question replay share an authorized SQL read of parent state/cursor,
 seven-day expiry bounds and at most 50 retained frames. Access is checked again
 before returning a batch. Missing middle or tail sequences also return
 `410 event_cursor_expired` for snapshot recovery rather than skipping frames or
-pretending that an incomplete terminal stream finished. None of these read
-recoveries authorizes another provider request.
+pretending that an incomplete terminal stream finished. The initial read checks
+the whole remaining sequence range, so a known gap beyond the first batch is
+rejected before SSE response headers are sent. None of these read recoveries
+authorizes another provider request.
 
 The configured Azure deployment streams structured final generation for both
 short and long summaries. Extraction and merge remain bounded structured requests.
