@@ -1,5 +1,12 @@
 import { randomBytes, randomUUID } from 'node:crypto';
-import { mkdtempSync, rmSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -73,6 +80,17 @@ describe('durable desktop capture coordination with a real framed helper process
     const changed = vi.fn();
     const controller = new RecordingController(local, create, changed, remove);
     return { controller, create, changed, remove, observedOwners };
+  }
+  function queueDeletions(count: number) {
+    return Array.from({ length: count }, () => {
+      const draft = local.create('offline');
+      const recording = local.beginRecording('offline', draft.id, choices());
+      local.updateRecording('offline', draft.id, recording.id, {
+        state: 'sealed',
+      });
+      local.removeRecording('offline', draft.id, recording.id);
+      return recording.id;
+    });
   }
   it('commits ownership before spawning, reuses the active helper for devices and seals pause/resume/stop acknowledgements', async () => {
     const draft = local.create('offline');
@@ -469,6 +487,173 @@ describe('durable desktop capture coordination with a real framed helper process
     await controller.cleanup();
     expect(local.pendingRecordingDeletions()).toEqual([]);
     expect(controller.snapshot('offline', null).cleanup_error).toBeNull();
+  });
+  it('does not let one failed filesystem removal starve independent erasures and retries only the retained journal after restart', async () => {
+    const ids = queueDeletions(2);
+    const path = (id: string) => join(directory, 'audio', id);
+    for (const id of ids) {
+      mkdirSync(path(id), { recursive: true });
+      writeFileSync(join(path(id), 'synthetic-only.marker'), 'synthetic');
+    }
+    const failure = new Error('Synthetic locked audio directory.');
+    let blocked = true;
+    const remove = vi.fn(async (id: string) => {
+      if (blocked && id === ids[0]) throw failure;
+      await rm(path(id), { recursive: true, force: true });
+    });
+    const { controller, create } = setup('capture', remove);
+    await expect(controller.reconcile('offline')).rejects.toBe(failure);
+    expect(remove.mock.calls.map(([id]) => id)).toEqual(ids);
+    expect(local.pendingRecordingDeletions()).toEqual([ids[0]]);
+    expect(existsSync(path(ids[0]!))).toBe(true);
+    expect(existsSync(path(ids[1]!))).toBe(false);
+    expect(controller.snapshot('offline', null).cleanup_error?.code).toBe(
+      'recording_cleanup_failed',
+    );
+    expect(create).not.toHaveBeenCalled();
+    await controller.close(() => {});
+    local.close();
+    local = new LocalStore(join(directory, 'notes.sqlite'), key);
+    expect(local.pendingRecordingDeletions()).toEqual([ids[0]]);
+    blocked = false;
+    remove.mockClear();
+    const restarted = setup('capture', remove);
+    await restarted.controller.reconcile('offline');
+    expect(remove).toHaveBeenCalledExactlyOnceWith(ids[0]);
+    expect(local.pendingRecordingDeletions()).toEqual([]);
+    expect(existsSync(path(ids[0]!))).toBe(false);
+    expect(
+      restarted.controller.snapshot('offline', null).cleanup_error,
+    ).toBeNull();
+    expect(restarted.create).not.toHaveBeenCalled();
+    await restarted.controller.close(() => {});
+  });
+  it('reports every filesystem removal failure without suppressing successful independent deletion', async () => {
+    const ids = queueDeletions(3);
+    const first = new Error('Synthetic first directory failure.');
+    const second = new Error('Synthetic second directory failure.');
+    const failures = new Map([
+      [ids[0], first],
+      [ids[1], second],
+    ]);
+    const remove = vi.fn(async (id: string) => {
+      const failure = failures.get(id);
+      if (failure) throw failure;
+    });
+    const { controller } = setup('capture', remove);
+    await expect(controller.cleanup()).rejects.toMatchObject({
+      name: 'AggregateError',
+      errors: [first, second],
+    });
+    expect(remove.mock.calls.map(([id]) => id)).toEqual(ids);
+    expect(local.pendingRecordingDeletions()).toEqual(ids.slice(0, 2));
+    expect(controller.snapshot('offline', null).cleanup_error?.code).toBe(
+      'recording_cleanup_failed',
+    );
+    failures.clear();
+    remove.mockClear();
+    await controller.cleanup();
+    expect(remove.mock.calls.map(([id]) => id)).toEqual(ids.slice(0, 2));
+    expect(local.pendingRecordingDeletions()).toEqual([]);
+    expect(controller.snapshot('offline', null).cleanup_error).toBeNull();
+    await controller.close(() => {});
+  });
+  it('does not attempt physical deletion when its journal cannot be authenticated', async () => {
+    const ids = queueDeletions(2);
+    const { controller, remove } = setup();
+    const failure = new LocalError(
+      'local_data_corrupt',
+      'Synthetic unauthenticated deletion journal.',
+    );
+    const read = vi
+      .spyOn(local, 'pendingRecordingDeletions')
+      .mockImplementationOnce(() => {
+        throw failure;
+      });
+    const acknowledge = vi.spyOn(local, 'acknowledgeRecordingDeletion');
+    try {
+      await expect(controller.cleanup()).rejects.toBe(failure);
+      expect(remove).not.toHaveBeenCalled();
+      expect(acknowledge).not.toHaveBeenCalled();
+      expect(local.pendingRecordingDeletions()).toEqual(ids);
+    } finally {
+      read.mockRestore();
+      acknowledge.mockRestore();
+    }
+    await controller.close(() => {});
+  });
+  it('stops at a journal acknowledgement failure and preserves it together with earlier physical failures', async () => {
+    const ids = queueDeletions(3);
+    const physical = new Error('Synthetic locked audio directory.');
+    const journal = new Error('Synthetic encrypted journal write failure.');
+    const remove = vi.fn(async (id: string) => {
+      if (id === ids[0]) throw physical;
+    });
+    const { controller } = setup('capture', remove);
+    const write = local.acknowledgeRecordingDeletion.bind(local);
+    const acknowledge = vi
+      .spyOn(local, 'acknowledgeRecordingDeletion')
+      .mockImplementation((id) => {
+        if (id === ids[1]) throw journal;
+        write(id);
+      });
+    try {
+      await expect(controller.cleanup()).rejects.toMatchObject({
+        name: 'AggregateError',
+        errors: [physical, journal],
+      });
+      expect(remove.mock.calls.map(([id]) => id)).toEqual(ids.slice(0, 2));
+      expect(acknowledge).toHaveBeenCalledExactlyOnceWith(ids[1]);
+      expect(local.pendingRecordingDeletions()).toEqual(ids);
+    } finally {
+      acknowledge.mockRestore();
+    }
+    remove.mockClear();
+    remove.mockResolvedValue(undefined);
+    await controller.cleanup();
+    expect(remove.mock.calls.map(([id]) => id)).toEqual(ids);
+    expect(local.pendingRecordingDeletions()).toEqual([]);
+    await controller.close(() => {});
+  });
+  it('does not continue deletion after helper shutdown becomes uncertain', async () => {
+    const retained = local.create('offline');
+    const other = local.beginRecording('offline', retained.id, choices());
+    local.updateRecording('offline', retained.id, other.id, {
+      state: 'sealed',
+    });
+    const draft = local.create('offline');
+    const { controller, remove } = setup();
+    await controller.start('offline', draft.id, choices(), () => {});
+    const active = local.activeRecordingOwner()!;
+    local.removeRecording('offline', draft.id, active.recording_id);
+    local.removeRecording('offline', retained.id, other.id);
+    const [client] = clients;
+    if (!client) throw new Error('The framed capture helper was not created.');
+    const failure = new Error('Synthetic close failure before physical exit.');
+    const close = vi.spyOn(client, 'close').mockRejectedValue(failure);
+    try {
+      await expect(controller.cleanup()).rejects.toBe(failure);
+      expect(remove).not.toHaveBeenCalled();
+      expect(local.pendingRecordingDeletions()).toEqual([
+        active.recording_id,
+        other.id,
+      ]);
+      expect(
+        (await client.request({ command: 'list_devices' })).event_type,
+      ).toBe('devices');
+      expect(controller.capturing).toBe(true);
+    } finally {
+      close.mockRestore();
+      await client.close();
+    }
+    await client.stopped;
+    await controller.cleanup();
+    expect(remove.mock.calls.map(([id]) => id)).toEqual([
+      active.recording_id,
+      other.id,
+    ]);
+    expect(local.pendingRecordingDeletions()).toEqual([]);
+    await controller.close(() => {});
   });
   it('drains physical cleanup before shutdown can close its encrypted journal', async () => {
     const draft = local.create('offline');

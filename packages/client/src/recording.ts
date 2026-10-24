@@ -1479,6 +1479,7 @@ export class RecordingController {
     if (this.cleaning) return this.cleaning;
     const operation = (async () => {
       this.cleanupError = null;
+      const failures: unknown[] = [];
       try {
         for (const id of this.local.pendingRecordingDeletions()) {
           if (this.reviewing?.id === id) await this.closeReview();
@@ -1486,10 +1487,25 @@ export class RecordingController {
             this.revoked = true;
             await this.release(this.client);
           }
-          await this.remove(id);
+          try {
+            await this.remove(id);
+          } catch (error) {
+            failures.push(error);
+            continue;
+          }
           this.local.acknowledgeRecordingDeletion(id);
         }
       } catch (error) {
+        failures.push(error);
+      }
+      if (failures.length) {
+        const error =
+          failures.length === 1
+            ? failures[0]
+            : new AggregateError(
+                failures,
+                'Some local audio could not be removed. Cleanup remains queued.',
+              );
         this.cleanupError = {
           code: 'recording_cleanup_failed',
           message:

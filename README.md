@@ -491,6 +491,11 @@ helpers, admit uploads or let terminal shutdown finish. A storage policy is not
 confirmed locally until the temporary helper has actually stopped, even if its
 logical close completed earlier. Active capture still shares its existing
 helper for device and capacity checks.
+Physical audio cleanup continues past a failed filesystem removal so independent
+journal entries can still be erased. Each successful removal is acknowledged
+separately; failed entries remain queued and cleanup still reports the original
+or aggregate failure. Journal verification/write failures and uncertain helper
+shutdown still stop the pass; partial progress is not overall cleanup success.
 Main also retains the actual installer-worker session until physical closure.
 `closeReady`, application quit and the last-window path share an exit fence:
 ordinary exit seals new worker preparation and waits for cancellation, while only
