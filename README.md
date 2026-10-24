@@ -356,8 +356,15 @@ changed histories and older servers still return the full compatible JSON.
 Authorization and document visibility are checked before revalidation, and the
 client requires a matching receipt rather than substituting cached success for
 errors, revocation or cancellation. Full results remain encrypted and available
-offline after restart. This saves unchanged response bytes, not the server's
-history query/serialization or Main's full-cache decryption. Synchronization
+offline after restart. The API keeps at most 256 process-local, body-free
+source/ETag receipts, scoped by actor, meeting and page. Repeated matching reads
+reauthorize and hash every raw history-row dependency inside a read-only
+repeatable-read PostgreSQL view; unchanged proofs avoid transferring full results
+to Node, parsing them again or rebuilding the canonical response. Cold reads,
+changed proofs, process restarts and evictions strictly validate the full rows
+and preserve the same complete-representation SHA256 tags. This does not remove
+PostgreSQL reads/JSON hashing, shrink changed responses or avoid Main's
+full-cache decryption. Synchronization
 compares cached artifacts inside the same SQLite transaction and skips encryption
 and writes for identical values, including when an older server returns `200`.
 Changed and missing artifacts are still saved atomically with the document and

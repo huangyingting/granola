@@ -149,6 +149,14 @@ const jobStatusQuery = `
  JOIN documents d ON d.id=j.document_id
  JOIN memberships m ON m.workspace_id=d.workspace_id AND m.user_id=j.owner_id AND m.active
  JOIN users u ON u.id=j.owner_id AND u.active`;
+const jobHistoryQuery =
+  jobStatusQuery +
+  ` WHERE j.document_id=$1 AND j.owner_id=$2 AND d.deleted_at IS NULL
+  ORDER BY j.created_at DESC,j.id LIMIT $3 OFFSET $4`;
+// Bind proofs to every raw jobView dependency, including full input/result JSON.
+const jobHistorySource =
+  "encode(sha256(convert_to(row_to_json(history)::text,'UTF8')),'hex')";
+type JobHistorySourceRow = { history_source: string };
 export interface ClaimedJob {
   id: string;
   originRequestId: string | null;
@@ -1035,13 +1043,55 @@ export class Database {
     offset = 0,
   ): Promise<Job[]> {
     await this.document(userId, documentId);
-    const result = await this.pool.query<JobStatusRow>(
-      jobStatusQuery +
-        ` WHERE j.document_id=$1 AND j.owner_id=$2 AND d.deleted_at IS NULL
-      ORDER BY j.created_at DESC,j.id LIMIT $3 OFFSET $4`,
-      [documentId, userId, limit, offset],
-    );
+    const result = await this.pool.query<JobStatusRow>(jobHistoryQuery, [
+      documentId,
+      userId,
+      limit,
+      offset,
+    ]);
     return result.rows.map(jobView);
+  }
+  async jobHistory(
+    userId: string,
+    documentId: string,
+    limit: number,
+    offset: number,
+    cachedSource?: string,
+  ): Promise<{ source: string; jobs: Job[] | null }> {
+    return this.transaction(async (tx) => {
+      await tx.query(
+        'SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY',
+      );
+      const visible = await tx.query(
+        `SELECT 1 FROM (${documentQuery}) visible_document`,
+        [documentId, userId],
+      );
+      if (!visible.rowCount)
+        throw new ServiceError(
+          'document_not_found',
+          'The document is unavailable or not accessible.',
+          404,
+        );
+      const parameters = [documentId, userId, limit, offset];
+      const from = `FROM (${jobHistoryQuery}) history
+        ORDER BY history.created_at DESC,history.id`;
+      if (cachedSource !== undefined) {
+        const rows = await tx.query<JobHistorySourceRow>(
+          `SELECT ${jobHistorySource} history_source ${from}`,
+          parameters,
+        );
+        const source = digest(rows.rows.map((row) => row.history_source));
+        if (source === cachedSource) return { source, jobs: null };
+      }
+      const rows = await tx.query<JobStatusRow & JobHistorySourceRow>(
+        `SELECT history.*,${jobHistorySource} history_source ${from}`,
+        parameters,
+      );
+      return {
+        source: digest(rows.rows.map((row) => row.history_source)),
+        jobs: rows.rows.map(jobView),
+      };
+    });
   }
   async summarySource(
     userId: string,

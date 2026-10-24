@@ -51,6 +51,7 @@ import { prepareRealtimeRoutes } from './realtime.js';
 import { registerChatRoutes } from './chat.js';
 import { streamEvents } from './events.js';
 import { registerRequestObservability } from './observability.js';
+import { JobHistoryReceipts } from './job-history.js';
 
 const idParams = z.strictObject({ id: resourceId });
 const revisionQuery = z.strictObject({
@@ -92,7 +93,9 @@ export async function createServer(
   registerRequestObservability(app);
   const authenticate = createAuthenticator(config, db);
   const streams = new Map<string, number>();
+  const jobHistoryReceipts = new JobHistoryReceipts();
   const shutdown = new AbortController();
+  app.addHook('onClose', async () => jobHistoryReceipts.clear());
   // An aborted fetch can leave a replacement TCP connection without an HTTP request.
   const unusedConnections = new Set<Socket>();
   app.server.on('connection', (socket) => {
@@ -379,18 +382,29 @@ export async function createServer(
       }),
       request.query,
     );
-    const body = canonicalJson({
-      jobs: await db.jobs(
-        principal(request).userId,
-        id,
-        query.limit,
-        query.offset,
-      ),
-    });
+    const user = principal(request).userId;
+    const key = `${user}:${id}:${query.limit}:${query.offset}`;
+    const cached = jobHistoryReceipts.get(key);
+    const condition = request.headers['if-none-match'];
+    const candidate =
+      cached && notModified(condition, cached.etag) ? cached : undefined;
+    const history = await db.jobHistory(
+      user,
+      id,
+      query.limit,
+      query.offset,
+      candidate?.source,
+    );
+    if (history.jobs === null) {
+      if (!candidate)
+        throw new Error('Job history has no validated representation receipt.');
+      return reply.header('ETag', candidate.etag).code(304).send();
+    }
+    const body = canonicalJson({ jobs: history.jobs });
     const etag = `"${createHash('sha256').update(body).digest('hex')}"`;
+    jobHistoryReceipts.remember(key, history.source, etag);
     reply.header('ETag', etag);
-    if (notModified(request.headers['if-none-match'], etag))
-      return reply.code(304).send();
+    if (notModified(condition, etag)) return reply.code(304).send();
     return reply.type('application/json').send(body);
   });
   app.get('/v1/documents/:id/export', async (request, reply) => {

@@ -1,14 +1,29 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { setTimeout as delay } from 'node:timers/promises';
-import { beforeAll, afterAll, describe, expect, it, vi } from 'vitest';
+import {
+  beforeAll,
+  afterAll,
+  beforeEach,
+  afterEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vitest';
 import { generateKeyPair, exportJWK, SignJWT } from 'jose';
-import { Database, digest, recordChange } from '@windows-ai-notes/db';
+import {
+  Database,
+  digest,
+  recordChange,
+  type Transaction,
+} from '@windows-ai-notes/db';
 import { type AiProviders } from '@windows-ai-notes/ai';
 import { makeSilentWav } from '@windows-ai-notes/ai/wav';
 import {
   documentSchema,
   jobSchema,
+  resultSchema,
   ServiceError,
   type SummarySnapshot,
   type Summary,
@@ -98,8 +113,9 @@ describe.skipIf(!databaseUrl)('PostgreSQL API and durable AI worker', () => {
   async function document(
     user: Awaited<ReturnType<typeof actor>>,
     notes = 'Original meeting notes.',
+    service = app,
   ) {
-    const result = await app.inject({
+    const result = await service.inject({
       method: 'POST',
       url: '/v1/documents',
       headers: { ...user.headers, 'idempotency-key': randomUUID() },
@@ -116,8 +132,9 @@ describe.skipIf(!databaseUrl)('PostgreSQL API and durable AI worker', () => {
     user: Awaited<ReturnType<typeof actor>>,
     id: string,
     key = randomUUID(),
+    service = app,
   ) {
-    const result = await app.inject({
+    const result = await service.inject({
       method: 'POST',
       url: `/v1/documents/${id}/summary-runs`,
       headers: { ...user.headers, 'idempotency-key': key },
@@ -1339,6 +1356,359 @@ describe.skipIf(!databaseUrl)('PostgreSQL API and durable AI worker', () => {
     expect(page.statusCode).toBe(200);
     expect(page.json()).toEqual({ jobs: [] });
     expect(page.headers.etag).not.toBe(stale.headers.etag);
+  });
+  describe('body-free conditional history proofs', () => {
+    let service: Awaited<ReturnType<typeof createServer>>;
+    let owner: Awaited<ReturnType<typeof actor>>;
+    let doc: Awaited<ReturnType<typeof document>>;
+    let job: Awaited<ReturnType<typeof enqueue>>;
+    let url: string;
+    beforeEach(async () => {
+      service = await createServer(db, {
+        mode: 'development',
+        host: '127.0.0.1',
+      });
+      owner = await actor();
+      doc = await document(owner, 'Original meeting notes.', service);
+      job = await enqueue(owner, doc.id, randomUUID(), service);
+      await runOnce(db, providers);
+      url = `/v1/documents/${doc.id}/jobs?limit=20`;
+    });
+    afterEach(async () => {
+      await service?.close();
+    });
+    it('revalidates unchanged history without parsing saved results again', async () => {
+      const completed = await db.job(owner.user_id, job.id);
+      if (completed.result?.kind !== 'summary')
+        throw new Error('The synthetic saved summary is incomplete.');
+      const fact = {
+        text: 'Synthetic substantial saved-history fact. '.repeat(75),
+        citations: completed.result.summary.overview.citations,
+      };
+      const result = resultSchema.parse({
+        ...completed.result,
+        summary: {
+          overview: fact,
+          topics: Array.from({ length: 6 }, () => fact),
+          decisions: Array.from({ length: 6 }, () => fact),
+          action_items: Array.from({ length: 6 }, () => ({
+            ...fact,
+            owner: null,
+            due_date: null,
+          })),
+          open_questions: Array.from({ length: 6 }, () => fact),
+        },
+      });
+      await db.pool.query('UPDATE jobs SET result=$2 WHERE id=$1', [
+        job.id,
+        JSON.stringify(result),
+      ]);
+      await db.pool.query(
+        `INSERT INTO jobs(id,document_id,workspace_id,owner_id,kind,idempotency_key,
+          request_hash,input,state,attempt,result,created_at)
+         SELECT gen_random_uuid(),j.document_id,j.workspace_id,j.owner_id,j.kind,
+          gen_random_uuid()::text,j.request_hash,j.input,j.state,j.attempt,j.result,
+          j.created_at-(cohort.ordinal*interval '1 millisecond')
+         FROM jobs j CROSS JOIN generate_series(1,19) cohort(ordinal) WHERE j.id=$1`,
+        [job.id],
+      );
+      const first = await service.inject({ url, headers: owner.headers });
+      expect(first.statusCode).toBe(200);
+      expect(first.json().jobs).toHaveLength(20);
+      expect(Buffer.byteLength(first.body)).toBeGreaterThan(1_000_000);
+      expect(first.json().jobs[0].state).toBe('succeeded');
+      const parseResult = vi.spyOn(resultSchema, 'parse');
+      const parseJob = vi.spyOn(jobSchema, 'parse');
+      const transaction = db.transaction.bind(db);
+      const inspect = vi
+        .spyOn(db, 'transaction')
+        .mockImplementation(
+          async <T>(operation: (tx: Transaction) => Promise<T>): Promise<T> =>
+            transaction(async (tx) => {
+              const query = vi.spyOn(tx, 'query');
+              try {
+                const result = await operation(tx);
+                expect(
+                  (await tx.query('SHOW transaction_read_only')).rows[0],
+                ).toEqual({ transaction_read_only: 'on' });
+                expect(
+                  (await tx.query('SHOW transaction_isolation')).rows[0],
+                ).toEqual({ transaction_isolation: 'repeatable read' });
+                const proofs = query.mock.calls.flatMap(([sql], index) =>
+                  typeof sql === 'string' &&
+                  sql.includes('row_to_json(history)')
+                    ? [query.mock.results[index]]
+                    : [],
+                );
+                expect(proofs).toHaveLength(1);
+                expect(await proofs[0]?.value).toMatchObject({
+                  rowCount: 20,
+                  fields: [{ name: 'history_source', dataTypeID: 25 }],
+                  rows: Array.from({ length: 20 }, () => ({
+                    history_source: expect.stringMatching(/^[a-f0-9]{64}$/u),
+                  })),
+                });
+                return result;
+              } finally {
+                query.mockRestore();
+              }
+            }),
+        );
+      try {
+        const tag = String(first.headers.etag);
+        for (const condition of [tag, `W/${tag}`, `"other", W/${tag}`, '*']) {
+          const response = await service.inject({
+            url,
+            headers: { ...owner.headers, 'if-none-match': condition },
+          });
+          expect(response.statusCode).toBe(304);
+          expect(response.body).toBe('');
+          expect(response.headers.etag).toBe(tag);
+          expect(parseResult).not.toHaveBeenCalled();
+          expect(parseJob).not.toHaveBeenCalled();
+        }
+      } finally {
+        inspect.mockRestore();
+        parseResult.mockRestore();
+        parseJob.mockRestore();
+      }
+    });
+    it.each([undefined, '"other-tag"', '"unterminated'])(
+      'validates and returns complete history for a nonmatching condition: %s',
+      async (condition) => {
+        const first = await service.inject({ url, headers: owner.headers });
+        const parseResult = vi.spyOn(resultSchema, 'parse');
+        try {
+          const response = await service.inject({
+            url,
+            headers: {
+              ...owner.headers,
+              ...(condition === undefined
+                ? {}
+                : { 'if-none-match': condition }),
+            },
+          });
+          expect(response.statusCode).toBe(200);
+          expect(response.body).toBe(first.body);
+          expect(response.headers.etag).toBe(first.headers.etag);
+          expect(parseResult).toHaveBeenCalledTimes(1);
+        } finally {
+          parseResult.mockRestore();
+        }
+      },
+    );
+    it('invalidates a full-body edit even when status, timestamps and event sequence do not change', async () => {
+      const first = await service.inject({ url, headers: owner.headers });
+      await db.pool.query(
+        `UPDATE jobs SET result=jsonb_set(result,'{summary,overview,text}',to_jsonb($2::text))
+         WHERE id=$1`,
+        [job.id, 'A different complete saved summary.'],
+      );
+      const changed = await service.inject({
+        url,
+        headers: {
+          ...owner.headers,
+          'if-none-match': String(first.headers.etag),
+        },
+      });
+      expect(changed.statusCode).toBe(200);
+      expect(changed.headers.etag).not.toBe(first.headers.etag);
+      expect(changed.json().jobs[0].result.summary.overview.text).toBe(
+        'A different complete saved summary.',
+      );
+    });
+    it.each(['input', 'result', 'error', 'progress'] as const)(
+      'does not conceal malformed raw %s behind a cached successful tag',
+      async (column) => {
+        const first = await service.inject({ url, headers: owner.headers });
+        const saved = (
+          await db.pool.query<Record<string, unknown>>(
+            `SELECT ${column} FROM jobs WHERE id=$1`,
+            [job.id],
+          )
+        ).rows[0]![column];
+        const log = vi
+          .spyOn(console, 'error')
+          .mockImplementation(() => undefined);
+        try {
+          await db.pool.query(`UPDATE jobs SET ${column}=$2 WHERE id=$1`, [
+            job.id,
+            JSON.stringify({ malformed: 'Synthetic private history value.' }),
+          ]);
+          const response = await service.inject({
+            url,
+            headers: {
+              ...owner.headers,
+              'if-none-match': String(first.headers.etag),
+            },
+          });
+          expect(response.statusCode).toBe(500);
+          expect(response.json()).toMatchObject({ code: 'internal_error' });
+          expect(response.headers.etag).toBeUndefined();
+          expect(response.body).not.toContain('Synthetic private');
+          expect(log).toHaveBeenCalledWith(
+            expect.stringContaining('"code":"internal_error"'),
+          );
+        } finally {
+          await db.pool.query(`UPDATE jobs SET ${column}=$2 WHERE id=$1`, [
+            job.id,
+            saved === null ? null : JSON.stringify(saved),
+          ]);
+          log.mockRestore();
+        }
+        const restored = await service.inject({
+          url,
+          headers: {
+            ...owner.headers,
+            'if-none-match': String(first.headers.etag),
+          },
+        });
+        expect(restored.statusCode).toBe(304);
+        expect(restored.headers.etag).toBe(first.headers.etag);
+      },
+    );
+    it('strictly rebuilds the receipt in a fresh server instance before reusing it', async () => {
+      const first = await service.inject({ url, headers: owner.headers });
+      await service.close();
+      service = await createServer(db, {
+        mode: 'development',
+        host: '127.0.0.1',
+      });
+      const parseResult = vi.spyOn(resultSchema, 'parse');
+      try {
+        const headers = {
+          ...owner.headers,
+          'if-none-match': String(first.headers.etag),
+        };
+        const cold = await service.inject({ url, headers });
+        expect(cold.statusCode).toBe(304);
+        expect(cold.headers.etag).toBe(first.headers.etag);
+        expect(parseResult).toHaveBeenCalledTimes(1);
+        parseResult.mockClear();
+        const warm = await service.inject({ url, headers });
+        expect(warm.statusCode).toBe(304);
+        expect(parseResult).not.toHaveBeenCalled();
+      } finally {
+        parseResult.mockRestore();
+      }
+    });
+    it('does not substitute cached success when the database is unavailable', async () => {
+      const first = await service.inject({ url, headers: owner.headers });
+      const read = vi
+        .spyOn(db, 'jobHistory')
+        .mockRejectedValueOnce(new Error('Query read timeout'));
+      const log = vi
+        .spyOn(console, 'error')
+        .mockImplementation(() => undefined);
+      try {
+        const response = await service.inject({
+          url,
+          headers: {
+            ...owner.headers,
+            'if-none-match': String(first.headers.etag),
+          },
+        });
+        expect(response.statusCode).toBe(503);
+        expect(response.json()).toMatchObject({
+          code: 'database_unavailable',
+          retryable: true,
+        });
+        expect(response.headers.etag).toBeUndefined();
+        expect(log).toHaveBeenCalledWith(
+          expect.stringContaining('"code":"database_unavailable"'),
+        );
+      } finally {
+        read.mockRestore();
+        log.mockRestore();
+      }
+    });
+    it('binds authorization, source proofs and full reads to one PostgreSQL view', async () => {
+      const first = await service.inject({ url, headers: owner.headers });
+      const transaction = db.transaction.bind(db);
+      let mutated = false;
+      const barrier = vi
+        .spyOn(db, 'transaction')
+        .mockImplementation(
+          async <T>(operation: (tx: Transaction) => Promise<T>): Promise<T> =>
+            transaction((tx) =>
+              operation(
+                new Proxy(tx, {
+                  get(target, property, receiver) {
+                    if (property !== 'query')
+                      return Reflect.get(target, property, receiver);
+                    return async (sql: string, values?: unknown[]) => {
+                      const result = await target.query(sql, values);
+                      if (sql.includes('visible_document') && !mutated) {
+                        mutated = true;
+                        await db.pool.query(
+                          `UPDATE jobs SET result=jsonb_set(result,'{summary,overview,text}',to_jsonb($2::text))
+                         WHERE id=$1`,
+                          [
+                            job.id,
+                            'A concurrently committed complete summary.',
+                          ],
+                        );
+                      }
+                      return result;
+                    };
+                  },
+                }),
+              ),
+            ),
+        );
+      try {
+        const response = await service.inject({
+          url,
+          headers: {
+            ...owner.headers,
+            'if-none-match': String(first.headers.etag),
+          },
+        });
+        expect(mutated).toBe(true);
+        expect(response.statusCode).toBe(304);
+        expect(response.headers.etag).toBe(first.headers.etag);
+      } finally {
+        barrier.mockRestore();
+      }
+      const next = await service.inject({
+        url,
+        headers: {
+          ...owner.headers,
+          'if-none-match': String(first.headers.etag),
+        },
+      });
+      expect(next.statusCode).toBe(200);
+      expect(next.headers.etag).not.toBe(first.headers.etag);
+      expect(next.json().jobs[0].result.summary.overview.text).toBe(
+        'A concurrently committed complete summary.',
+      );
+    });
+    it('does not use another meeting or page receipt even for identical empty histories', async () => {
+      const other = await document(owner, 'A different meeting.', service);
+      const emptyUrl = `/v1/documents/${other.id}/jobs?limit=20`;
+      const first = await service.inject({
+        url: emptyUrl,
+        headers: owner.headers,
+      });
+      const history = vi.spyOn(db, 'jobHistory');
+      try {
+        const headers = {
+          ...owner.headers,
+          'if-none-match': String(first.headers.etag),
+        };
+        const differentPage = await service.inject({
+          url: `${url}&offset=1`,
+          headers,
+        });
+        expect(differentPage.statusCode).toBe(304);
+        expect(history.mock.calls[0]?.[4]).toBeUndefined();
+        const samePage = await service.inject({ url: emptyUrl, headers });
+        expect(samePage.statusCode).toBe(304);
+        expect(history.mock.calls[1]?.[4]).toMatch(/^[a-f0-9]{64}$/u);
+      } finally {
+        history.mockRestore();
+      }
+    });
   });
   it('conditional history still authorizes ownership, membership and deletion before matching a cache tag', async () => {
     const owner = await actor();
