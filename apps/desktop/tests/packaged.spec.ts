@@ -315,9 +315,17 @@ test('opens the actual packaged sandboxed editor without workspace runtime depen
             bitmap.fill(0, offset, offset + 3);
         const blackIcon = join(root, 'black.ico');
         const sourceIcon = join(root, 'source.ico');
+        const blackSource = join(root, 'black.cs');
+        const colorSource = join(root, 'source.cs');
         await Promise.all([
           writeFile(blackIcon, black, { flag: 'wx' }),
           writeFile(sourceIcon, assets.ico, { flag: 'wx' }),
+          writeFile(blackSource, 'public class BlackIconFixture {}', {
+            flag: 'wx',
+          }),
+          writeFile(colorSource, 'public class SourceIconFixture {}', {
+            flag: 'wx',
+          }),
         ]);
         const file = join(root, 'cached.dll');
         const source = join(root, 'source.dll');
@@ -331,7 +339,17 @@ test('opens the actual packaged sandboxed editor without workspace runtime depen
             '-NoProfile',
             '-NonInteractive',
             '-Command',
-            "$ErrorActionPreference='Stop'; Add-Type -TypeDefinition 'public class BlackIconFixture {}' -OutputAssembly $env:NOTES_BLACK_DLL -CompilerOptions ('/win32icon:'+$env:NOTES_BLACK_ICON); Add-Type -TypeDefinition 'public class SourceIconFixture {}' -OutputAssembly $env:NOTES_SOURCE_DLL -CompilerOptions ('/win32icon:'+$env:NOTES_SOURCE_ICON)",
+            `
+$ErrorActionPreference='Stop'
+$sdk = & $env:NOTES_ICON_DOTNET --version
+if ($LASTEXITCODE -ne 0 -or $sdk -notmatch '^\\d+\\.\\d+\\.\\d+$') { throw 'A stable installed SDK is required.' }
+$compiler = Join-Path (Split-Path -Parent $env:NOTES_ICON_DOTNET) ('sdk\\'+$sdk+'\\Roslyn\\bincore\\csc.dll')
+$reference = '/reference:'+([object].Assembly.Location)
+& $env:NOTES_ICON_DOTNET $compiler /nologo /noconfig /target:library /platform:x64 /nostdlib+ $reference ('/win32icon:'+$env:NOTES_BLACK_ICON) ('/out:'+$env:NOTES_BLACK_DLL) $env:NOTES_BLACK_SOURCE
+if ($LASTEXITCODE -ne 0) { throw 'Black native icon fixture compilation failed.' }
+& $env:NOTES_ICON_DOTNET $compiler /nologo /noconfig /target:library /platform:x64 /nostdlib+ $reference ('/win32icon:'+$env:NOTES_SOURCE_ICON) ('/out:'+$env:NOTES_SOURCE_DLL) $env:NOTES_SOURCE_SOURCE
+if ($LASTEXITCODE -ne 0) { throw 'Colored native icon fixture compilation failed.' }
+`,
           ],
           {
             env: {
@@ -340,6 +358,12 @@ test('opens the actual packaged sandboxed editor without workspace runtime depen
               NOTES_SOURCE_DLL: source,
               NOTES_BLACK_ICON: blackIcon,
               NOTES_SOURCE_ICON: sourceIcon,
+              NOTES_BLACK_SOURCE: blackSource,
+              NOTES_SOURCE_SOURCE: colorSource,
+              NOTES_ICON_DOTNET: join(programs, 'dotnet', 'dotnet.exe'),
+              DOTNET_CLI_TELEMETRY_OPTOUT: '1',
+              DOTNET_NOLOGO: '1',
+              DOTNET_SKIP_FIRST_TIME_EXPERIENCE: '1',
             },
             encoding: 'utf8',
             timeout: 10_000,
@@ -351,6 +375,12 @@ test('opens the actual packaged sandboxed editor without workspace runtime depen
           throw new Error(
             'Native icon fixture compilation emitted diagnostics.',
           );
+        for (const [fixture, ico] of [
+          [readFileSync(file), black],
+          [readFileSync(source), assets.ico],
+        ])
+          for (const { bitmap } of iconImages(ico))
+            expect(fixture.includes(bitmap)).toBe(true);
         const native = await readNativeFileIcons([file, source]);
         expect(native.map(({ file }) => file)).toEqual([file, source]);
         const offset = (4 * 32 + 16) * 4;
