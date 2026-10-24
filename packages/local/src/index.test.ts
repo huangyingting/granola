@@ -1807,6 +1807,126 @@ describe('encrypted local drafts and durable outbox', () => {
     );
     return { store, source, artifacts };
   }
+  function checkpointEnvelope() {
+    const sql = new DatabaseSync(path, { readOnly: true });
+    try {
+      return Buffer.from(
+        z
+          .instanceof(Uint8Array)
+          .parse(
+            sql
+              .prepare(
+                "SELECT payload FROM vault WHERE profile=? AND id='sync:checkpoint'",
+              )
+              .get(profile)?.payload,
+          ),
+      ).toString('hex');
+    } finally {
+      sql.close();
+    }
+  }
+  it('idle synchronization preserves the cursor envelope and cache version without local writes', () => {
+    const { store } = synchronizedStore();
+    const version = store.cacheVersion();
+    const envelope = checkpointEnvelope();
+    for (let index = 0; index < 3; index++) {
+      store.acceptChanges(
+        profile,
+        'artifact_cursor_1',
+        'artifact_cursor_1',
+        [],
+      );
+      expect(store.syncCheckpoint(profile)).toEqual({
+        cursor: 'artifact_cursor_1',
+        bootstrap: null,
+      });
+      expect(store.cacheVersion()).toBe(version);
+      expect(checkpointEnvelope()).toBe(envelope);
+    }
+  });
+  it('idle synchronization persists an advanced cursor even when no documents are visible', () => {
+    const { store } = synchronizedStore();
+    const envelope = checkpointEnvelope();
+    store.acceptChanges(profile, 'artifact_cursor_1', 'artifact_cursor_2', []);
+    expect(checkpointEnvelope()).not.toBe(envelope);
+    close(store);
+    expect(open().syncCheckpoint(profile)).toEqual({
+      cursor: 'artifact_cursor_2',
+      bootstrap: null,
+    });
+  });
+  it.each(['replaced', 'bootstrap', 'purged'] as const)(
+    'idle synchronization still rejects a %s checkpoint before accepting an empty page',
+    (change) => {
+      const { store } = synchronizedStore();
+      if (change === 'replaced') {
+        const writer = open();
+        writer.putValue(profile, 'sync:checkpoint', {
+          cursor: 'another_device_cursor',
+          bootstrap: null,
+        });
+      } else if (change === 'bootstrap') store.beginSnapshot(profile);
+      else store.purgeProfile(profile);
+      const checkpoint = store.syncCheckpoint(profile);
+      const version = store.cacheVersion();
+      expect(() =>
+        store.acceptChanges(
+          profile,
+          'artifact_cursor_1',
+          'artifact_cursor_1',
+          [],
+        ),
+      ).toThrow('no longer active');
+      expect(store.syncCheckpoint(profile)).toEqual(checkpoint);
+      expect(store.cacheVersion()).toBe(version);
+    },
+  );
+  it('idle synchronization validates empty-page cursors without changing the saved checkpoint', () => {
+    const { store } = synchronizedStore();
+    const version = store.cacheVersion();
+    const envelope = checkpointEnvelope();
+    expect(() =>
+      store.acceptChanges(profile, 'artifact_cursor_1', '', []),
+    ).toThrow();
+    expect(store.cacheVersion()).toBe(version);
+    expect(checkpointEnvelope()).toBe(envelope);
+  });
+  it('idle synchronization stays write-free inside a rolled-back outer transaction', () => {
+    const { store } = synchronizedStore();
+    const version = store.cacheVersion();
+    const envelope = checkpointEnvelope();
+    expect(() =>
+      store.atomic(() => {
+        store.acceptChanges(
+          profile,
+          'artifact_cursor_1',
+          'artifact_cursor_1',
+          [],
+        );
+        expect(store.cacheVersion()).toBeNull();
+        throw new Error('Synthetic read-only outer rollback.');
+      }),
+    ).toThrow('Synthetic read-only outer rollback.');
+    expect(store.cacheVersion()).toBe(version);
+    expect(checkpointEnvelope()).toBe(envelope);
+  });
+  it('idle synchronization does not suppress document and artifact commits when a page contains updates', () => {
+    const { store, source } = synchronizedStore();
+    const envelope = checkpointEnvelope();
+    const artifacts = synchronizedArtifacts('Updated cached result.');
+    store.acceptChanges(profile, 'artifact_cursor_1', 'artifact_cursor_1', [
+      {
+        id: source.id,
+        document: remote(source, 2, { title: 'A changed document.' }),
+        artifacts,
+      },
+    ]);
+    expect(checkpointEnvelope()).not.toBe(envelope);
+    expect(store.get(profile, source.id).title).toBe('A changed document.');
+    expect(
+      store.getArtifact(profile, source.id, 'job-history', z.unknown()),
+    ).toEqual(artifacts.at(-1)!.value);
+  });
   function acceptArtifacts(
     store: LocalStore,
     source: Draft,

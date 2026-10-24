@@ -345,6 +345,57 @@ describe('Windows desktop synthetic service contract', () => {
       read.mock.calls.filter((args) => args[2] === 'job-history'),
     ).toHaveLength(1);
   });
+  it('idle synchronization keeps warm summary metadata without rewriting storage or skipping fresh access checks', async () => {
+    await savedSummaries();
+    const jobs = controller.snapshot().jobs;
+    const version = local.cacheVersion();
+    const read = vi.spyOn(local, 'getArtifact');
+    const identity = vi.spyOn(ApiClient.prototype, 'identity');
+    const memberships = vi.spyOn(ApiClient.prototype, 'workspaces');
+    const changes = vi.spyOn(ApiClient.prototype, 'changes');
+    for (let index = 0; index < 3; index++) {
+      await controller.synchronize();
+      expect(controller.snapshot().jobs).toEqual(jobs);
+    }
+    expect(identity).toHaveBeenCalledTimes(3);
+    expect(memberships).toHaveBeenCalledTimes(3);
+    expect(changes).toHaveBeenCalledTimes(3);
+    expect(
+      read.mock.calls.filter((args) => args[2] === 'job-history'),
+    ).toHaveLength(0);
+    expect(local.cacheVersion()).toBe(version);
+  });
+  it('idle synchronization still observes another live store changing warmed job metadata', async () => {
+    const { document, jobs } = await savedSummaries(1);
+    expect(controller.snapshot().jobs[0]?.input_stale).toBe(false);
+    const writer = new LocalStore(join(directory, 'notes.sqlite'), key);
+    try {
+      writer.putArtifact(controller.profile, document.id, 'job-history', {
+        jobs: [{ ...jobs[0]!, input_stale: true }],
+      });
+      const version = local.cacheVersion();
+      await controller.synchronize();
+      expect(controller.snapshot().jobs[0]?.input_stale).toBe(true);
+      expect(local.cacheVersion()).toBe(version);
+    } finally {
+      writer.close();
+    }
+  });
+  it('idle synchronization checks revoked access and purges warmed offline results', async () => {
+    await savedSummaries(1);
+    expect(controller.snapshot().jobs).toHaveLength(1);
+    const changes = vi.spyOn(ApiClient.prototype, 'changes');
+    fixture.state.active = false;
+    await expect(controller.synchronize()).rejects.toMatchObject({
+      code: 'identity_not_provisioned',
+    });
+    expect(changes).not.toHaveBeenCalled();
+    expect(controller.snapshot()).toMatchObject({
+      jobs: [],
+      documents: [],
+      connection: { status: 'reauth_required' },
+    });
+  });
   it('warm job history invalidates after same-connection replacement and deletion', async () => {
     const { document, jobs } = await savedSummaries(1);
     expect(controller.snapshot().jobs[0]?.state).toBe('succeeded');

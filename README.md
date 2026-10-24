@@ -313,6 +313,12 @@ cursor. Damaged cached ciphertext is reported without replacing it or advancing
 the cursor; explicit artifact writes keep their existing replacement behavior.
 This does not eliminate document/cursor writes or establish a cold-cache latency SLO.
 
+Idle synchronization still checks identity, membership and remote changes. An
+empty page with the same cursor leaves the encrypted checkpoint untouched, so the
+warm metadata projection stays reusable when no other local writes or foreign
+commits occur. Advanced cursors and pages containing updates still commit normally;
+there is no cached-success shortcut around remote authorization.
+
 ```sh
 pnpm audio:publish
 pnpm desktop:build

@@ -288,6 +288,50 @@ describe.skipIf(!databaseUrl)(
       });
       expect(local.page(engine.profile).documents).toEqual([]);
     });
+    it('idle synchronization stays storage-neutral after encrypted restart and still verifies remote membership', async () => {
+      const remote = await seed();
+      await enqueueSummary(remote.id);
+      await finishSummary();
+      await engine.synchronize();
+      engine.stop();
+      local.close();
+      stores.delete(local);
+      local = open();
+      engine = new SyncEngine(local, api, actor.user_id, actor.workspace_id);
+      const version = local.cacheVersion();
+      const checkpoint = local.syncCheckpoint(engine.profile);
+      const encrypted = encryptedJobs(remote.id);
+      const identity = vi.spyOn(api, 'identity');
+      const memberships = vi.spyOn(api, 'workspaces');
+      const changes = vi.spyOn(api, 'changes');
+      for (let index = 0; index < 3; index++)
+        await expect(engine.synchronize()).resolves.toEqual({ more: false });
+      expect(identity).toHaveBeenCalledTimes(3);
+      expect(memberships).toHaveBeenCalledTimes(3);
+      expect(changes).toHaveBeenCalledTimes(3);
+      expect(local.cacheVersion()).toBe(version);
+      expect(local.syncCheckpoint(engine.profile)).toEqual(checkpoint);
+      expect(encryptedJobs(remote.id)).toEqual(encrypted);
+      expect(
+        local.getArtifact(
+          engine.profile,
+          remote.id,
+          'job-history',
+          z.strictObject({ jobs: z.array(jobSchema) }),
+        )?.jobs[0]?.result,
+      ).toMatchObject({
+        kind: 'summary',
+        summary: { overview: { text: remote.notes } },
+      });
+      await db.pool.query(
+        'UPDATE memberships SET active=false WHERE workspace_id=$1 AND user_id=$2',
+        [actor.workspace_id, actor.user_id],
+      );
+      await expect(engine.synchronize()).rejects.toMatchObject({
+        code: 'workspace_access_revoked',
+      });
+      expect(local.page(engine.profile).documents).toEqual([]);
+    });
     it('retries a committed request after a lost response and restart before pulling, preserving newer typing', async () => {
       const draft = local.create('offline', fields('Original frozen request.'));
       local.bindOffline(engine.profile);

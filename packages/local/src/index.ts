@@ -2013,7 +2013,8 @@ export class LocalStore {
             );
         }
       }
-      this.putValue(profile, 'sync:checkpoint', { cursor, bootstrap: null });
+      if (updates.length > 0 || cursor !== expected)
+        this.putValue(profile, 'sync:checkpoint', { cursor, bootstrap: null });
     });
   }
   resolve(

@@ -107,13 +107,14 @@ async function cacheArtifact(
     { directory, id, artifact, value },
   );
 }
-async function encryptedJobs(
+async function encryptedCache(
   application: ElectronApplication,
   directory: string,
   id: string,
+  kind: 'jobs' | 'checkpoint' = 'jobs',
 ) {
   return application.evaluate(
-    (_, { directory, id }) => {
+    (_, { directory, id, kind }) => {
       const { join } = process.getBuiltinModule('node:path');
       const { DatabaseSync } = process.getBuiltinModule('node:sqlite');
       const { createHash } = process.getBuiltinModule('node:crypto');
@@ -123,15 +124,17 @@ async function encryptedJobs(
       try {
         return sql
           .prepare(
-            'SELECT id,payload FROM vault WHERE document_id=? AND id LIKE ? ORDER BY profile,id',
+            'SELECT id,payload FROM vault WHERE profile IN (SELECT profile FROM drafts WHERE id=?) AND id LIKE ? ORDER BY profile,id',
           )
-          .all(id, `artifact:${id}:job%`)
+          .all(id, kind === 'jobs' ? `artifact:${id}:job%` : 'sync:checkpoint')
           .map((row) => {
             if (
               typeof row.id !== 'string' ||
               !(row.payload instanceof Uint8Array)
             )
-              throw new Error('The encrypted job artifact is unavailable.');
+              throw new Error(
+                'The encrypted synchronization cache is unavailable.',
+              );
             return {
               id: row.id,
               digest: createHash('sha256').update(row.payload).digest('hex'),
@@ -141,7 +144,7 @@ async function encryptedJobs(
         sql.close();
       }
     },
-    { directory, id },
+    { directory, id, kind },
   );
 }
 test('recovers consented chat and recovery receipts across Windows restarts, inspects encrypted frozen history offline and reconciles conversation deletion', async () => {
@@ -665,7 +668,7 @@ test('recovers one summary and resume receipt, inspects frozen evidence, persist
     if (!restored.ok || !('state' in restored))
       throw new Error('The restored job metadata did not cross preload.');
     expect(restored.state.jobs).toEqual(delivered.jobs);
-    const encrypted = await encryptedJobs(application, directory, remote.id);
+    const encrypted = await encryptedCache(application, directory, remote.id);
     expect(encrypted).toHaveLength(2);
     const revalidated = fixture.state.job_history_responses.not_modified;
     fixture.change(remote.id, 'Newer human cloud notes remain authoritative.');
@@ -673,9 +676,21 @@ test('recovers one summary and resume receipt, inspects frozen evidence, persist
     expect(fixture.state.job_history_responses.not_modified).toBeGreaterThan(
       revalidated,
     );
-    expect(await encryptedJobs(application, directory, remote.id)).toEqual(
+    expect(await encryptedCache(application, directory, remote.id)).toEqual(
       encrypted,
     );
+    const idleCheckpoint = await encryptedCache(
+      application,
+      directory,
+      remote.id,
+      'checkpoint',
+    );
+    expect(idleCheckpoint).toHaveLength(1);
+    for (let index = 0; index < 2; index++)
+      expect((await synchronize(application)).ok).toBe(true);
+    expect(
+      await encryptedCache(application, directory, remote.id, 'checkpoint'),
+    ).toEqual(idleCheckpoint);
     await page
       .getByRole('button', { name: 'Inspect source 1', exact: true })
       .first()
