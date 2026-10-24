@@ -101,6 +101,24 @@ export async function requireSigningEnvironment(repository) {
       'A valid GitHub repository is required.',
     );
   const prefix = `repos/${repository}`;
+  const source = await githubMetadata(prefix);
+  if (
+    !object(source) ||
+    !positiveId(source.id) ||
+    typeof source.full_name !== 'string' ||
+    source.full_name.toLowerCase() !== repository.toLowerCase() ||
+    typeof source.private !== 'boolean' ||
+    !['public', 'private', 'internal'].includes(source.visibility)
+  )
+    throw new SigningAdmissionError(
+      'signing_metadata_invalid',
+      'GitHub returned missing, invalid or mismatched repository metadata.',
+    );
+  if (source.private || source.visibility !== 'public')
+    throw new SigningAdmissionError(
+      'signing_repository_unsupported',
+      'This workflow requires a public repository; private/internal protection availability has not been verified.',
+    );
   const environment = await githubMetadata(
     `${prefix}/environments/${environmentName}`,
   );
@@ -150,6 +168,7 @@ export async function requireSigningEnvironment(repository) {
   return {
     version: 1,
     kind: 'signing_environment_preflight',
+    repository_visibility: 'public',
     environment: environmentName,
     required_reviewers_configured: true,
     branch_policy: policy.protected_branches

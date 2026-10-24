@@ -930,9 +930,15 @@ It does not publish a GitHub release or run on pull requests.
 
 Before the signing job can enter the environment, a separate job checks the
 exact-source Checks result and reads GitHub's environment metadata without signing
-secrets. It requires configured User/Team reviewers and either a selected-branches/
-tags policy or protected-branches-only with `main` actually protected. GitHub
-enforces the owner's selected branch/tag patterns; the preflight does not
+secrets. This workflow admits **public GitHub.com repositories only** and freshly
+verifies repository identity and visibility before reading environment controls.
+[GitHub protection availability depends on repository visibility and plan](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments):
+stored controls can be ignored after a public-to-private conversion. Signing in
+private/internal repositories requires separately verified protection support,
+not an assumed plan or a visibility fallback. The preflight requires configured
+User/Team reviewers and either a selected-branches/tags policy or
+protected-branches-only with `main` actually protected. GitHub enforces the owner's
+selected branch/tag patterns; the preflight does not
 approximate its pattern matcher or grant deployment approval. Missing,
 inaccessible, malformed or unprotected metadata fails explicitly. The signing job
 freshly rechecks these controls before installing dependencies. These read-only,

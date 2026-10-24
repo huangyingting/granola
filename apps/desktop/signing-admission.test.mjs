@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   requireSigningEnvironment,
   signingContext,
@@ -15,7 +15,9 @@ vi.mock('node:child_process', async (original) => {
   execFile[promisify.custom] = github;
   return { ...actual, execFile };
 });
-afterEach(() => github.mockReset());
+afterEach(() => {
+  github.mockReset();
+});
 
 const repository = 'synthetic-owner/notes';
 const context = {
@@ -48,8 +50,121 @@ function environment() {
 }
 const respond = (value) =>
   github.mockResolvedValueOnce({ stdout: JSON.stringify(value) });
+const publicRepository = () => ({
+  id: 3,
+  full_name: repository,
+  private: false,
+  visibility: 'public',
+});
+beforeEach(() => {
+  respond(publicRepository());
+});
 
 describe('signing environment admission', () => {
+  it('does not treat stored rules in a private repository as supported reviewer protection', async () => {
+    github.mockReset();
+    github.mockImplementation(async (_command, args) => ({
+      stdout: JSON.stringify(
+        args.at(-1) === `repos/${repository}`
+          ? {
+              id: 3,
+              full_name: repository,
+              private: true,
+              visibility: 'private',
+            }
+          : environment(),
+      ),
+    }));
+    await expect(requireSigningEnvironment(repository)).rejects.toMatchObject({
+      code: 'signing_repository_unsupported',
+    });
+    expect(github).toHaveBeenCalledTimes(1);
+    expect(github.mock.calls[0][1].at(-1)).toBe(`repos/${repository}`);
+  });
+  it.each(
+    [
+      null,
+      [],
+      {},
+      { ...publicRepository(), id: 0 },
+      { ...publicRepository(), id: '3' },
+      { ...publicRepository(), full_name: 'other-owner/notes' },
+      { ...publicRepository(), full_name: null },
+      { ...publicRepository(), private: undefined },
+      { ...publicRepository(), private: 'false' },
+      { ...publicRepository(), visibility: undefined },
+      { ...publicRepository(), visibility: 'unknown' },
+    ].map((value) => [value]),
+  )(
+    'rejects invalid or foreign repository metadata %j before reading environment controls',
+    async (value) => {
+      github.mockReset();
+      respond(value);
+      await expect(requireSigningEnvironment(repository)).rejects.toMatchObject(
+        {
+          code: 'signing_metadata_invalid',
+        },
+      );
+      expect(github).toHaveBeenCalledTimes(1);
+      expect(github.mock.calls[0][1].at(-1)).toBe(`repos/${repository}`);
+    },
+  );
+  it.each([
+    { private: true, visibility: 'internal' },
+    { private: false, visibility: 'internal' },
+    { private: true, visibility: 'public' },
+    { private: false, visibility: 'private' },
+  ])(
+    'rejects unsupported or inconsistent repository visibility %j',
+    async (value) => {
+      github.mockReset();
+      respond({ ...publicRepository(), ...value });
+      await expect(requireSigningEnvironment(repository)).rejects.toMatchObject(
+        {
+          code: 'signing_repository_unsupported',
+        },
+      );
+      expect(github).toHaveBeenCalledTimes(1);
+    },
+  );
+  it('accepts GitHub case-insensitive repository identity without defaulting visibility', async () => {
+    github.mockReset();
+    respond({ ...publicRepository(), full_name: repository.toUpperCase() });
+    respond(environment());
+    await expect(requireSigningEnvironment(repository)).resolves.toMatchObject({
+      repository_visibility: 'public',
+    });
+  });
+  it('does not read environment controls after a failed repository lookup', async () => {
+    github.mockReset();
+    github.mockRejectedValueOnce(
+      Object.assign(new Error(marker), { code: 1, stderr: marker }),
+    );
+    await expect(requireSigningEnvironment(repository)).rejects.toMatchObject({
+      code: 'signing_metadata_unavailable',
+      message: expect.not.stringContaining(marker),
+    });
+    expect(github).toHaveBeenCalledTimes(1);
+  });
+  it('does not read environment controls after malformed repository JSON', async () => {
+    github.mockReset();
+    github.mockResolvedValueOnce({ stdout: '{invalid' });
+    await expect(requireSigningEnvironment(repository)).rejects.toMatchObject({
+      code: 'signing_metadata_invalid',
+    });
+    expect(github).toHaveBeenCalledTimes(1);
+  });
+  it('freshly rejects a public-to-private conversion between admission and candidate recheck', async () => {
+    respond(environment());
+    await requireSigningEnvironment(repository);
+    respond({ ...publicRepository(), private: true, visibility: 'private' });
+    respond(environment());
+    await expect(requireSigningEnvironment(repository)).rejects.toMatchObject({
+      code: 'signing_repository_unsupported',
+    });
+    expect(github).toHaveBeenCalledTimes(3);
+    expect(github.mock.calls[2][1].at(-1)).toBe(`repos/${repository}`);
+  });
   it('binds admission to a manual GitHub.com main workflow without reading signing credentials', () => {
     expect(signingContext(context)).toEqual({
       repository,
@@ -96,13 +211,15 @@ describe('signing environment admission', () => {
     expect(result).toEqual({
       version: 1,
       kind: 'signing_environment_preflight',
+      repository_visibility: 'public',
       environment: 'signed-release',
       required_reviewers_configured: true,
       branch_policy: 'selected_branches_and_tags',
       production_accepted: false,
     });
     expect(JSON.stringify(result)).not.toContain(marker);
-    expect(github).toHaveBeenCalledTimes(1);
+    expect(github).toHaveBeenCalledTimes(2);
+    expect(github.mock.calls[0][1].at(-1)).toBe(`repos/${repository}`);
     expect(github).toHaveBeenCalledWith(
       'gh',
       [
@@ -146,9 +263,9 @@ describe('signing environment admission', () => {
       branch_policy: 'protected_main',
       production_accepted: false,
     });
-    expect(github).toHaveBeenCalledTimes(2);
-    expect(github.mock.calls[1][1]).toEqual([
-      ...github.mock.calls[0][1].slice(0, -1),
+    expect(github).toHaveBeenCalledTimes(3);
+    expect(github.mock.calls[2][1]).toEqual([
+      ...github.mock.calls[1][1].slice(0, -1),
       `repos/${repository}/branches/main`,
     ]);
   });
@@ -202,7 +319,7 @@ describe('signing environment admission', () => {
           code: 'signing_environment_unprotected',
         },
       );
-      expect(github).toHaveBeenCalledTimes(1);
+      expect(github).toHaveBeenCalledTimes(2);
     },
   );
   it.each(
@@ -220,7 +337,7 @@ describe('signing environment admission', () => {
     await expect(requireSigningEnvironment(repository)).rejects.toMatchObject({
       code: 'signing_environment_unprotected',
     });
-    expect(github).toHaveBeenCalledTimes(1);
+    expect(github).toHaveBeenCalledTimes(2);
   });
   it.each([
     null,
@@ -269,17 +386,18 @@ describe('signing environment admission', () => {
           message: expect.not.stringContaining(marker),
         },
       );
-      expect(github).toHaveBeenCalledTimes(1);
+      expect(github).toHaveBeenCalledTimes(2);
     },
   );
   it('does not reuse an earlier successful metadata check', async () => {
     respond(environment());
+    respond(publicRepository());
     respond({ ...environment(), protection_rules: [] });
     await requireSigningEnvironment(repository);
     await expect(requireSigningEnvironment(repository)).rejects.toMatchObject({
       code: 'signing_environment_unprotected',
     });
-    expect(github).toHaveBeenCalledTimes(2);
+    expect(github).toHaveBeenCalledTimes(4);
   });
   it('fails explicitly when the bounded metadata process is terminated at its deadline', async () => {
     github.mockRejectedValueOnce(
