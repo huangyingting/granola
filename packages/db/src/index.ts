@@ -32,6 +32,7 @@ import { LiveSourceStore } from './live.js';
 import { SummaryStages } from './summaries.js';
 import { MeetingQuestions } from './questions.js';
 import { ChatStore } from './chat.js';
+import { readReplay } from './replay.js';
 import {
   operationsSnapshot,
   operationsHousekeepingSnapshot,
@@ -1122,49 +1123,11 @@ export class Database {
     });
   }
   async events(userId: string, id: string, after: number) {
-    const job = await this.job(userId, id);
-    const bounds = await this.pool.query<{
-      first: number | null;
-      last: number;
-      expired: number | null;
-    }>(
-      `SELECT min(e.seq) first,j.event_seq last,
-       max(e.seq) FILTER (WHERE e.created_at<now()-interval '7 days') expired
-       FROM jobs j LEFT JOIN job_events e ON e.job_id=j.id WHERE j.id=$1 GROUP BY j.event_seq`,
-      [id],
-    );
-    const bound = bounds.rows[0]!;
-    if (after > bound.last)
-      throw new ServiceError(
-        'invalid_event_cursor',
-        'The event cursor is ahead of this job.',
-        400,
-      );
-    if (
-      after < Math.max((bound.first ?? bound.last + 1) - 1, bound.expired ?? 0)
-    )
-      throw new ServiceError(
-        'event_cursor_expired',
-        'Replay events expired; fetch the authorized job snapshot.',
-        410,
-      );
-    const rows = await this.pool.query<{
-      seq: number;
-      event_type: string;
-      payload: unknown;
-      created_at: Date;
-    }>(
-      `SELECT e.seq,e.event_type,e.payload,e.created_at FROM job_events e JOIN jobs j ON j.id=e.job_id
-      JOIN documents d ON d.id=j.document_id
-      JOIN memberships m ON m.workspace_id=d.workspace_id AND m.user_id=j.owner_id AND m.active
-      JOIN users u ON u.id=j.owner_id AND u.active
-      WHERE e.job_id=$1 AND e.seq>$2 AND j.owner_id=$3 AND d.deleted_at IS NULL
-      AND e.created_at>=now()-interval '7 days' ORDER BY e.seq LIMIT 50`,
-      [id, after, userId],
-    );
+    const replay = await readReplay(this, 'job', userId, id, after);
+    await this.job(userId, id);
     return {
-      terminal: terminal.has(job.state),
-      events: rows.rows.map((row) =>
+      terminal: replay.terminal,
+      events: replay.events.map((row) =>
         jobEventSchema.parse({
           job_id: id,
           seq: row.seq,

@@ -32,6 +32,7 @@ import {
   type TaskCompletion,
 } from './index.js';
 import { usageTotals, type UsageReservation } from './usage.js';
+import { readReplay } from './replay.js';
 
 export interface ClaimedChat {
   id: string;
@@ -82,23 +83,6 @@ interface Row {
   fresh: boolean;
   leased: boolean;
 }
-type ReplayRow = {
-  first: number | null;
-  expired: number | null;
-} & (
-  | {
-      seq: number;
-      event_type: string;
-      payload: unknown;
-      created_at: Date;
-    }
-  | {
-      seq: null;
-      event_type: null;
-      payload: null;
-      created_at: null;
-    }
-);
 const access = `
  JOIN documents d ON d.id=t.document_id AND d.owner_id=t.owner_id
  JOIN memberships m ON m.workspace_id=d.workspace_id AND m.user_id=t.owner_id AND m.active
@@ -128,8 +112,6 @@ const needsNew = new Set([
   'question_progress_expired',
   'question_identity_changed',
 ]);
-const terminal = (state: string) =>
-  ['succeeded', 'failed', 'cancelled'].includes(state);
 function resumable(row: Row) {
   return (
     row.state === 'failed' &&
@@ -823,53 +805,19 @@ export class ChatStore {
     return this.get(user, id);
   }
   async events(user: string, id: string, after: number) {
-    const row = await this.row(user, id);
-    if (!Number.isInteger(after) || after < 0 || after > row.event_seq)
-      throw new ServiceError(
-        'invalid_event_cursor',
-        'The event sequence is outside this question.',
-        400,
-      );
-    const rows = await this.database.pool.query<ReplayRow>(
-      `WITH bounds AS (
-         SELECT min(seq) first,
-           max(seq) FILTER (WHERE created_at<now()-interval '7 days') expired
-         FROM chat_events WHERE turn_id=$1
-       )
-       SELECT b.first,b.expired,e.* FROM bounds b LEFT JOIN LATERAL (
-         SELECT e.seq,e.event_type,e.payload,e.created_at FROM chat_events e JOIN chat_turns t ON t.id=e.turn_id ${access}
-         WHERE t.id=$1 AND t.owner_id=$2 AND e.seq>$3 AND d.deleted_at IS NULL
-           AND e.created_at>=now()-interval '7 days' ORDER BY e.seq LIMIT 50
-       ) e ON true ORDER BY e.seq`,
-      [id, user, after],
-    );
-    await this.database.document(user, row.document_id);
-    const bounds = rows.rows[0];
-    if (!bounds) throw new Error('Question replay bounds are unavailable.');
-    if (
-      after <
-      Math.max((bounds.first ?? row.event_seq + 1) - 1, bounds.expired ?? 0)
-    )
-      throw new ServiceError(
-        'event_cursor_expired',
-        'Question replay expired; fetch the authorized turn snapshot.',
-        410,
-      );
+    const replay = await readReplay(this.database, 'question', user, id, after);
+    await this.database.document(user, replay.document_id);
     return {
-      terminal: terminal(row.state),
-      events: rows.rows.flatMap((event) =>
-        event.seq === null
-          ? []
-          : [
-              chatEventSchema.parse({
-                turn_id: id,
-                seq: event.seq,
-                event_type: event.event_type,
-                payload: event.payload,
-                schema_version: 1,
-                created_at: event.created_at.toISOString(),
-              }),
-            ],
+      terminal: replay.terminal,
+      events: replay.events.map((event) =>
+        chatEventSchema.parse({
+          turn_id: id,
+          seq: event.seq,
+          event_type: event.event_type,
+          payload: event.payload,
+          schema_version: 1,
+          created_at: event.created_at.toISOString(),
+        }),
       ),
     };
   }

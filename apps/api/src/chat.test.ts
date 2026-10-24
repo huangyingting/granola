@@ -553,6 +553,39 @@ describe.skipIf(!databaseUrl)(
       );
     });
     describe('seven-day question replay retention', () => {
+      it.each(['middle', 'tail'] as const)(
+        'recovers from a missing %s replay sequence without losing the saved answer',
+        async (location) => {
+          const turn = await accepted((await source()).id);
+          await runOnce(db, providers);
+          const complete = await db.chat.get(actor.user_id, turn.id);
+          await db.pool.query(
+            'DELETE FROM chat_events WHERE turn_id=$1 AND seq=$2',
+            [turn.id, location === 'middle' ? 2 : complete.last_event_id],
+          );
+          const response = await app.inject({
+            url: `/v1/chat-turns/${turn.id}/events`,
+            headers,
+          });
+          expect(response.statusCode).toBe(410);
+          expect(response.json().code).toBe('event_cursor_expired');
+          const snapshot = await app.inject({
+            url: `/v1/chat-turns/${turn.id}/event-state`,
+            headers,
+          });
+          expect(chatEventStateSchema.parse(snapshot.json()).turn).toEqual(
+            complete,
+          );
+          expect(
+            await db.chat.events(
+              actor.user_id,
+              turn.id,
+              complete.last_event_id,
+            ),
+          ).toEqual({ terminal: true, events: [] });
+          expect(providers.answer).toHaveBeenCalledTimes(1);
+        },
+      );
       it('expires physical replay before pruning while preserving the authorized answer and rejecting foreign readers', async () => {
         const turn = await accepted((await source()).id);
         await runOnce(db, providers);

@@ -1031,6 +1031,13 @@ authorized `/v1/jobs/:id/event-state` snapshot, whose job, event sequence and sa
 stage count share one database snapshot. Terminal streams drain every replay batch
 instead of stopping after the first 50 events.
 
+Job and question replay share an authorized SQL read of parent state/cursor,
+seven-day expiry bounds and at most 50 retained frames. Access is checked again
+before returning a batch. Missing middle or tail sequences also return
+`410 event_cursor_expired` for snapshot recovery rather than skipping frames or
+pretending that an incomplete terminal stream finished. None of these read
+recoveries authorizes another provider request.
+
 The configured Azure deployment streams structured final generation for both
 short and long summaries. Extraction and merge remain bounded structured requests.
 Only the leading overview string becomes a plain-text **Unverified draft**; raw

@@ -1,5 +1,14 @@
 import { randomUUID } from 'node:crypto';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vitest';
 import type { Job } from '@windows-ai-notes/contracts/server';
 import { Database, digest, type Transaction } from './index.js';
 import { pruneJobHistory } from './cleanup.js';
@@ -39,6 +48,7 @@ describe.skipIf(!databaseUrl)('bounded transactional job housekeeping', () => {
       )
     ).id;
   });
+  afterEach(() => vi.restoreAllMocks());
   afterAll(async () => {
     try {
       await db?.close();
@@ -166,6 +176,25 @@ describe.skipIf(!databaseUrl)('bounded transactional job housekeeping', () => {
       )
     ).rows[0]?.job_id;
   }
+  function afterReplayRead(effect: () => Promise<void>) {
+    const query = db.pool.query.bind(db.pool);
+    let applied = false;
+    vi.spyOn(db.pool, 'query').mockImplementation(
+      async (...args: Parameters<typeof db.pool.query>) => {
+        const result = await query(...args);
+        if (
+          !applied &&
+          typeof args[0] === 'string' &&
+          args[0].includes('job_events') &&
+          args[0].includes('expired')
+        ) {
+          applied = true;
+          await effect();
+        }
+        return result;
+      },
+    );
+  }
   // Isolated schemas still share the database-wide housekeeping leader.
   const prune = () => db.transaction(pruneJobHistory);
   it('deletes at most1000 replay rows and retains exact expired-cursor snapshot recovery', async () => {
@@ -216,6 +245,88 @@ describe.skipIf(!databaseUrl)('bounded transactional job housekeeping', () => {
     await expect(db.events(actor.user_id, key, 1)).rejects.toMatchObject({
       code: 'event_cursor_expired',
     });
+  });
+  it('does not split the replay expiry clock and retained frames across SQL snapshots', async () => {
+    const key = await job(id(1));
+    await events(key, 3);
+    await db.pool.query('UPDATE job_events SET created_at=now()');
+    afterReplayRead(async () => {
+      await db.pool.query(
+        "UPDATE job_events SET created_at=now()-interval '8 days'",
+      );
+    });
+    expect(
+      (await db.events(actor.user_id, key, 0)).events.map((event) => event.seq),
+    ).toEqual([1, 2, 3]);
+    await expect(db.events(actor.user_id, key, 0)).rejects.toMatchObject({
+      code: 'event_cursor_expired',
+    });
+  });
+  it('observes terminal state, durable cursor and frames from the same snapshot during cancellation', async () => {
+    const key = await job(id(1), 'summary', 'queued', 0);
+    await events(key, 1);
+    await db.pool.query('UPDATE job_events SET created_at=now()');
+    afterReplayRead(async () => {
+      await db.cancel(actor.user_id, key);
+    });
+    const first = await db.events(actor.user_id, key, 0);
+    expect(first.terminal).toBe(false);
+    expect(first.events.map((event) => event.seq)).toEqual([1]);
+    const next = await db.events(actor.user_id, key, 1);
+    expect(next.terminal).toBe(true);
+    expect(next.events.map((event) => event.event_type)).toEqual([
+      'job.cancelled',
+    ]);
+  });
+  it('rechecks job authority after reading a coherent batch', async () => {
+    const key = await job(id(1));
+    await events(key, 1);
+    await db.pool.query('UPDATE job_events SET created_at=now()');
+    afterReplayRead(async () => {
+      await db.pool.query('UPDATE users SET active=false WHERE id=$1', [
+        actor.user_id,
+      ]);
+    });
+    await expect(db.events(actor.user_id, key, 0)).rejects.toMatchObject({
+      code: 'job_not_found',
+      status: 404,
+    });
+  });
+  it.each(['middle', 'tail', 'later batch'] as const)(
+    'requires snapshot recovery for a missing %s replay sequence',
+    async (location) => {
+      const key = await job(id(1));
+      const count = location === 'later batch' ? 55 : 3;
+      await events(key, count);
+      await db.pool.query('UPDATE job_events SET created_at=now()');
+      await db.pool.query('DELETE FROM job_events WHERE seq=$1', [
+        location === 'middle' ? 2 : location === 'tail' ? 3 : 52,
+      ]);
+      let cursor = 0;
+      if (location === 'later batch') {
+        const first = await db.events(actor.user_id, key, 0);
+        expect(first.events).toHaveLength(50);
+        cursor = first.events.at(-1)!.seq;
+      }
+      await expect(db.events(actor.user_id, key, cursor)).rejects.toMatchObject(
+        {
+          code: 'event_cursor_expired',
+          status: 410,
+        },
+      );
+      expect((await db.eventState(actor.user_id, key)).last_event_id).toBe(
+        count,
+      );
+      expect((await db.events(actor.user_id, key, count)).events).toEqual([]);
+    },
+  );
+  it('rejects malformed and out-of-range cursors before binding PostgreSQL integer parameters', async () => {
+    const key = await job(id(1));
+    for (const after of [-1, 0.5, NaN, Infinity, 2_147_483_648])
+      await expect(db.events(actor.user_id, key, after)).rejects.toMatchObject({
+        code: 'invalid_event_cursor',
+        status: 400,
+      });
   });
   it('retains the exact seven-day event boundary and24-hour failed-run boundary using the transaction clock', async () => {
     const key = await job(id(1));
