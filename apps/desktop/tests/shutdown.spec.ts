@@ -80,7 +80,13 @@ async function observeCancellation(
       const { writeFileSync } = process.getBuiltinModule('node:fs');
       const nativeFetch = globalThis.fetch;
       globalThis.fetch = (input, options) => {
-        if (input !== target) return nativeFetch(input, options);
+        const url =
+          typeof input === 'string'
+            ? input
+            : input instanceof URL
+              ? input.href
+              : input.url;
+        if (url !== target) return nativeFetch(input, options);
         const signal = options?.signal;
         if (!signal)
           throw new Error('The account request has no abort signal.');
