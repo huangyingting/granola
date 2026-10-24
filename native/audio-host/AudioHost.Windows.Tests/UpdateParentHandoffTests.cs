@@ -55,15 +55,15 @@ public sealed class UpdateParentHandoffTests
     public async Task BoundsBothTheDecisionAndThePostCommitExitWaitWithoutKillingTheParent(bool commit)
     {
         await using var fixture = await Fixture.OpenAsync();
-        var ready = await fixture.StartAsync(commit ? TimeSpan.FromSeconds(10) : TimeSpan.FromMilliseconds(500),
-            TimeSpan.FromMilliseconds(500));
         if (commit)
         {
+            var ready = await fixture.StartAsync(TimeSpan.FromSeconds(10), TimeSpan.FromMilliseconds(500));
             await fixture.DecideAsync(new UpdateHandoffDecision(1, "commit", ready.Challenge));
             await fixture.ReadAsync<UpdateParentCommitted>();
+            Assert.Equal("update_handoff_timeout",
+                (await Assert.ThrowsAsync<UpdateHandoffException>(() => fixture.Pending!)).Code);
         }
-        Assert.Equal("update_handoff_timeout",
-            (await Assert.ThrowsAsync<UpdateHandoffException>(() => fixture.Pending!)).Code);
+        else await AssertPrepareTimeoutAsync(fixture, fixture.Worker);
         Assert.False(fixture.Process.HasExited);
     }
 
@@ -93,10 +93,43 @@ public sealed class UpdateParentHandoffTests
     {
         await using var fixture = await Fixture.OpenAsync();
         using var input = new UncooperativeInput();
-        await fixture.StartAsync(TimeSpan.FromMilliseconds(500), input: input);
-        Assert.Equal("update_handoff_timeout",
-            (await Assert.ThrowsAsync<UpdateHandoffException>(() => fixture.Pending!)).Code);
+        await AssertPrepareTimeoutAsync(fixture, input);
+        Assert.True(input.ReadStarted);
         Assert.False(fixture.Process.HasExited);
+    }
+
+    [Fact]
+    public async Task DoesNotHangWhenTheBorrowedReadyOutputIgnoresCancellation()
+    {
+        await using var fixture = await Fixture.OpenAsync();
+        using var output = new UncooperativeOutput();
+        fixture.Track(UpdateParentHandoff.WaitForCommittedExitAsync(fixture.Parent, fixture.Worker, output,
+            TimeSpan.FromMilliseconds(500), TimeSpan.FromMilliseconds(500), fixture.Deadline.Token));
+        Assert.Equal("update_handoff_timeout",
+            (await Assert.ThrowsAsync<UpdateHandoffException>(() => fixture.Pending!.WaitAsync(fixture.Deadline.Token))).Code);
+        Assert.True(output.WriteStarted);
+        Assert.False(fixture.Deadline.IsCancellationRequested);
+        Assert.False(fixture.Process.HasExited);
+    }
+
+    private static async Task AssertPrepareTimeoutAsync(Fixture fixture, Stream input)
+    {
+        // Publish ready synchronously so the short deadline measures waiting for a decision.
+        using var output = new MemoryStream();
+        fixture.Track(UpdateParentHandoff.WaitForCommittedExitAsync(fixture.Parent, input, output,
+            TimeSpan.FromMilliseconds(500), TimeSpan.FromMilliseconds(500), fixture.Deadline.Token));
+        Assert.Equal("update_handoff_timeout",
+            (await Assert.ThrowsAsync<UpdateHandoffException>(() => fixture.Pending!.WaitAsync(fixture.Deadline.Token))).Code);
+        Assert.False(fixture.Deadline.IsCancellationRequested);
+        output.Position = 0;
+        var bytes = await FrameCodec.ReadAsync(output, UpdateHandoffChallenge.MaximumMessageBytes, fixture.Deadline.Token);
+        Assert.NotNull(bytes);
+        var ready = JsonSerializer.Deserialize<UpdateParentReady>(bytes, AudioJson.Options);
+        Assert.NotNull(ready);
+        Assert.Equal(fixture.Parent.Identity, ready.Parent);
+        Assert.Equal("update_parent_ready", ready.Event);
+        Assert.Matches("^[0-9a-f]{64}$", ready.Challenge);
+        Assert.Equal(output.Length, output.Position);
     }
 
     internal sealed class Fixture(NamedPipeServerStream worker, NamedPipeClientStream main) : IAsyncDisposable
@@ -198,12 +231,17 @@ public sealed class UpdateParentHandoffTests
     private sealed class UncooperativeInput : Stream
     {
         private readonly TaskCompletionSource<int> read = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal bool ReadStarted { get; private set; }
         public override bool CanRead => true;
         public override bool CanSeek => false;
         public override bool CanWrite => false;
         public override long Length => throw new NotSupportedException();
         public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
-        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default) => new(read.Task);
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            ReadStarted = true;
+            return new(read.Task);
+        }
         public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
         public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
         public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
@@ -212,6 +250,32 @@ public sealed class UpdateParentHandoffTests
         protected override void Dispose(bool disposing)
         {
             if (disposing) read.TrySetResult(0);
+            base.Dispose(disposing);
+        }
+    }
+
+    private sealed class UncooperativeOutput : Stream
+    {
+        private readonly TaskCompletionSource write = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal bool WriteStarted { get; private set; }
+        public override bool CanRead => false;
+        public override bool CanSeek => false;
+        public override bool CanWrite => true;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            WriteStarted = true;
+            return new(write.Task);
+        }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Flush() => throw new NotSupportedException();
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) write.TrySetResult();
             base.Dispose(disposing);
         }
     }
