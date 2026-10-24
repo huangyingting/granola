@@ -480,6 +480,11 @@ until that physical-close promise resolves. A failed close still reports its
 error, but cannot admit another capture or let repeated deletion attempts remove
 that recording's audio while the original helper remains alive. The saved failure
 and deletion journal remain available; confirmed exit releases the fence.
+Saved-recording inspection, recovery and upload helpers retain the same
+physical-exit fence. A rejected close keeps audio operations busy, prevents
+replacement helpers and scheduled uploads, and preserves pending audio deletions.
+Confirmed exit releases only the matching helper and reconsiders existing
+explicit upload intents; it does not create consent or restart paid AI work.
 Main also retains the actual installer-worker session until physical closure.
 `closeReady`, application quit and the last-window path share an exit fence:
 ordinary exit seals new worker preparation and waits for cancellation, while only

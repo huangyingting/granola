@@ -28,6 +28,14 @@ type AudioClient = Pick<
   AudioHostClient,
   'request' | 'readChunk' | 'close' | 'failure' | 'stopped'
 >;
+type RecordingReview = {
+  client: AudioClient;
+  profile: string;
+  document: string;
+  id: string;
+  revoked: boolean;
+  abort?: AbortController;
+};
 export interface RecordingUploadContext {
   profile: string;
   scope: number;
@@ -76,14 +84,7 @@ export class RecordingController {
   private running = false;
   private closing: Promise<void> | null = null;
   private cleaning: Promise<void> | null = null;
-  private reviewing: {
-    client: AudioClient;
-    profile: string;
-    document: string;
-    id: string;
-    revoked: boolean;
-    abort?: AbortController;
-  } | null = null;
+  private reviewing: RecordingReview | null = null;
   private uploadContext: RecordingUploadContext | null = null;
   private uploadTask: Promise<void> | null = null;
   private uploadAbort: AbortController | null = null;
@@ -129,7 +130,7 @@ export class RecordingController {
     return this.client !== null && this.owner !== null;
   }
   private async exclusive<T>(operation: () => Promise<T>): Promise<T> {
-    if (this.running || this.closing)
+    if (this.running || this.closing || this.reviewing)
       throw new LocalError(
         'audio_busy',
         'Wait for the current audio operation to finish.',
@@ -675,12 +676,29 @@ export class RecordingController {
   ) {
     return this.review(profile, document, id, authorize, true);
   }
+  private retainReview(review: RecordingReview) {
+    this.reviewing = review;
+    void this.background
+      .track(
+        review.client.stopped.then(() => {
+          if (this.reviewing !== review) return;
+          this.reviewing = null;
+          this.changed();
+          this.resumeUploads(this.uploadContext);
+        }),
+      )
+      .catch((error: unknown) => this.report(error));
+  }
+  private async releaseReview(review: RecordingReview) {
+    review.revoked = true;
+    await review.client.close();
+    await review.client.stopped;
+  }
   private async closeReview() {
     const review = this.reviewing;
     if (review) {
-      review.revoked = true;
       review.abort?.abort();
-      await review.client.close();
+      await this.releaseReview(review);
     }
     if (this.uploadTask) await this.uploadTask;
   }
@@ -706,6 +724,7 @@ export class RecordingController {
     if (
       this.client ||
       this.running ||
+      this.reviewing ||
       ['starting', 'recording', 'paused'].includes(recording.state)
     )
       throw new LocalError(
@@ -827,7 +846,14 @@ export class RecordingController {
         this.uploadAbort?.abort();
       return;
     }
-    if (!context || this.running || this.closing || this.client) return;
+    if (
+      !context ||
+      this.running ||
+      this.closing ||
+      this.client ||
+      this.reviewing
+    )
+      return;
     let intent: RecordingUploadIntent | null;
     try {
       context.authorize();
@@ -1129,14 +1155,14 @@ export class RecordingController {
       check();
       if (this.reviewing?.abort === abort) return this.reviewing.client;
       const client = this.create(() => {});
-      this.reviewing = {
+      this.retainReview({
         client,
         profile,
         document: intent.document_id,
         id: intent.recording_id,
         revoked: false,
         abort,
-      };
+      });
       return client;
     };
     try {
@@ -1153,13 +1179,7 @@ export class RecordingController {
       });
     } finally {
       const review = this.reviewing;
-      if (review?.abort === abort) {
-        try {
-          await review.client.close();
-        } finally {
-          if (this.reviewing === review) this.reviewing = null;
-        }
-      }
+      if (review?.abort === abort) await this.releaseReview(review);
     }
   }
   private async review(
@@ -1188,7 +1208,7 @@ export class RecordingController {
         );
       const client = this.create(() => {});
       const review = { client, profile, document, id, revoked: false };
-      this.reviewing = review;
+      this.retainReview(review);
       const check = () => {
         authorize();
         if (review.revoked)
@@ -1296,11 +1316,7 @@ export class RecordingController {
                 },
         });
       } finally {
-        try {
-          await client.close();
-        } finally {
-          if (this.reviewing === review) this.reviewing = null;
-        }
+        await this.releaseReview(review);
       }
     });
   }
@@ -1344,7 +1360,7 @@ export class RecordingController {
           : null,
       ...page,
       offset,
-      busy: this.running || this.closing !== null,
+      busy: this.running || this.closing !== null || this.reviewing !== null,
       pending_deletions: this.local.pendingRecordingDeletions().length,
       error: this.error,
       cleanup_error: this.cleanupError,

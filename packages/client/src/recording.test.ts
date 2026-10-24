@@ -210,6 +210,112 @@ describe('durable desktop capture coordination with a real framed helper process
     expect(controller.capturing).toBe(false);
     await controller.close(() => {});
   });
+  it.each(['inspect', 'recover'] as const)(
+    'retains the %s helper after a failed close until physical exit permits another operation',
+    async (operation) => {
+      const profile = 'offline',
+        draft = local.create(profile),
+        tracks = choices();
+      const recording = local.beginRecording(profile, draft.id, tracks);
+      const { controller, create } = setup(
+        operation === 'inspect' ? 'inspection' : 'recovery',
+        undefined,
+        [JSON.stringify(tracks[0])],
+      );
+      const pending = controller[operation](
+        profile,
+        draft.id,
+        recording.id,
+        () => {},
+      );
+      const [client] = clients;
+      if (!client) throw new Error('The framed review helper was not created.');
+      let stopped = false;
+      void client.stopped.then(() => {
+        stopped = true;
+      });
+      const failure = new Error(
+        'Synthetic close failure before physical exit.',
+      );
+      const close = vi.spyOn(client, 'close').mockRejectedValue(failure);
+      try {
+        await expect(pending).rejects.toBe(failure);
+        expect(
+          (await client.request({ command: 'list_devices' })).event_type,
+        ).toBe('devices');
+        expect(stopped).toBe(false);
+        expect(controller.snapshot(profile, draft.id).busy).toBe(true);
+        for (const next of ['inspect', 'recover'] as const)
+          await expect(
+            controller[next](profile, draft.id, recording.id, () => {}),
+          ).rejects.toMatchObject({ code: 'audio_busy' });
+        await expect(
+          controller.start(profile, draft.id, choices(), () => {}),
+        ).rejects.toMatchObject({ code: 'audio_busy' });
+        await expect(controller.listDevices()).rejects.toMatchObject({
+          code: 'audio_busy',
+        });
+        expect(create).toHaveBeenCalledTimes(1);
+        expect(controller.snapshot(profile, draft.id).error?.code).toBe(
+          'audio_operation_failed',
+        );
+      } finally {
+        close.mockRestore();
+        await client.close();
+      }
+      await client.stopped;
+      expect(stopped).toBe(true);
+      expect(controller.snapshot(profile, draft.id).busy).toBe(false);
+      await controller[operation](profile, draft.id, recording.id, () => {});
+      expect(create).toHaveBeenCalledTimes(2);
+      await controller.close(() => {});
+    },
+  );
+  it.each(['inspect', 'recover'] as const)(
+    'preserves the deletion journal until the %s helper physically exits after a failed close',
+    async (operation) => {
+      const profile = 'offline',
+        draft = local.create(profile),
+        tracks = choices();
+      const recording = local.beginRecording(profile, draft.id, tracks);
+      const { controller, remove } = setup(
+        operation === 'inspect' ? 'inspection' : 'recovery',
+        undefined,
+        [JSON.stringify(tracks[0])],
+      );
+      const pending = controller[operation](
+        profile,
+        draft.id,
+        recording.id,
+        () => {},
+      );
+      const [client] = clients;
+      if (!client) throw new Error('The framed review helper was not created.');
+      const failure = new Error(
+        'Synthetic close failure before physical exit.',
+      );
+      const close = vi.spyOn(client, 'close').mockRejectedValue(failure);
+      try {
+        await expect(pending).rejects.toBe(failure);
+        local.remove(profile, draft.id);
+        for (let attempt = 0; attempt < 2; attempt++)
+          await expect(controller.cleanup()).rejects.toBe(failure);
+        expect(remove).not.toHaveBeenCalled();
+        expect(local.pendingRecordingDeletions()).toEqual([recording.id]);
+        expect(
+          (await client.request({ command: 'list_devices' })).event_type,
+        ).toBe('devices');
+      } finally {
+        close.mockRestore();
+        await client.close();
+      }
+      await client.stopped;
+      await controller.cleanup();
+      expect(remove).toHaveBeenCalledExactlyOnceWith(recording.id);
+      expect(local.pendingRecordingDeletions()).toEqual([]);
+      await controller.close(() => {});
+    },
+  );
   it('keeps framed level previews ephemeral, profile-scoped and separate from saved audio across pause/resume', async () => {
     const draft = local.create('offline');
     const { controller } = setup('capture-levels');

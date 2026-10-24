@@ -190,7 +190,8 @@ describe.skipIf(!databaseUrl || !endpoint)(
     };
     const s3 = new S3Client({ ...config, forcePathStyle: true });
     let bucketCreated = false,
-      schemaCreated = false;
+      schemaCreated = false,
+      clientSequence = 0;
     let admin: Database, db: Database, blobs: RecordingBlobs;
     let app: Awaited<ReturnType<typeof createServer>>, base: string;
     const controllers = new Set<RecordingController>(),
@@ -211,7 +212,11 @@ describe.skipIf(!databaseUrl || !endpoint)(
       blobs = new RecordingBlobs(config);
       app = await createServer(
         db,
-        { mode: 'development', host: '127.0.0.1' },
+        {
+          mode: 'development',
+          host: '127.0.0.1',
+          trustedProxies: ['127.0.0.1/32'],
+        },
         blobs,
       );
       base = await app.listen({ host: '127.0.0.1', port: 0 });
@@ -261,7 +266,8 @@ describe.skipIf(!databaseUrl || !endpoint)(
     });
     async function context(initialMode = 'archive') {
       const subject = randomUUID(),
-        profile = `synthetic:${subject}`;
+        profile = `synthetic:${subject}`,
+        clientAddress = `2001:db8::${(++clientSequence).toString(16)}`;
       const actor = await db.provision(
         'urn:windows-ai-notes:development',
         subject,
@@ -323,7 +329,10 @@ describe.skipIf(!databaseUrl || !endpoint)(
       controllers.add(controller);
       const api = new ApiClient(
         base,
-        async () => ({ 'x-dev-subject': subject }),
+        async () => ({
+          'x-dev-subject': subject,
+          'x-forwarded-for': clientAddress,
+        }),
         { allowLoopback: true },
       );
       const upload = {
@@ -443,6 +452,144 @@ describe.skipIf(!databaseUrl || !endpoint)(
       );
       expect(c.create).toHaveBeenCalledTimes(1);
       expect(c.remove).not.toHaveBeenCalled();
+    });
+    it('retains the upload helper and fences repeated deletion after a failed close until physical exit', async () => {
+      const c = await context();
+      const create = c.create.getMockImplementation();
+      if (!create) throw new Error('The framed upload factory is unavailable.');
+      const failure = new Error(
+        'Synthetic close failure before physical exit.',
+      );
+      let client: AudioHostClient | undefined;
+      let close: MockInstance<AudioHostClient['close']> | undefined;
+      c.create.mockImplementationOnce(() => {
+        client = create();
+        close = vi.spyOn(client, 'close').mockRejectedValue(failure);
+        return client;
+      });
+      try {
+        c.controller.requestUpload(c.profile, c.doc.id, c.recording.id, false);
+        await vi.waitFor(() => expect(close).toHaveBeenCalled());
+        if (!client)
+          throw new Error('The framed upload helper was not created.');
+        expect(
+          (await client.request({ command: 'list_devices' })).event_type,
+        ).toBe('devices');
+        expect(c.status()?.state).toBe('complete');
+        expect(c.controller.snapshot(c.profile, c.doc.id).error?.code).toBe(
+          'audio_operation_failed',
+        );
+        await expect(c.controller.stop(() => {})).rejects.toBe(failure);
+        c.controller.resumeUploads(c.upload);
+        expect(c.controller.snapshot(c.profile, c.doc.id).busy).toBe(true);
+        await expect(
+          c.controller.inspect(c.profile, c.doc.id, c.recording.id, () => {}),
+        ).rejects.toMatchObject({ code: 'audio_busy' });
+        expect(() =>
+          c.controller.requestUpload(
+            c.profile,
+            c.doc.id,
+            c.recording.id,
+            false,
+          ),
+        ).toThrow('current audio operation');
+        c.local.remove(c.profile, c.doc.id);
+        for (let attempt = 0; attempt < 2; attempt++)
+          await expect(c.controller.cleanup()).rejects.toBe(failure);
+        expect(c.create).toHaveBeenCalledTimes(1);
+        expect(c.remove).not.toHaveBeenCalled();
+        expect(c.local.pendingRecordingDeletions()).toEqual([c.recording.id]);
+      } finally {
+        close?.mockRestore();
+        await client?.close();
+      }
+      if (!client) throw new Error('The framed upload helper was not created.');
+      await client.stopped;
+      await c.controller.cleanup();
+      expect(c.remove).toHaveBeenCalledExactlyOnceWith(c.recording.id);
+      expect(c.local.pendingRecordingDeletions()).toEqual([]);
+      expect(c.controller.snapshot(c.profile, null).busy).toBe(false);
+    });
+    it('keeps queued uploads fenced after a failed helper close and resumes them only after physical exit', async () => {
+      const c = await context();
+      const spec = source(),
+        chunk = randomUUID();
+      const next = c.local.beginRecording(c.profile, c.doc.id, [spec]);
+      c.local.updateRecording(c.profile, c.doc.id, next.id, {
+        state: 'sealed',
+      });
+      const create = c.create.getMockImplementation();
+      if (!create) throw new Error('The framed upload factory is unavailable.');
+      const failure = new Error(
+        'Synthetic close failure before physical exit.',
+      );
+      let client: AudioHostClient | undefined;
+      let close: MockInstance<AudioHostClient['close']> | undefined;
+      c.create
+        .mockImplementationOnce(() => {
+          client = create();
+          close = vi.spyOn(client, 'close').mockRejectedValue(failure);
+          return client;
+        })
+        .mockImplementationOnce(() => {
+          const helper = new AudioHostClient(
+            process.execPath,
+            [
+              fixture,
+              'archive',
+              JSON.stringify(spec),
+              next.id,
+              spec.track_id,
+              chunk,
+            ],
+            () => {},
+          );
+          clients.add(helper);
+          return helper;
+        });
+      try {
+        c.controller.requestUpload(c.profile, c.doc.id, c.recording.id, false);
+        await vi.waitFor(() => expect(close).toHaveBeenCalled());
+        if (!client)
+          throw new Error('The framed upload helper was not created.');
+        expect(
+          (await client.request({ command: 'list_devices' })).event_type,
+        ).toBe('devices');
+        expect(c.status()?.state).toBe('complete');
+        c.local.saveRecordingUpload(c.profile, {
+          recording_id: next.id,
+          document_id: c.doc.id,
+          state: 'queued',
+          verified_chunks: 0,
+          total_chunks: 0,
+          verified_bytes: 0,
+          partial: false,
+          attempts: 0,
+          retry_at: 0,
+          error: null,
+          accept_incomplete: false,
+          plan: null,
+        });
+        c.controller.resumeUploads(c.upload);
+        expect(c.create).toHaveBeenCalledTimes(1);
+        expect(
+          c.local.recordingUploadStatus(c.profile, c.doc.id, next.id)?.state,
+        ).toBe('queued');
+      } finally {
+        close?.mockRestore();
+        await client?.close();
+      }
+      await vi.waitFor(() =>
+        expect(
+          c.local.recordingUploadStatus(c.profile, c.doc.id, next.id)?.state,
+        ).toBe('complete'),
+      );
+      expect(c.create).toHaveBeenCalledTimes(2);
+      expect((await db.recordings.get(c.actor.user_id, next.id)).state).toBe(
+        'ready',
+      );
+      await c.controller.stop(() => {});
+      expect(c.controller.snapshot(c.profile, c.doc.id).busy).toBe(false);
     });
     it('pauses native reads and network work durably, never automatically resuming a paused intent', async () => {
       const c = await context('archive-stall-read');
