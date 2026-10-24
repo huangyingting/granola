@@ -171,6 +171,50 @@ describe('Windows desktop synthetic service contract', () => {
     ).toEqual({ jobs });
     expect(desktopStateSchema.parse(state)).toEqual(state);
   });
+  it.each(['/v1/me', '/v1/workspaces'] as const)(
+    'holds authenticated %s replies without holding an unauthorized request',
+    async (path) => {
+      await connect();
+      let release!: () => void;
+      let started!: () => void;
+      const ready = new Promise<void>((resolve) => {
+        started = resolve;
+      });
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const onRequest = vi.fn(started);
+      fixture.state.accountGate = { path, started: onRequest, release: held };
+      const read = (api: ApiClient) =>
+        path === '/v1/me' ? api.identity() : api.workspaces();
+      const unauthorized = new ApiClient(fixture.url, async () => ({}), {
+        allowLoopback: true,
+      });
+      await expect(read(unauthorized)).rejects.toMatchObject({ status: 401 });
+      expect(onRequest).not.toHaveBeenCalled();
+      const context = controller.recordingUploadContext();
+      if (!context)
+        throw new Error('The synthetic cloud account is unavailable.');
+      const resolved = vi.fn(),
+        rejected = vi.fn();
+      const observing = read(context.api).then(resolved, rejected);
+      try {
+        await Promise.race([ready, observing]);
+        expect(onRequest).toHaveBeenCalledTimes(1);
+        expect(resolved).not.toHaveBeenCalled();
+        expect(rejected).not.toHaveBeenCalled();
+      } finally {
+        release();
+        await observing;
+      }
+      expect(rejected).not.toHaveBeenCalled();
+      expect(resolved).toHaveBeenCalledExactlyOnceWith(
+        path === '/v1/me'
+          ? { id: fixture.state.user }
+          : { workspaces: fixture.state.workspaces },
+      );
+    },
+  );
   it('library cache detaches summary objects and tags across warm desktop snapshots', async () => {
     fixture.seed('A synthetic library note.');
     await connect();

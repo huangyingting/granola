@@ -207,6 +207,11 @@ export async function desktopFixture() {
     chat_resume_tokens: [] as string[],
     chat_event_cursors: [] as number[],
     chat_online: true,
+    accountGate: null as {
+      path: '/v1/me' | '/v1/workspaces';
+      started: () => void;
+      release: Promise<void>;
+    } | null,
     workspaces: [{ id: workspace, name: 'Synthetic cloud workspace' }],
     failures: [] as unknown[],
     usage,
@@ -684,6 +689,11 @@ export async function desktopFixture() {
       }
       if (!state.active)
         return error(response, 'identity_not_provisioned', 403);
+      const gate = state.accountGate;
+      if (gate?.path === path) {
+        gate.started();
+        await gate.release;
+      }
       if (path === '/v1/me') return send(response, { id: user });
       if (path === '/v1/usage') return send(response, state.usage);
       if (path === '/v1/templates')
