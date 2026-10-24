@@ -107,6 +107,43 @@ async function cacheArtifact(
     { directory, id, artifact, value },
   );
 }
+async function encryptedJobs(
+  application: ElectronApplication,
+  directory: string,
+  id: string,
+) {
+  return application.evaluate(
+    (_, { directory, id }) => {
+      const { join } = process.getBuiltinModule('node:path');
+      const { DatabaseSync } = process.getBuiltinModule('node:sqlite');
+      const { createHash } = process.getBuiltinModule('node:crypto');
+      const sql = new DatabaseSync(join(directory, 'notes.sqlite'), {
+        readOnly: true,
+      });
+      try {
+        return sql
+          .prepare(
+            'SELECT id,payload FROM vault WHERE document_id=? AND id LIKE ? ORDER BY profile,id',
+          )
+          .all(id, `artifact:${id}:job%`)
+          .map((row) => {
+            if (
+              typeof row.id !== 'string' ||
+              !(row.payload instanceof Uint8Array)
+            )
+              throw new Error('The encrypted job artifact is unavailable.');
+            return {
+              id: row.id,
+              digest: createHash('sha256').update(row.payload).digest('hex'),
+            };
+          });
+      } finally {
+        sql.close();
+      }
+    },
+    { directory, id },
+  );
+}
 test('recovers consented chat and recovery receipts across Windows restarts, inspects encrypted frozen history offline and reconciles conversation deletion', async () => {
   test.setTimeout(180_000);
   const directory = await mkdtemp(join(tmpdir(), 'windows-notes-chat-ui-'));
@@ -628,11 +665,16 @@ test('recovers one summary and resume receipt, inspects frozen evidence, persist
     if (!restored.ok || !('state' in restored))
       throw new Error('The restored job metadata did not cross preload.');
     expect(restored.state.jobs).toEqual(delivered.jobs);
+    const encrypted = await encryptedJobs(application, directory, remote.id);
+    expect(encrypted).toHaveLength(2);
     const revalidated = fixture.state.job_history_responses.not_modified;
     fixture.change(remote.id, 'Newer human cloud notes remain authoritative.');
     await synchronize(application);
     expect(fixture.state.job_history_responses.not_modified).toBeGreaterThan(
       revalidated,
+    );
+    expect(await encryptedJobs(application, directory, remote.id)).toEqual(
+      encrypted,
     );
     await page
       .getByRole('button', { name: 'Inspect source 1', exact: true })

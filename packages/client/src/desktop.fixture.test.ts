@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -30,6 +30,26 @@ describe('Windows desktop synthetic service contract', () => {
     content: richTextFromPlainText(text),
     tags: [],
   });
+  function encryptedJobs(id: string) {
+    const sql = new DatabaseSync(join(directory, 'notes.sqlite'), {
+      readOnly: true,
+    });
+    try {
+      return sql
+        .prepare(
+          'SELECT id,payload FROM vault WHERE profile=? AND document_id=? AND id LIKE ? ORDER BY id',
+        )
+        .all(controller.profile, id, `artifact:${id}:job%`)
+        .map((row) => ({
+          id: z.string().parse(row.id),
+          digest: createHash('sha256')
+            .update(z.instanceof(Uint8Array).parse(row.payload))
+            .digest('hex'),
+        }));
+    } finally {
+      sql.close();
+    }
+  }
   beforeEach(async () => {
     fixture = await desktopFixture();
     directory = mkdtempSync(join(tmpdir(), 'windows-notes-desktop-fixture-'));
@@ -163,9 +183,12 @@ describe('Windows desktop synthetic service contract', () => {
       'job-history',
       full,
     );
+    const encrypted = encryptedJobs(document.id);
+    expect(encrypted).toHaveLength(21);
     fixture.change(document.id, 'A later synthetic human edit.');
     await controller.synchronize();
     expect(fixture.state.job_history_responses.not_modified).toBeGreaterThan(0);
+    expect(encryptedJobs(document.id)).toEqual(encrypted);
     expect(
       local.getArtifact(controller.profile, document.id, 'job-history', full),
     ).toEqual(before);

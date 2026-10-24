@@ -1,7 +1,8 @@
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import {
   afterAll,
   afterEach,
@@ -45,6 +46,26 @@ describe.skipIf(!databaseUrl)(
       const store = new LocalStore(join(directory, name), key);
       stores.add(store);
       return store;
+    }
+    function encryptedJobs(id: string) {
+      const sql = new DatabaseSync(join(directory, 'notes.sqlite'), {
+        readOnly: true,
+      });
+      try {
+        return sql
+          .prepare(
+            'SELECT id,payload FROM vault WHERE profile=? AND document_id=? AND id LIKE ? ORDER BY id',
+          )
+          .all(engine.profile, id, `artifact:${id}:job%`)
+          .map((row) => ({
+            id: z.string().parse(row.id),
+            digest: createHash('sha256')
+              .update(z.instanceof(Uint8Array).parse(row.payload))
+              .digest('hex'),
+          }));
+      } finally {
+        sql.close();
+      }
     }
     function fields(text: string) {
       return {
@@ -174,11 +195,14 @@ describe.skipIf(!databaseUrl)(
       stores.delete(local);
       local = open();
       engine = new SyncEngine(local, api, actor.user_id, actor.workspace_id);
+      const encrypted = encryptedJobs(remote.id);
+      expect(encrypted).toHaveLength(2);
       await db.edit(actor.user_id, remote.id, 2, {
         title: 'An unrelated metadata edit.',
       });
       await engine.synchronize();
       expect(deliveries.map((delivery) => delivery.status)).toEqual([200, 304]);
+      expect(encryptedJobs(remote.id)).toEqual(encrypted);
       expect(deliveries[0]!.tag).toBeNull();
       expect(deliveries[1]!.tag).toMatch(/^"[a-f0-9]{64}"$/);
       expect(
@@ -192,6 +216,38 @@ describe.skipIf(!databaseUrl)(
           jobSchema,
         ),
       ).toEqual(cached!.jobs[0]);
+    });
+    it('unchanged full200 history avoids encrypted artifact writes when an older server ignores revalidation', async () => {
+      const remote = await seed();
+      await enqueueSummary(remote.id);
+      await finishSummary();
+      await db.edit(actor.user_id, remote.id, 1, {
+        notes: 'A newer human note before older-server revalidation.',
+      });
+      await engine.synchronize();
+      const encrypted = encryptedJobs(remote.id);
+      expect(encrypted).toHaveLength(2);
+      const fetch = globalThis.fetch;
+      const statuses: number[] = [];
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+        if (!String(input).includes(`/documents/${remote.id}/jobs?`))
+          return fetch(input, init);
+        const headers = new Headers(init?.headers);
+        expect(headers.get('if-none-match')).toMatch(/^"[a-f0-9]{64}"$/);
+        headers.delete('if-none-match');
+        const response = await fetch(input, { ...init, headers });
+        statuses.push(response.status);
+        return response;
+      });
+      await db.edit(actor.user_id, remote.id, 2, {
+        title: 'An older-server metadata update.',
+      });
+      await engine.synchronize();
+      expect(statuses).toEqual([200]);
+      expect(encryptedJobs(remote.id)).toEqual(encrypted);
+      expect(local.get(engine.profile, remote.id).title).toBe(
+        'An older-server metadata update.',
+      );
     });
     it('conditional history replaces changed job results and never suppresses workspace revocation', async () => {
       const remote = await seed();

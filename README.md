@@ -305,7 +305,13 @@ Authorization and document visibility are checked before revalidation, and the
 client requires a matching receipt rather than substituting cached success for
 errors, revocation or cancellation. Full results remain encrypted and available
 offline after restart. This saves unchanged response bytes, not the server's
-history query/serialization or Main's full-cache decryption and writes.
+history query/serialization or Main's full-cache decryption. Synchronization
+compares cached artifacts inside the same SQLite transaction and skips encryption
+and writes for identical values, including when an older server returns `200`.
+Changed and missing artifacts are still saved atomically with the document and
+cursor. Damaged cached ciphertext is reported without replacing it or advancing
+the cursor; explicit artifact writes keep their existing replacement behavior.
+This does not eliminate document/cursor writes or establish a cold-cache latency SLO.
 
 ```sh
 pnpm audio:publish

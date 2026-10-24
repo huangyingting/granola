@@ -8,6 +8,7 @@ import {
 import { existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
 import {
   documentSchema,
@@ -555,6 +556,15 @@ export class LocalStore {
     id: string,
     value: unknown,
   ): void {
+    this.writeArtifact(profile, document, id, value, false);
+  }
+  private writeArtifact(
+    profile: string,
+    document: string,
+    id: string,
+    value: unknown,
+    skipUnchanged: boolean,
+  ): void {
     const row = this.row(profile, document);
     const payload = row ? this.payload(row) : null;
     if (
@@ -568,6 +578,25 @@ export class LocalStore {
         'The artifact document is no longer available.',
       );
     const name = `artifact:${document}:${id}`;
+    if (skipUnchanged) {
+      const saved = this.database
+        .prepare(
+          'SELECT document_id,payload FROM vault WHERE profile=? AND id=?',
+        )
+        .get(profile, name);
+      if (
+        saved?.document_id === document &&
+        isDeepStrictEqual(
+          this.open(
+            z.unknown(),
+            z.instanceof(Uint8Array).parse(saved.payload),
+            aad('vault2', profile, name, document),
+          ),
+          value,
+        )
+      )
+        return;
+    }
     this.database
       .prepare(
         `
@@ -1922,11 +1951,12 @@ export class LocalStore {
             'invalid_server_response',
             'A snapshot artifact belongs to another page.',
           );
-        this.putArtifact(
+        this.writeArtifact(
           profile,
           artifact.document_id,
           artifact.id,
           artifact.value,
+          true,
         );
       }
       if (page.has_more)
@@ -1974,7 +2004,13 @@ export class LocalStore {
             );
           this.applyRemote(profile, update.document);
           for (const artifact of update.artifacts)
-            this.putArtifact(profile, update.id, artifact.id, artifact.value);
+            this.writeArtifact(
+              profile,
+              update.id,
+              artifact.id,
+              artifact.value,
+              true,
+            );
         }
       }
       this.putValue(profile, 'sync:checkpoint', { cursor, bootstrap: null });

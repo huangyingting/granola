@@ -1778,6 +1778,266 @@ describe('encrypted local drafts and durable outbox', () => {
     ).toThrow('no longer available');
     expect(store.list(profile)).toHaveLength(0);
   });
+  function synchronizedArtifacts(
+    text = 'Saved synthetic result.',
+  ): { id: string; value: unknown }[] {
+    const jobs = [
+      { id: '1', state: 'succeeded', summary: text.repeat(200) },
+      { id: '2', state: 'succeeded', summary: 'Another saved result.' },
+    ];
+    return [
+      ...jobs.map((job) => ({ id: `job:${job.id}`, value: job })),
+      { id: 'job-history', value: { jobs } },
+    ];
+  }
+  function synchronizedStore() {
+    const store = open();
+    const source = store.create('fixtures', fields('Original meeting.'));
+    const artifacts = synchronizedArtifacts();
+    store.acceptSnapshot(
+      profile,
+      store.beginSnapshot(profile).bootstrap!,
+      {
+        documents: [remote(source)],
+        cursor: 'artifact_cursor_1',
+        has_more: false,
+        next_after: null,
+      },
+      artifacts.map((artifact) => ({ document_id: source.id, ...artifact })),
+    );
+    return { store, source, artifacts };
+  }
+  function acceptArtifacts(
+    store: LocalStore,
+    source: Draft,
+    artifacts: { id: string; value: unknown }[],
+    mode: 'snapshot' | 'changes',
+  ) {
+    const document = remote(source, 2, { title: 'Updated meeting metadata.' });
+    if (mode === 'snapshot')
+      store.acceptSnapshot(
+        profile,
+        store.beginSnapshot(profile).bootstrap!,
+        {
+          documents: [document],
+          cursor: 'artifact_cursor_2',
+          has_more: false,
+          next_after: null,
+        },
+        artifacts.map((artifact) => ({ document_id: source.id, ...artifact })),
+      );
+    else
+      store.acceptChanges(profile, 'artifact_cursor_1', 'artifact_cursor_2', [
+        { id: source.id, document, artifacts },
+      ]);
+  }
+  function watchArtifactWrites() {
+    const sql = new DatabaseSync(path);
+    sql.exec(`
+      CREATE TABLE fixture_artifact_writes(profile TEXT, document_id TEXT, name TEXT);
+      CREATE TRIGGER fixture_artifact_insert AFTER INSERT ON vault
+        WHEN NEW.document_id IS NOT NULL BEGIN
+          INSERT INTO fixture_artifact_writes VALUES(NEW.profile,NEW.document_id,NEW.id);
+        END;
+      CREATE TRIGGER fixture_artifact_update AFTER UPDATE ON vault
+        WHEN NEW.document_id IS NOT NULL BEGIN
+          INSERT INTO fixture_artifact_writes VALUES(NEW.profile,NEW.document_id,NEW.id);
+        END;
+    `);
+    return {
+      sql,
+      writes: (document: string) =>
+        sql
+          .prepare(
+            'SELECT name FROM fixture_artifact_writes WHERE profile=? AND document_id=? ORDER BY rowid',
+          )
+          .all(profile, document)
+          .map((row) => z.string().parse(row.name)),
+    };
+  }
+  it.each(['snapshot', 'changes'] as const)(
+    'unchanged synchronized artifacts avoid encryption and SQLite writes during %s',
+    (mode) => {
+      const { store, source, artifacts } = synchronizedStore();
+      const probe = watchArtifactWrites();
+      try {
+        acceptArtifacts(store, source, structuredClone(artifacts), mode);
+        expect(probe.writes(source.id)).toEqual([]);
+        expect(store.get(profile, source.id).title).toBe(
+          'Updated meeting metadata.',
+        );
+        expect(store.syncCheckpoint(profile).cursor).toBe('artifact_cursor_2');
+        for (const artifact of artifacts)
+          expect(
+            store.getArtifact(profile, source.id, artifact.id, z.unknown()),
+          ).toEqual(artifact.value);
+      } finally {
+        probe.sql.close();
+      }
+    },
+  );
+  it('unchanged synchronized artifacts remain write-free after encrypted restart', () => {
+    const saved = synchronizedStore();
+    close(saved.store);
+    const store = open();
+    const probe = watchArtifactWrites();
+    try {
+      acceptArtifacts(store, saved.source, saved.artifacts, 'changes');
+      expect(probe.writes(saved.source.id)).toEqual([]);
+      expect(
+        store.getArtifact(profile, saved.source.id, 'job-history', z.unknown()),
+      ).toEqual(saved.artifacts.at(-1)!.value);
+    } finally {
+      probe.sql.close();
+    }
+  });
+  it.each([
+    { name: 'null', before: null, after: null },
+    {
+      name: 'reordered object keys',
+      before: { state: 'succeeded', result: { first: 1, second: 2 } },
+      after: { result: { second: 2, first: 1 }, state: 'succeeded' },
+    },
+  ])('unchanged synchronized artifacts support $name', ({ before, after }) => {
+    const { store, source, artifacts } = synchronizedStore();
+    store.putArtifact(profile, source.id, 'other-artifact', before);
+    const probe = watchArtifactWrites();
+    try {
+      acceptArtifacts(
+        store,
+        source,
+        [...artifacts, { id: 'other-artifact', value: after }],
+        'changes',
+      );
+      expect(probe.writes(source.id)).toEqual([]);
+      expect(
+        store.getArtifact(profile, source.id, 'other-artifact', z.unknown()),
+      ).toEqual(after);
+    } finally {
+      probe.sql.close();
+    }
+  });
+  it.each(['snapshot', 'changes'] as const)(
+    'synchronized artifacts update changed values and restore missing rows during %s',
+    (mode) => {
+      const { store, source } = synchronizedStore();
+      store.deleteArtifact(profile, source.id, 'job:2');
+      const artifacts = synchronizedArtifacts('Changed synthetic result.');
+      const probe = watchArtifactWrites();
+      try {
+        acceptArtifacts(store, source, artifacts, mode);
+        expect(probe.writes(source.id)).toEqual([
+          `artifact:${source.id}:job:1`,
+          `artifact:${source.id}:job:2`,
+          `artifact:${source.id}:job-history`,
+        ]);
+        for (const artifact of artifacts)
+          expect(
+            store.getArtifact(profile, source.id, artifact.id, z.unknown()),
+          ).toEqual(artifact.value);
+      } finally {
+        probe.sql.close();
+      }
+    },
+  );
+  it('synchronized artifacts recheck another connection instead of trusting an earlier saved value', () => {
+    const { store, source, artifacts } = synchronizedStore();
+    const writer = open();
+    writer.putArtifact(profile, source.id, 'job:1', {
+      state: 'queued',
+      summary: 'A different live cached value.',
+    });
+    const probe = watchArtifactWrites();
+    try {
+      acceptArtifacts(store, source, artifacts, 'changes');
+      expect(probe.writes(source.id)).toEqual([`artifact:${source.id}:job:1`]);
+      expect(
+        store.getArtifact(profile, source.id, 'job:1', z.unknown()),
+      ).toEqual(artifacts[0]!.value);
+    } finally {
+      probe.sql.close();
+    }
+  });
+  it('synchronized artifacts preserve profile isolation and explicit force-write behavior', () => {
+    const { store, source, artifacts } = synchronizedStore();
+    store.applyRemote('another-account', remote(source));
+    const probe = watchArtifactWrites();
+    try {
+      store.putArtifact(
+        'another-account',
+        source.id,
+        artifacts[0]!.id,
+        artifacts[0]!.value,
+      );
+      store.putArtifact(
+        profile,
+        source.id,
+        artifacts[0]!.id,
+        artifacts[0]!.value,
+      );
+      expect(probe.writes(source.id)).toEqual([`artifact:${source.id}:job:1`]);
+      probe.sql.exec('DELETE FROM fixture_artifact_writes');
+      acceptArtifacts(store, source, artifacts, 'changes');
+      expect(probe.writes(source.id)).toEqual([]);
+      expect(
+        store.getArtifact(
+          'another-account',
+          source.id,
+          artifacts[0]!.id,
+          z.unknown(),
+        ),
+      ).toEqual(artifacts[0]!.value);
+    } finally {
+      probe.sql.close();
+    }
+  });
+  it('synchronized artifacts roll back changed and unchanged values with their cursor on a later failure', () => {
+    const { store, source, artifacts } = synchronizedStore();
+    const probe = watchArtifactWrites();
+    try {
+      expect(() =>
+        store.acceptChanges(profile, 'artifact_cursor_1', 'artifact_cursor_2', [
+          {
+            id: source.id,
+            document: remote(source, 2),
+            artifacts: synchronizedArtifacts('Uncommitted result.'),
+          },
+          {
+            id: randomUUID(),
+            document: remote(source, 2),
+            artifacts: [],
+          },
+        ]),
+      ).toThrow('identifier');
+      expect(probe.writes(source.id)).toEqual([]);
+      expect(store.syncCheckpoint(profile).cursor).toBe('artifact_cursor_1');
+      expect(
+        store.getArtifact(profile, source.id, 'job-history', z.unknown()),
+      ).toEqual(artifacts.at(-1)!.value);
+      acceptArtifacts(store, source, artifacts, 'changes');
+      expect(probe.writes(source.id)).toEqual([]);
+    } finally {
+      probe.sql.close();
+    }
+  });
+  it('synchronized artifacts report damaged ciphertext without replacing it or advancing the cursor', () => {
+    const { store, source, artifacts } = synchronizedStore();
+    const probe = watchArtifactWrites();
+    try {
+      probe.sql
+        .prepare('UPDATE vault SET payload=? WHERE profile=? AND id=?')
+        .run(Buffer.from([1]), profile, `artifact:${source.id}:job:1`);
+      probe.sql.exec('DELETE FROM fixture_artifact_writes');
+      expect(() =>
+        acceptArtifacts(store, source, artifacts, 'changes'),
+      ).toThrow('could not be unlocked');
+      expect(probe.writes(source.id)).toEqual([]);
+      expect(store.syncCheckpoint(profile).cursor).toBe('artifact_cursor_1');
+      expect(store.get(profile, source.id).title).toBe(source.title);
+    } finally {
+      probe.sql.close();
+    }
+  });
   it('deletes only the exact literal artifact prefix in its document and profile', () => {
     const store = open(),
       source = store.create('fixtures', fields('Original.')),
